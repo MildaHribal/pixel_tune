@@ -2,3 +2,7 @@
 *.log
 *.tmp
 .thermal_ids
+# lokální zálohy a archivy (velké, jen na laptopu)
+.laptop-preV2-backup/
+*.tgz
+*.tar.zst

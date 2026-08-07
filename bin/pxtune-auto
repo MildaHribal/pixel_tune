@@ -131,16 +131,21 @@ APPMODE="$STATE/appmode.active"      # stav vrstvy 3 (jen pro cteni, pise pxtune
 #   v NECINNOSTI pri skin 44,6 C uz byl telefon zaskrcen na
 #                         Little 610 / Big 910 / Prime 1164 MHz, GPU 376 MHz
 #
-# THERM_WARN_MC = 41000
-#   40,5 C je STROP VLASTNIHO OHREVU - vic ze sebe telefon pri stock rizeni
-#   a plne zatezi vsech 9 jader nedostal. Cokoli nad 41,0 C tedy NELZE
-#   vysvetlit jen vlastni zatezi; je v tom vnejsi teplo (slunce, kapsa,
-#   nabijeni, drzak v aute). Prave tam ma nas zasah co resit.
-THERM_WARN_MC=41000
+# THERM_WARN_MC = 40000  (uroven 1)
+#   RESEARCH-2026-08 cast C: prah je nastaven TESNE POD prah VIRTUAL-SKIN-CPU-MID
+#   (41,0 C), kde HAL zacina PID regulaci. Merena hodnota 40,5 C je STROP
+#   VLASTNIHO OHREVU (vic ze sebe telefon pri stock rizeni a plne zatezi vsech
+#   9 jader nedostal), takze uroven 1 sepne prave na hrane toho, co zarizeni
+#   zvlada nativne - drive, nez HAL zacne skrtit podle CPU-MID.
+#   (Drive 41000; posunuto na 40,0 podle researche - 41000 uz bylo NAD prahem
+#    CPU-MID a demon tedy reagoval az kdyz HAL zacal skrtit.)
+THERM_WARN_MC=40000
 #
-# THERM_HOT_MC = 43000  (+2,5 C nad merenym ustalenym stavem)
-#   Predchozi verze demona reagovala az tady a nic vic - to bylo cele
-#   reaktivni. Ted je 43 C az druhy stupen ze ctyr.
+# THERM_HOT_MC = 43000  (uroven 2)
+#   = 3. prah VIRTUAL-SKIN-CPU-HIGH (43,0 C). Nad nim uz HAL skrti tvrde.
+#   Uroven 2 zaroven BEZPODMINECNE sundava thermal prop "game"
+#   (viz therm_prop_maxskin_guard nize) - nad MAX_SKIN uz nesmi zustat vypnute
+#   CPU thermal throttling. Ted je 43 C druhy stupen ze ctyr.
 THERM_HOT_MC=43000
 #
 # THERM_CRIT_MC = 45000
@@ -148,10 +153,13 @@ THERM_HOT_MC=43000
 #   bodem HAL zadnou rezervu nema a nas zasah je levnejsi nez to, co udela on.
 THERM_CRIT_MC=45000
 #
-# THERM_OK_MC = 40000  (<= mereny ustaleny stav 40,5 C)
-#   Navrat na uroven 0 az kdyz je situace zpatky uvnitr toho, co zarizeni
-#   zvlada nativne.
-THERM_OK_MC=40000
+# THERM_OK_MC = 38100  (uroven 1 -> 0)
+#   HYSTEREZE 1,9 C pod urovni 1 (40000 - 1900 = 38100). Navrat na uroven 0 az
+#   kdyz je skin opravdu dole, ne hned pod prahem. 1,9 C je ZAMERNE STEJNA
+#   hodnota, jakou pouziva thermal HAL (HotHysteresis ve /vendor configu u vsech
+#   ctyr VIRTUAL-SKIN senzoru) - diky tomu nas automat nekmita proti jeho
+#   rozhodovani. (Drive 40000, tj. hystereze jen 1,0 C proti tehdejsimu WARN 41000.)
+THERM_OK_MC=38100
 
 # ---------------------------------------------------------------- teplota: junction
 #
@@ -344,8 +352,20 @@ CAMERA_PKGS="com.google.android.GoogleCamera com.android.camera com.google.andro
 # Balicky, na ktere se nereaguje (prechodne popredi behem odemykani apod.)
 IGNORE_PKGS="com.android.systemui android com.google.android.permissioncontroller"
 
-# 1 = demon smi vratit thermal prop z hodnoty "game" na default (prop_guard).
+# 1 = demon smi vratit thermal prop z hodnoty "game" na default (prop_guard,
+#     therm_prop_maxskin_guard).
 THERMAL_PROP_CLEAR=1
+
+# THERM_GAME_MAXSKIN_MC = 41000
+#   Skin nad touhle teplotou => thermal prop "game" se BEZPODMINECNE sundá
+#   (therm_prop_maxskin_guard), i kdyz jinak per-app APP_THERMAL_CAP=1 drzi
+#   profil "game". Zrcadli THERMAL_PROFILE_MAX_SKIN v game.conf (41 C = horni
+#   prah VIRTUAL-SKIN-CPU-MID) a stejnojmennou kontrolu pri aplikaci v bin/pxtune
+#   (profile_apply). game.conf pres "game" vypina CPU throttling ze 2 ze 4 skin
+#   senzoru; nad MAX_SKIN uz je to nebezpecne ("hrani na slunci") a pojistka ze
+#   skinu se stava zodpovednosti modulu.
+#   POZOR: hodnota se drzi rucne v souladu s THERMAL_PROFILE_MAX_SKIN v game.conf.
+THERM_GAME_MAXSKIN_MC=41000
 
 # 1 = zkusit `pxtune profile X --auto --reset` (pozadavek R1). Kdyz to CLI
 # neumi, demon to sam pozna a prepne se na volani bez --reset.
@@ -572,10 +592,11 @@ cfg_bool() {
 }
 
 cfg_clamp_all() {
-    cfg_int THERM_WARN_MC        20000   90000    41000
+    cfg_int THERM_WARN_MC        20000   90000    40000
     cfg_int THERM_HOT_MC         20000   95000    43000
     cfg_int THERM_CRIT_MC        20000   99000    45000
-    cfg_int THERM_OK_MC          15000   90000    40000
+    cfg_int THERM_OK_MC          15000   90000    38100
+    cfg_int THERM_GAME_MAXSKIN_MC 20000  90000    41000
     cfg_int JUNC_WARN_MC         30000  110000    70000
     cfg_int JUNC_HOT_MC          30000  115000    78000
     cfg_int JUNC_MAX_LEVEL           0       3        2
@@ -1299,6 +1320,37 @@ prop_guard() {
     return 0
 }
 
+# therm_prop_maxskin_guard - skin-triggena pojistka nad THERM_GAME_MAXSKIN_MC.
+#
+# Druha (a jedina dalsi) vyjimka ze zasady "demon nezapisuje", stejne
+# opodstatnena jako prop_guard: je to uklid po VLASTNIM game.conf, ne ladeni.
+# game.conf nastavuje thermal prop na "game" a tim vypina CPU thermal throttling
+# ze 2 ze 4 skin senzoru. prop_guard resi jen prechod na jiny profil - JENZE
+# per-app pravidlo s APP_THERMAL_CAP=1 (typicky hra na primem slunci) drzi profil
+# "game" i pri teplotni urovni 1, takze prop by nad MAX_SKIN zustal viset a
+# telefon by se uvaril. Tahle pojistka to sundá bez ohledu na aktivni profil,
+# jakmile skin prekroci MAX_SKIN. NIKDY nesahne na "camera" - tu rezirujec system.
+#
+# Bezforkova, dokud je skin pod prahem: getprop (fork) se vola az NAD MAX_SKIN,
+# coz je vzacny stav. Vola se z on_tick() po sense(), tj. v teplotni smycce.
+# Spolupracuje s bodem 1: SKIN_MC uz naplnilo sense().
+therm_prop_maxskin_guard() {
+    [ "$THERMAL_PROP_CLEAR" = "1" ] || return 0
+    [ "$SKIN_MC" -gt 0 ] || return 0
+    [ "$SKIN_MC" -ge "$THERM_GAME_MAXSKIN_MC" ] || return 0
+    for _mgp in "$THERM_PROP_MID" "$THERM_PROP_HIGH"; do
+        _mgc=$(getprop "$_mgp" 2>/dev/null)
+        if [ "$_mgc" = "game" ]; then
+            if setprop "$_mgp" "" 2>/dev/null; then
+                log WARN "$_mgp sundán z 'game' (skin ${SKIN_MC}mC >= ${THERM_GAME_MAXSKIN_MC}mC MAX_SKIN; jinak by za horka zustalo VYPNUTE CPU thermal throttling)"
+            else
+                log ERROR "$_mgp je 'game' nad MAX_SKIN a nejde sundat - CPU thermal throttling zustava za horka vypnute"
+            fi
+        fi
+    done
+    return 0
+}
+
 # ===========================================================================
 # PER-APP PRAVIDLA
 #
@@ -1961,6 +2013,9 @@ on_foreground() {
 
 on_tick() {
     sense
+    # Skin-triggena pojistka: nad MAX_SKIN sundej "game" thermal prop, i kdyz
+    # per-app APP_THERMAL_CAP jinak drzi profil game (viz funkce vyse).
+    therm_prop_maxskin_guard
     if therm_eval; then
         # Uroven se zmenila -> zasah bez cekani na anti-flap. Kdyz uz nas HAL
         # bude 84 s uvolnovat, nema smysl pridavat vlastni prodlevu.

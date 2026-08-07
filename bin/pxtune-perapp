@@ -1211,6 +1211,99 @@ cmd_json() {
 }
 
 # ===========================================================================
+# cmd_preset - hotove sablony pro bezne kategorie aplikaci (nejen PoGO)
+#
+# Preset jen sestavi rozumnou sadu KLIC=HODNOTA a preda ji cmd_set (stejna
+# validace i zapis). Uzivatel muze potom doladit `pxtune app set`em.
+#
+# POCTIVE: skutecne per-app je jen vrstva 1 (Game Mode - a ta plati jen na to,
+# co GameManager bere jako hru). APP_PROFILE je GLOBALNI profil, ktery se jen
+# prepne po dobu, co je aplikace v popredi, a vrati se pri odchodu. Refresh
+# rate je zatim vypnuty (REFRESH_VERIFIED=0), takze presety s nim nepocitaji.
+# ===========================================================================
+cmd_preset() {
+	_pp="$1"; [ "$#" -ge 1 ] && shift
+	case "$_pp" in
+		''|-h|--help|help)
+			msg "pxtune app preset <pkg> <druh> [APP_DESC=\"...\"]"
+			msg "  druh: game | game-max | video | social | saver"
+			msg ""
+			msg "  game      3D hra, vykon se stropem na teplo (jako PoGO)"
+			msg "  game-max  plny vykon bez downscale (kratke relace/benchmark)"
+			msg "  video     streamovani - vyvazeny profil, bez zbytecneho boostu"
+			msg "  social    scrollovaci appky - registrace + balanced"
+			msg "  saver     priskrceni zrouta na pozadi (powersave ve popredi)"
+			msg ""
+			msg "  Priklad: pxtune app preset com.instagram.android saver"
+			return 0 ;;
+	esac
+	valid_pkg "$_pp" || die 1 "neplatny balicek: '$_pp'"
+	_pk="$1"; [ "$#" -ge 1 ] && shift
+
+	# volitelny APP_DESC="..." jako dalsi argument
+	_pdesc=""
+	while [ "$#" -gt 0 ]; do
+		case "$1" in APP_DESC=*) _pdesc="$1" ;; esac
+		shift
+	done
+
+	case "$_pk" in
+		game)
+			# 3D hry na delsi hrani (PoGO, Genshin, CoD): vykon se stropem na teplo.
+			set -- APP_ENABLED=1 APP_PROFILE=game GAME_MODE=performance \
+				GAME_FPS=60 GAME_DOWNSCALE=0.7 APP_THERMAL_CAP=1 \
+				APP_PRIORITY=90 APP_STICKY_SEC=25 APP_MIN_FG_SEC=8
+			[ -n "$_pdesc" ] || _pdesc="APP_DESC=hra (preset game)"
+			;;
+		game-max)
+			# kratke narocne relace / benchmark: plny vykon, bez downscale.
+			set -- APP_ENABLED=1 APP_PROFILE=performance GAME_MODE=performance \
+				GAME_FPS=0 GAME_DOWNSCALE=disable APP_THERMAL_CAP=1 \
+				APP_PRIORITY=95 APP_STICKY_SEC=20 APP_MIN_FG_SEC=8
+			[ -n "$_pdesc" ] || _pdesc="APP_DESC=hra naplno (preset game-max)"
+			;;
+		video)
+			# streamovani (YouTube, Netflix): dekodovani je HW, boost netreba.
+			# Nejvetsi uspora by byla 60 Hz - ceka na overeni refresh klicu.
+			set -- APP_ENABLED=1 APP_PROFILE=balanced \
+				APP_PRIORITY=50 APP_STICKY_SEC=20 APP_MIN_FG_SEC=8
+			[ -n "$_pdesc" ] || _pdesc="APP_DESC=video/stream (preset video)"
+			;;
+		social)
+			# scrollovaci appky (Instagram, Chrome, TikTok): jen registrace +
+			# vyvazeny profil. Paky jsou tu omezene, viz poznamka nahore.
+			set -- APP_ENABLED=1 APP_PROFILE=balanced \
+				APP_PRIORITY=40 APP_STICKY_SEC=20
+			[ -n "$_pdesc" ] || _pdesc="APP_DESC=social/scroll (preset social)"
+			;;
+		saver)
+			# zrouti na pozadi, ktere chces ve popredi PRISKRTIT (powersave profil).
+			set -- APP_ENABLED=1 APP_PROFILE=powersave \
+				APP_PRIORITY=30 APP_STICKY_SEC=15
+			[ -n "$_pdesc" ] || _pdesc="APP_DESC=setric (preset saver)"
+			;;
+		''|-h|--help)
+			msg "pxtune app preset <pkg> <druh> [APP_DESC=\"...\"]"
+			msg "  druh: game | game-max | video | social | saver"
+			msg ""
+			msg "  game      3D hra, vykon se stropem na teplo (jako PoGO)"
+			msg "  game-max  plny vykon bez downscale (kratke relace/benchmark)"
+			msg "  video     streamovani - vyvazeny profil, bez zbytecneho boostu"
+			msg "  social    scrollovaci appky - registrace + balanced"
+			msg "  saver     priskrceni zrouta na pozadi (powersave ve popredi)"
+			return 0
+			;;
+		*)
+			die 1 "neznamy preset '$_pk' (game|game-max|video|social|saver)"
+			;;
+	esac
+
+	set -- "$@" "$_pdesc"
+	msg "Nasazuji preset '$_pk' na $_pp ..."
+	cmd_set "$_pp" "$@"
+}
+
+# ===========================================================================
 # usage / main
 # ===========================================================================
 usage() {
@@ -1220,6 +1313,7 @@ pxtune app - per-app profily (pxtune-perapp $PERAPP_VERSION)
   pxtune app list                     seznam pravidel
   pxtune app show <pkg>               podrobnosti jednoho pravidla
   pxtune app set <pkg> KLIC=HOD ...   vytvorit/upravit pravidlo (+ nasadit vrstvu 1)
+  pxtune app preset <pkg> <druh>      hotova sablona: game|game-max|video|social|saver
   pxtune app rm <pkg>                 smazat pravidlo (predtim sundat vrstvu 3)
   pxtune app sync <pkg>               znovu nasadit vrstvu 1 a vypsat, co system hlasi
   pxtune app json [--live]            strojovy vystup pro WebUI (bez --live zadny binder)
@@ -1250,6 +1344,7 @@ main() {
 		list)  cmd_list "$@" ;;
 		show)  [ -n "$1" ] || die 1 "pouziti: pxtune app show <pkg>"; cmd_show "$1" ;;
 		set)   [ -n "$1" ] || die 1 "pouziti: pxtune app set <pkg> KLIC=HODNOTA..."; cmd_set "$@" ;;
+		preset) cmd_preset "$@" ;;
 		rm)    [ -n "$1" ] || die 1 "pouziti: pxtune app rm <pkg>"; cmd_rm "$1" ;;
 		sync)  [ -n "$1" ] || die 1 "pouziti: pxtune app sync <pkg>"; cmd_sync "$1" ;;
 		enter) [ -n "$1" ] || die 1 "pouziti: pxtune app enter <pkg>"; cmd_enter "$1" ;;

@@ -12,7 +12,7 @@
 # zadne settings - tedy zadny binder. WebUI ho vola pres ksu.exec (root shell)
 # kazdych 5 s a dumpsys pod su na tomhle zarizeni visi na binderu.
 
-PXTUNE_VERSION="1.2.0"
+PXTUNE_VERSION="1.3.0"
 
 # ---------------------------------------------------------------------------
 # Cesty
@@ -212,9 +212,70 @@ UCLAMP_GROUPS="top-app foreground background system-background camera-daemon nna
 PROFILE_KEYS="UCLAMP_TOPAPP_MIN UCLAMP_TOPAPP_MAX UCLAMP_FG_MIN UCLAMP_FG_MAX
 UCLAMP_BG_MIN UCLAMP_BG_MAX UCLAMP_SYSBG_MIN UCLAMP_SYSBG_MAX
 GPU_MAX_FREQ GPU_MIN_FREQ GPU_POWER_POLICY
-THERMAL_PROFILE_CPU_MID THERMAL_PROFILE_CPU_HIGH
+THERMAL_PROFILE_CPU_MID THERMAL_PROFILE_CPU_HIGH THERMAL_PROFILE_MAX_SKIN
 VM_SWAPPINESS VM_DIRTY_RATIO VM_DIRTY_BG_RATIO VM_VFS_CACHE_PRESSURE
-IO_READAHEAD_KB CHARGE_STOP_LEVEL"
+IO_READAHEAD_KB CHARGE_STOP_LEVEL
+VS_DVFS_HEADROOM VS_BG_UCLAMP_MAX VS_TA_UCLAMP_MIN VS_FG_UCLAMP_MIN VS_TA_PREFER_IDLE
+SCHED_LIMIT_FREQ_LITTLE SCHED_LIMIT_FREQ_MID SCHED_LIMIT_FREQ_BIG
+SCHED_DOWN_RATE_MID SCHED_DOWN_RATE_BIG
+DEVFREQ_MIF_TARGET_LOAD DEVFREQ_MIF_MIN DEVFREQ_DSU_MIN
+CPUPM_CL1_RESIDENCY CPUPM_CL2_RESIDENCY
+GPU_DVFS_PERIOD THERMAL_CDEV_BYPASS"
+
+# --- KONTRAKT v2: mapa klic -> uzel -> druh -------------------------------
+# Tabulka pro set_v2()/snapshot/revert. Format tokenu: KLIC:CESTA:DRUH,
+# oddeleno mezerami (cesty neobsahuji mezeru ani dvojtecku). DRUHY:
+#   int      - cele cislo (is_int); kernel u limit_frequency zaokrouhli na
+#              nejblizsi platny OPP, wr() to nebere jako chybu (jen zaloguje).
+#   bool01   - 0 nebo 1 (uzel si to prevede na false/true - overeno na zarizeni)
+#   load     - dvojice celych cisel "N M" (devfreq interactive/target_load)
+#   enum1020 - 10 nebo 20 (mali dvfs_period)
+# THERMAL_CDEV_BYPASS neni v tabulce - pise se na TRI uzly, resi se zvlast.
+#
+# POZOR na vlastnictvi: nody vsched.*, sched_pixel/*, scaling_max_freq a devfreq
+# prepisuje power HAL pri hintu LAUNCH. Profil je nasadi, ale proti LAUNCH se
+# ubranit nelze (a nema smysl). Proto jsou i v registru s flagem reapply.
+V2_TABLE="VS_DVFS_HEADROOM:/proc/vendor_sched/dvfs_headroom:int
+VS_BG_UCLAMP_MAX:/proc/vendor_sched/groups/bg/uclamp_max:int
+VS_TA_UCLAMP_MIN:/proc/vendor_sched/groups/ta/uclamp_min:int
+VS_FG_UCLAMP_MIN:/proc/vendor_sched/groups/fg/uclamp_min:int
+VS_TA_PREFER_IDLE:/proc/vendor_sched/groups/ta/prefer_idle:bool01
+SCHED_LIMIT_FREQ_LITTLE:$CPUFREQ/policy0/sched_pixel/limit_frequency:int
+SCHED_LIMIT_FREQ_MID:$CPUFREQ/policy4/sched_pixel/limit_frequency:int
+SCHED_LIMIT_FREQ_BIG:$CPUFREQ/policy8/sched_pixel/limit_frequency:int
+SCHED_DOWN_RATE_MID:$CPUFREQ/policy4/sched_pixel/down_rate_limit_us:int
+SCHED_DOWN_RATE_BIG:$CPUFREQ/policy8/sched_pixel/down_rate_limit_us:int
+DEVFREQ_MIF_TARGET_LOAD:/sys/class/devfreq/17000010.devfreq_mif/interactive/target_load:load
+DEVFREQ_MIF_MIN:/sys/devices/platform/17000010.devfreq_mif/devfreq/17000010.devfreq_mif/min_freq:int
+DEVFREQ_DSU_MIN:/sys/devices/platform/17000090.devfreq_dsu/devfreq/17000090.devfreq_dsu/min_freq:int
+CPUPM_CL1_RESIDENCY:/sys/devices/platform/cpupm/cpupm/cpd_cl1_target_residency:int
+CPUPM_CL2_RESIDENCY:/sys/devices/platform/cpupm/cpupm/cpd_cl2_target_residency:int
+GPU_DVFS_PERIOD:$MALI/dvfs_period:enum1020"
+
+# Namerene stock hodnoty v2 uzlu (probe 2026-08-07, akita:16/CP1A.260505.005).
+# Slouzi jako fallback pri revertu, kdyz stock.conf tyhle klice jeste nema
+# (stary snapshot z doby pred v2). Stejny vzor jako DEF_GPU_MAX apod.
+DEF_V2_VS_DVFS_HEADROOM="1100"
+DEF_V2_VS_BG_UCLAMP_MAX="130"
+DEF_V2_VS_TA_UCLAMP_MIN="1"
+DEF_V2_VS_FG_UCLAMP_MIN="0"
+DEF_V2_VS_TA_PREFER_IDLE="0"
+DEF_V2_SCHED_LIMIT_FREQ_LITTLE="1328000"
+DEF_V2_SCHED_LIMIT_FREQ_MID="1836000"
+DEF_V2_SCHED_LIMIT_FREQ_BIG="2363000"
+DEF_V2_SCHED_DOWN_RATE_MID="500"
+DEF_V2_SCHED_DOWN_RATE_BIG="500"
+DEF_V2_DEVFREQ_MIF_TARGET_LOAD="20 40"
+DEF_V2_DEVFREQ_MIF_MIN="421000"
+DEF_V2_DEVFREQ_DSU_MIN="324000"
+DEF_V2_CPUPM_CL1_RESIDENCY="10000"
+DEF_V2_CPUPM_CL2_RESIDENCY="10000"
+DEF_V2_GPU_DVFS_PERIOD="20"
+
+# Tri CPU cooling devices pro THERMAL_CDEV_BYPASS (user_vote_bypass). Stock 0.
+CDEV_BYPASS_NODES="/dev/thermal/cdev-by-name/thermal-cpufreq-0/user_vote_bypass
+/dev/thermal/cdev-by-name/thermal-cpufreq-1/user_vote_bypass
+/dev/thermal/cdev-by-name/thermal-cpufreq-2/user_vote_bypass"
 
 # Blokova zarizeni pro read_ahead_kb
 IO_DEVS="sda sdb sdc sdd"
@@ -688,6 +749,14 @@ snapshot_stock() {
 		printf 'STOCK_ZRAM_DISKSIZE="%s"\n'        "$(rd_def "$ZRAM/disksize" "")"
 		printf 'STOCK_ZRAM_ALGORITHM="%s"\n'       "$(bracket "$(rd_def "$ZRAM/comp_algorithm" "")")"
 		printf 'STOCK_SCHED_UTIL_CLAMP_MIN="%s"\n' "$(rd_def /proc/sys/kernel/sched_util_clamp_min "")"
+
+		# kontrakt v2 - stock hodnoty novych uzlu (pro revert). Fresh instalace
+		# je zachyti z aktualniho (=stock) stavu; na starem snapshotu chybi a
+		# revert pak pouzije DEF_V2_* fallback.
+		for _e in $V2_TABLE; do
+			_vk="${_e%%:*}"; _vrest="${_e#*:}"; _vp="${_vrest%:*}"
+			printf 'STOCK_%s="%s"\n' "$_vk" "$(rd_def "$_vp" "")"
+		done
 	} > "$_tmp" 2>/dev/null
 
 	if [ -s "$_tmp" ]; then
@@ -980,6 +1049,58 @@ set_gpu() {
 	return 0
 }
 
+# v2_valid <druh> <hodnota> - vrati 0 kdyz hodnota sedi na druh uzlu.
+v2_valid() {
+	case "$1" in
+		int)      is_int "$2" ;;
+		bool01)   case "$2" in 0|1) return 0 ;; *) return 1 ;; esac ;;
+		enum1020) case "$2" in 10|20) return 0 ;; *) return 1 ;; esac ;;
+		load)     # dvojice celych cisel "N M"
+			case "$2" in
+				*[!0-9\ ]*) return 1 ;;
+				*' '*) is_int "${2%% *}" && is_int "${2##* }" ;;
+				*) return 1 ;;
+			esac ;;
+		*) return 1 ;;
+	esac
+}
+
+# set_v2 - nasadi klice kontraktu v2 z PF_* na uzly. Prazdne = nesahat.
+# Vola se z profile_apply() az PO restore_stock_values(), takze stock je
+# jiz obnoven a prazdny klic korektne znamena "nech stock".
+set_v2() {
+	_e=""
+	for _e in $V2_TABLE; do
+		_vk="${_e%%:*}"
+		_vrest="${_e#*:}"
+		_vp="${_vrest%:*}"
+		_vkind="${_vrest##*:}"
+		eval "_vv=\$PF_$_vk"
+		[ -n "$_vv" ] || continue
+		if v2_valid "$_vkind" "$_vv"; then
+			wr "$_vp" "$_vv"
+		else
+			vfail "neplatna hodnota '$_vv' pro $_vk (druh $_vkind)"
+		fi
+	done
+
+	# THERMAL_CDEV_BYPASS - riziko 3, pise na TRI CPU cooling devices najednou.
+	# Zadny dodavany profil to nenastavuje; smysl ma jen kratkodobe s vlastni
+	# teplotni pojistkou. Prazdne = nesahat.
+	if [ -n "$PF_THERMAL_CDEV_BYPASS" ]; then
+		if v2_valid bool01 "$PF_THERMAL_CDEV_BYPASS"; then
+			[ "$PF_THERMAL_CDEV_BYPASS" = "1" ] && \
+				log WARN "THERMAL_CDEV_BYPASS=1: VYPINAM skin-driven CPU throttling na 3 cdev (riziko 3, telefon se ohreje)"
+			for _bn in $CDEV_BYPASS_NODES; do
+				[ -e "$_bn" ] && wr "$_bn" "$PF_THERMAL_CDEV_BYPASS"
+			done
+		else
+			vfail "neplatny THERMAL_CDEV_BYPASS '$PF_THERMAL_CDEV_BYPASS' (0|1)"
+		fi
+	fi
+	return 0
+}
+
 # set_vm_one <klic> <cesta> <hodnota>
 set_vm_one() {
 	[ -n "$3" ] || return 0
@@ -1104,6 +1225,21 @@ auto_signal() {
 	return 0
 }
 
+# skin_mc_v -> V = skin teplota (quiet_therm) v milicelsiich, "" kdyz necitelne.
+# Cte pres stabilni symlink /dev/thermal/tz-by-name (indexy zon se posouvaji,
+# viz resolve_thermal_ids); fallback na resolvovany index skin: z THERMAL_ZONES.
+# Bez forku (rdv nastavuje globalni V).
+skin_mc_v() {
+	rdv "/dev/thermal/tz-by-name/quiet_therm/temp" ""
+	[ -n "$V" ] && return 0
+	_skmi=""
+	for _skz in $THERMAL_ZONES; do
+		case "$_skz" in skin:*) _skmi="${_skz#skin:}"; break ;; esac
+	done
+	[ -n "$_skmi" ] && rdv "$THERMAL/thermal_zone$_skmi/temp" ""
+	return 0
+}
+
 # profile_apply <jmeno> <0|1 = volano automatem>
 profile_apply() {
 	_name="$1"
@@ -1224,15 +1360,37 @@ profile_apply() {
 	# Prazdna hodnota = "nesahat" (kontrakt profilu), default se nevynucuje.
 	_tm="$PF_THERMAL_PROFILE_CPU_MID"
 	_th="$PF_THERMAL_PROFILE_CPU_HIGH"
+
+	# --- THERMAL_PROFILE_MAX_SKIN (°C) - pojistka proti "hrani na slunci" -----
+	# game.conf nastavuje thermal prop na "game", coz VYPINA CPU thermal
+	# throttling ze 2 ze 4 skin senzoru (SPEC: "Mode":"game" -> cdev Disabled).
+	# Kdyz je THERMAL_PROFILE_MAX_SKIN neprazdne a skin (quiet_therm) uz je NAD
+	# touhle teplotou, hodnotu "game" NENASADIME - jinak bychom za horka telefon
+	# uvarili. Ostatni hodnoty ("camera", "" = default) nejsou nebezpecne, ty
+	# pojistka nechava projit. Prazdny klic = pojistka vypnuta.
+	# Runtime dohled resi demon (therm_prop_maxskin_guard); tohle je kontrola
+	# v okamziku APLIKACE profilu.
+	_skin_over=0
+	if [ -n "$PF_THERMAL_PROFILE_MAX_SKIN" ] && is_int "$PF_THERMAL_PROFILE_MAX_SKIN"; then
+		skin_mc_v
+		if is_int "$V" && [ "$V" -gt "$((PF_THERMAL_PROFILE_MAX_SKIN * 1000))" ]; then
+			_skin_over=1
+		fi
+	fi
+
 	if [ "$PFSET_THERMAL_PROFILE_CPU_MID" = "1" ] && [ -n "$_tm" ]; then
-		if valid_thermal_profile "$_tm"; then
+		if [ "$_skin_over" = "1" ] && [ "$_tm" = "game" ]; then
+			log WARN "THERMAL_PROFILE_CPU_MID='game' NENASAZEN: skin nad THERMAL_PROFILE_MAX_SKIN=${PF_THERMAL_PROFILE_MAX_SKIN} C (jinak by za horka zustalo VYPNUTE CPU thermal throttling)"
+		elif valid_thermal_profile "$_tm"; then
 			set_thermal_profile "$THERMAL_SENSOR_MID" "$_tm"
 		else
 			vfail "neplatny THERMAL_PROFILE_CPU_MID '$_tm' (game|camera|prazdne)"
 		fi
 	fi
 	if [ "$PFSET_THERMAL_PROFILE_CPU_HIGH" = "1" ] && [ -n "$_th" ]; then
-		if valid_thermal_profile "$_th"; then
+		if [ "$_skin_over" = "1" ] && [ "$_th" = "game" ]; then
+			log WARN "THERMAL_PROFILE_CPU_HIGH='game' NENASAZEN: skin nad THERMAL_PROFILE_MAX_SKIN=${PF_THERMAL_PROFILE_MAX_SKIN} C (jinak by za horka zustalo VYPNUTE CPU thermal throttling)"
+		elif valid_thermal_profile "$_th"; then
 			set_thermal_profile "$THERMAL_SENSOR_HIGH" "$_th"
 		else
 			vfail "neplatny THERMAL_PROFILE_CPU_HIGH '$_th' (game|camera|prazdne)"
@@ -1254,6 +1412,10 @@ profile_apply() {
 			vfail "neplatny CHARGE_STOP_LEVEL '$_cs' (povoleno 1-100)"
 		fi
 	fi
+
+	# Klice kontraktu v2 (vendor_sched, sched_pixel/limit+down_rate, devfreq,
+	# cpupm residency, GPU dvfs_period, cdev bypass). Prazdne = nesahat.
+	set_v2
 
 	print -r -- "$_name" > "$ACTIVE_FILE" 2>/dev/null
 
@@ -1345,6 +1507,23 @@ cmd_revert() {
 	stock_getv STOCK_THERMAL_PROFILE_CPU_HIGH "$DEF_THERMAL_PROFILE"; _v="$SV"
 	valid_thermal_profile "$_v" || _v="$DEF_THERMAL_PROFILE"
 	set_thermal_profile "$THERMAL_SENSOR_HIGH" "$_v"
+
+	# kontrakt v2 - vrat nove uzly na stock. Ze stock.conf, jinak DEF_V2_*
+	# (stary snapshot z doby pred v2 tyhle klice nema). Uzly, ktere na tomhle
+	# buildu neexistuji, se preskoci ([ -e ]).
+	for _e in $V2_TABLE; do
+		_vk="${_e%%:*}"; _vrest="${_e#*:}"; _vp="${_vrest%:*}"; _vkind="${_vrest##*:}"
+		eval "_vdef=\$DEF_V2_$_vk"
+		stock_getv "STOCK_$_vk" "$_vdef"; _v="$SV"
+		[ -n "$_v" ] || _v="$_vdef"
+		v2_valid "$_vkind" "$_v" || _v="$_vdef"
+		[ -n "$_v" ] && [ -e "$_vp" ] && wr "$_vp" "$_v"
+	done
+	# THERMAL_CDEV_BYPASS: revert vzdy VYPNE (0) - bezpecny smer, at uz ho
+	# nastavil kdokoli. Stock je 0.
+	for _bn in $CDEV_BYPASS_NODES; do
+		[ -e "$_bn" ] && wr "$_bn" "0"
+	done
 
 	# Pri pouziti jako "reset pred profilem" tady koncime: rozliseni ani
 	# stavove soubory se nesmi sahat, to je vec plneho revertu.
@@ -1646,6 +1825,159 @@ res_watchdog() {
 }
 
 # ---------------------------------------------------------------------------
+# dpi - samostatna zmena hustoty displeje (nezavisle na rozliseni)
+#
+# MECHANISMUS (overeno na zarizeni 2026-08-07):
+#   `wm density <n>`  -> Override density: n  A ZAROVEN zapise
+#                        settings secure display_density_forced = n
+#   `wm density reset` -> override zrusi
+#
+#   POZOR: samotny `settings put secure display_density_forced` se NEPROJEVI.
+#   Overeno: zapis 380 nechal Override na 353. WindowManager musi hodnotu
+#   aplikovat, a to dela prave prikaz `wm`. Klic v settings je jen misto, kam
+#   si ji WM uklada pro pristi boot.
+#
+# HODNOTY
+#   Fyzicka hustota panelu je 420 (ro.sf.lcd_density).
+#   Uzivatel ma vlastni override 353 (mensi = vic obsahu na obrazovce).
+#   Rozsah 280-560 je zamerne konzervativni: pod 280 zacina byt UI necitelne
+#   drobne a systemove dialogy se rozbijeji, nad 560 se nevejdou tlacitka.
+#
+# POJISTKA
+#   Stejna jako u rozliseni: po zmene se ceka na `pxtune dpi confirm`.
+#   Bez potvrzeni se do DPI_TIMEOUT sekund vrati puvodni hodnota - takze i
+#   kdyz se UI stane neovladatelnym, samo se to opravi.
+#   Slepy navrat odkudkoli:  su -c "pxtune dpi reset"
+# ---------------------------------------------------------------------------
+DPI_MIN=280
+DPI_MAX=560
+DPI_TIMEOUT=60
+DPIPEND_FILE="$STATE_DIR/dpi_pending"
+
+# dpi_current -> aktualni ucinna hustota (Override, jinak fyzicka)
+dpi_current() {
+	stock_getv STOCK_DISPLAY_DENSITY_FORCED ""
+	_dc="$SV"
+	rdv "$DISPSTATE_FILE" ""
+	if [ -n "$V" ]; then
+		# shellcheck disable=SC2086
+		set -- $V
+		[ -n "${3:-}" ] && _dc="$3"
+	fi
+	if framework_ok; then
+		_q=$(settings_get secure display_density_forced)
+		[ -n "$_q" ] && _dc="$_q"
+	fi
+	[ -n "$_dc" ] || _dc="$NATIVE_DPI_HW"
+	printf '%s' "$_dc"
+}
+
+dpi_apply() {
+	# dpi_apply <hodnota|reset>
+	if ! framework_ok; then
+		warn "pxtune: prikaz 'wm' neni k dispozici (system jeste nenabehl?)"
+		return 2
+	fi
+	if [ "$1" = "reset" ]; then
+		if command -v timeout >/dev/null 2>&1; then
+			timeout 10 wm density reset >/dev/null 2>&1
+		else
+			wm density reset >/dev/null 2>&1
+		fi
+		log INFO "wm density reset"
+	else
+		if command -v timeout >/dev/null 2>&1; then
+			timeout 10 wm density "$1" >/dev/null 2>&1
+		else
+			wm density "$1" >/dev/null 2>&1
+		fi
+		log INFO "wm density $1"
+	fi
+	return 0
+}
+
+dpi_watchdog() {
+	_tok="$1"
+	_old="$2"
+	sleep "$DPI_TIMEOUT"
+	[ -f "$DPIPEND_FILE" ] || { log INFO "dpi watchdog ($_tok): potvrzeno"; return 0; }
+	_cur=$(rd "$DPIPEND_FILE") || _cur=""
+	case "$_cur" in
+		"$_tok"*) ;;
+		*) log INFO "dpi watchdog ($_tok): prisla novejsi zmena, koncim"; return 0 ;;
+	esac
+	log WARN "dpi watchdog ($_tok): potvrzeni neprislo, vracim $_old"
+	dpi_apply "$_old"
+	rm -f "$DPIPEND_FILE" 2>/dev/null
+	return 0
+}
+
+cmd_dpi() {
+	case "${1:-}" in
+		""|show|current)
+			msg "aktualni hustota : $(dpi_current) dpi"
+			msg "fyzicka panelu   : $NATIVE_DPI_HW dpi"
+			msg "povoleny rozsah  : $DPI_MIN - $DPI_MAX"
+			if [ -f "$DPIPEND_FILE" ]; then
+				msg "POZOR: ceka na potvrzeni - 'pxtune dpi confirm' (jinak se to vrati)"
+			fi
+			return 0
+			;;
+		confirm)
+			if [ -f "$DPIPEND_FILE" ]; then
+				rm -f "$DPIPEND_FILE" 2>/dev/null
+				msg "Potvrzeno, hustota $(dpi_current) dpi zustava."
+			else
+				msg "Nic k potvrzeni."
+			fi
+			return 0
+			;;
+		reset)
+			# slepy navrat - funguje i kdyz uzivatel na displej nevidi
+			stock_getv STOCK_DISPLAY_DENSITY_FORCED ""
+			_rd="$SV"
+			if is_int "$_rd"; then
+				dpi_apply "$_rd"
+				msg "Vraceno na ulozenou hustotu $_rd dpi."
+			else
+				dpi_apply reset
+				msg "Override zrusen, plati fyzicka hustota $NATIVE_DPI_HW dpi."
+			fi
+			rm -f "$DPIPEND_FILE" 2>/dev/null
+			return 0
+			;;
+	esac
+
+	_nd="$1"
+	if ! is_int "$_nd"; then
+		warn "pxtune: pouziti: pxtune dpi <$DPI_MIN-$DPI_MAX | show | confirm | reset>"
+		exit 1
+	fi
+	if [ "$_nd" -lt "$DPI_MIN" ] || [ "$_nd" -gt "$DPI_MAX" ]; then
+		warn "pxtune: $_nd je mimo bezpecny rozsah $DPI_MIN-$DPI_MAX"
+		warn "        Mimo nej se UI stava neovladatelnym."
+		exit 1
+	fi
+
+	_old=$(dpi_current)
+	dpi_apply "$_nd" || return 2
+
+	_tok="$(date '+%s' 2>/dev/null)-$$"
+	print -r -- "$_tok $_old" > "$DPIPEND_FILE" 2>/dev/null
+	if [ -x "$SELF" ]; then
+		nohup "$SELF" __dpi_watchdog "$_tok" "$_old" >/dev/null 2>&1 &
+	else
+		nohup /system/bin/sh "$SELF" __dpi_watchdog "$_tok" "$_old" >/dev/null 2>&1 &
+	fi
+	log INFO "dpi $_old -> $_nd (watchdog $_tok, timeout ${DPI_TIMEOUT}s)"
+
+	msg "Hustota nastavena na $_nd dpi (bylo $_old)."
+	msg "POJISTKA: do ${DPI_TIMEOUT} s spust 'pxtune dpi confirm',"
+	msg "          jinak se to samo vrati na $_old."
+	return 0
+}
+
+# ---------------------------------------------------------------------------
 # charge
 # ---------------------------------------------------------------------------
 cmd_charge() {
@@ -1748,6 +2080,203 @@ cmd_game() {
 
 	[ "$_rc" -eq 0 ] || return 2
 	return 0
+}
+
+# ---------------------------------------------------------------------------
+# zram - AKCE nad zram0 (ne profil)
+#
+# `pxtune zram writeback [sekundy]` - odsune komprimovane stranky, ktere jsou
+# necinne >= <sekundy> (default 3600 = 1 h), na backing device (loop50), a tim
+# uvolni RAM. Je to AKCE, ne nastaveni (jako wake_lock), proto CLI a ne profil.
+#
+# Bezpecnost UFS: writeback_limit_enable=1 + writeback_limit stropuje pocet
+# zapsanych stranek na 65536 (po 4 KiB = ~256 MiB / beh), aby se opakovanym
+# spoustenim zbytecne neopotreboval flash. Uzly idle/writeback jsou write-only
+# (prava 220), takze wr() u nich nemuze precist starou hodnotu (zaloguje '?') -
+# to je v poradku, jen se vzdy zapise. bd_stat je citelny, logujeme pred/po.
+#
+# NENI to nebezpecne jako swapoff (SPEC): writeback jen presouva stranky na disk,
+# swap zustava aktivni. Proto smi bezet za behu, na rozdil od zmen velikosti zramu.
+# ---------------------------------------------------------------------------
+zram_writeback() {
+	_age="${1:-3600}"
+	if ! is_int "$_age"; then
+		warn "pxtune: zram writeback <sekundy> chce cele cislo (vek necinnosti), vychozi 3600"
+		exit 1
+	fi
+	if [ ! -d "$ZRAM" ]; then
+		warn "pxtune: $ZRAM neexistuje"
+		return 2
+	fi
+	if [ ! -e "$ZRAM/writeback" ]; then
+		warn "pxtune: zram writeback neni podporovan (chybi $ZRAM/writeback - neni nastaveny backing_dev?)"
+		log ERROR "zram writeback: $ZRAM/writeback neexistuje"
+		return 2
+	fi
+
+	WR_OK=0
+	WR_FAIL=0
+
+	_bd_before=$(rd_def "$ZRAM/bd_stat" "n/a")
+	log INFO "=== zram writeback (vek >= ${_age}s) === bd_stat pred: $_bd_before"
+
+	# Strop tohoto behu: 65536 stranek po 4 KiB = ~256 MiB. Konzervativne, aby
+	# se pri opakovanem volani zbytecne neopotreboval UFS.
+	wr "$ZRAM/writeback_limit_enable" 1
+	wr "$ZRAM/writeback_limit" 65536
+	# idle a writeback jsou WRITE-ONLY (0220). wr() je pred zapisem cte (rdv),
+	# coz na write-only uzlu vyhodi "Permission denied" na stderr. Pisem proto
+	# primo, se spravnym poradim redirekci (2>/dev/null uvnitr {}). Uspech
+	# poznat z bd_stat pred/po, ne ze zpetneho cteni.
+	if { print -r -- "$_age" > "$ZRAM/idle"; } 2>/dev/null; then
+		WR_OK=$((WR_OK + 1))
+		log INFO "wr: $ZRAM/idle <- '$_age' (write-only, bez zpetneho cteni)"
+	else
+		WR_FAIL=$((WR_FAIL + 1))
+		log ERROR "wr: zapis do $ZRAM/idle selhal (vek $_age)"
+	fi
+	if { print -r -- idle > "$ZRAM/writeback"; } 2>/dev/null; then
+		WR_OK=$((WR_OK + 1))
+		log INFO "wr: $ZRAM/writeback <- 'idle' (write-only, bez zpetneho cteni)"
+	else
+		WR_FAIL=$((WR_FAIL + 1))
+		log ERROR "wr: zapis do $ZRAM/writeback selhal"
+	fi
+
+	_bd_after=$(rd_def "$ZRAM/bd_stat" "n/a")
+	log INFO "=== zram writeback hotovo (ok=$WR_OK chyb=$WR_FAIL) === bd_stat po: $_bd_after"
+
+	msg "zram writeback: stranky necinne >= ${_age}s oznaceny a zapsany na backing device."
+	msg "  strop tohoto behu : 65536 stranek (~256 MiB)"
+	msg "  bd_stat pred      : $_bd_before"
+	msg "  bd_stat po        : $_bd_after"
+	msg "  (bd_stat = 'bd_count bd_reads bd_writes' ve 4KiB strankach)"
+	[ "$WR_FAIL" -gt 0 ] && return 2
+	return 0
+}
+
+cmd_zram() {
+	case "${1:-}" in
+		writeback)
+			shift
+			zram_writeback "$@"
+			;;
+		""|*)
+			warn "pxtune: pouziti: pxtune zram writeback [sekundy]   (vychozi 3600 = 1 h)"
+			exit 1
+			;;
+	esac
+}
+
+# ---------------------------------------------------------------------------
+# dexopt - obalka nad `pm compile -m speed -f <pkg>`
+#
+# Prekompiluje balicek do plne AOT (speed), coz zrychli beh za cenu mista
+# a jednorazoveho CPU/tepla. `pm` je BINDER klient -> vzdy s timeoutem a jen
+# kdyz uz nabehl framework. NIKDY nevolat z demona (blokujici, forkujici binder).
+# ---------------------------------------------------------------------------
+cmd_dexopt() {
+	_pkg="${1:-}"
+	case "$_pkg" in
+		''|*[!A-Za-z0-9._]*)
+			warn "pxtune: dexopt chce platne jmeno balicku, ne '${_pkg}'"
+			warn "        pouziti: pxtune dexopt <package>"
+			exit 1
+			;;
+	esac
+	if ! command -v pm >/dev/null 2>&1; then
+		warn "pxtune: prikaz 'pm' neni k dispozici"
+		return 2
+	fi
+	if ! framework_ok; then
+		warn "pxtune: framework jeste nenabehl (pm je binder) - zkus pozdeji"
+		log ERROR "dexopt $_pkg: framework nedostupny"
+		return 2
+	fi
+
+	log INFO "dexopt: pm compile -m speed -f $_pkg"
+	if command -v timeout >/dev/null 2>&1; then
+		_out=$(timeout 600 pm compile -m speed -f "$_pkg" 2>&1)
+	else
+		_out=$(pm compile -m speed -f "$_pkg" 2>&1)
+	fi
+	_rc=$?
+	[ -n "$_out" ] && msg "$_out"
+	log INFO "dexopt $_pkg -> rc=$_rc: $_out"
+	if [ "$_rc" -ne 0 ]; then
+		warn "pxtune: pm compile skoncil s kodem $_rc"
+		return 2
+	fi
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# thermal - vysvetleni aktualniho stavu skinu vuci prahum VIRTUAL-SKIN
+#
+# HORKA CESTA (WebUI to muze volat): akumuluj do promenne, vypis JEDNIM print,
+# zadny printf/mc_to_c (fork). Prahy jsou ze SPEC/probe-analiza (mC):
+#   LIGHT-ODPM 37/39 | CPU-MID 39/41 | CPU-HIGH 41/43/52 | GPU 43/45/46,5/52
+#   hystereze 1,9 C (HotHysteresis)
+# ---------------------------------------------------------------------------
+thermal_explain() {
+	skin_mc_v
+	if ! is_int "$V"; then
+		warn "pxtune: skin (quiet_therm) se nepodarilo precist"
+		return 2
+	fi
+	_sk="$V"
+	# skin je kladny => bezforkovy prepocet na °C s jednim desetinnym mistem
+	_skc="$((_sk / 1000)).$(( (_sk % 1000) / 100 ))"
+
+	# nejblizsi prah NAD aktualnim skinem
+	_next=""
+	for _t in 37000 39000 41000 43000 45000 46500 52000; do
+		if [ "$_t" -gt "$_sk" ]; then _next="$_t"; break; fi
+	done
+
+	_o="=== pxtune thermal explain ==="
+	_o="$_o
+skin (quiet_therm): $_skc C   (rozhoduje o skrceni, ne junction)"
+
+	if [ -z "$_next" ]; then
+		_o="$_o
+Skin je nad nejvyssim prahem 52,0 C - CPU-HIGH i GPU skrti KRITICKY."
+		print -r -- "$_o"
+		return 0
+	fi
+
+	# kolik °C zbyva k dalsimu prahu
+	_d=$((_next - _sk))
+	_dc="$((_d / 1000)).$(( (_d % 1000) / 100 ))"
+	_nc="$((_next / 1000)).$(( (_next % 1000) / 100 ))"
+
+	case "$_next" in
+		37000) _lbl="VIRTUAL-SKIN-CPU-LIGHT-ODPM (1. stupen)"; _cool="CPU cooling (thermal-cpufreq-0/1/2)" ;;
+		39000) _lbl="VIRTUAL-SKIN-CPU-MID (1) + LIGHT-ODPM (2)"; _cool="CPU cooling (thermal-cpufreq-0/1/2)" ;;
+		41000) _lbl="VIRTUAL-SKIN-CPU-MID (2) + CPU-HIGH (1)"; _cool="CPU cooling, silnejsi strop (thermal-cpufreq-0/1/2)" ;;
+		43000) _lbl="VIRTUAL-SKIN-CPU-HIGH (2) + GPU (1)"; _cool="CPU (thermal-cpufreq-0/1/2) + GPU (thermal-gpufreq-0)" ;;
+		45000) _lbl="VIRTUAL-SKIN-GPU (2)"; _cool="GPU cooling (thermal-gpufreq-0)" ;;
+		46500) _lbl="VIRTUAL-SKIN-GPU (3)"; _cool="GPU cooling (thermal-gpufreq-0)" ;;
+		52000) _lbl="VIRTUAL-SKIN-CPU-HIGH (3) + GPU (4)"; _cool="CPU + GPU, KRITICKE skrceni" ;;
+	esac
+
+	_o="$_o
+nejblizsi prah    : $_nc C  (zbyva $_dc C)
+  spusti senzor   : $_lbl
+  priskrti        : $_cool
+hystereze         : 1,9 C (skrceni povoli az pri poklesu ~1,9 C pod prah)"
+	print -r -- "$_o"
+	return 0
+}
+
+cmd_thermal() {
+	case "${1:-}" in
+		explain) thermal_explain ;;
+		""|*)
+			warn "pxtune: pouziti: pxtune thermal explain"
+			exit 1
+			;;
+	esac
 }
 
 # ---------------------------------------------------------------------------
@@ -2319,6 +2848,7 @@ cmd_selftest() {
 	for _z in $THERMAL_ZONES; do
 		st_row "$THERMAL/thermal_zone${_z##*:}/temp" "${_z%%:*}"
 	done
+	st_row "/dev/thermal/tz-by-name/quiet_therm/temp" "skin pro 'thermal explain' (stabilni symlink)" opt
 	printf '%-52s %-4s %-5s %-34s %s\n' "dumpsys thermalservice" "-" "-" "-" \
 		"NEPOUZIVA SE (pod su visi na binderu)"
 
@@ -2339,6 +2869,11 @@ cmd_selftest() {
 	st_row "$ZRAM/disksize" "menit jen v post-fs-data.sh"
 	st_row "$ZRAM/comp_algorithm" "lz77eh (HW Emerald Hill) - NEMENIT"
 	st_row "$ZRAM/mm_stat" ""
+	st_row "$ZRAM/idle" "zram writeback: oznaceni necinnych (write-only)" opt
+	st_row "$ZRAM/writeback" "zram writeback: spousteni (write-only)" opt
+	st_row "$ZRAM/writeback_limit" "zram writeback: strop ve strankach" opt
+	st_row "$ZRAM/writeback_limit_enable" "zram writeback: 1 = strop aktivni" opt
+	st_row "$ZRAM/bd_stat" "zram writeback: statistika backing device" opt
 	st_row "/proc/sys/vm/swappiness" ""
 	st_row "/proc/sys/vm/dirty_ratio" ""
 	st_row "/proc/sys/vm/dirty_background_ratio" ""
@@ -2351,7 +2886,7 @@ cmd_selftest() {
 	done
 
 	st_hdr "Externi prikazy"
-	for _b in settings cmd getprop setprop id date tail sed tr wc cut basename nohup sleep; do
+	for _b in settings cmd pm getprop setprop id date tail sed tr wc cut basename nohup sleep; do
 		if command -v "$_b" >/dev/null 2>&1; then
 			_s="ano"
 		else
@@ -2394,6 +2929,9 @@ pxtune $PXTUNE_VERSION - kernel manager pro Pixel 8a (Tensor G3)
                                 presety: $(res_preset_names)
   pxtune charge <1-100|off>     charge_stop_level (off = 100)
   pxtune game <package> [mode]  obalka nad 'cmd game'
+  pxtune zram writeback [sek]   odsun necinnych zram stranek na disk (vychozi 3600 s)
+  pxtune dexopt <package>       pm compile -m speed -f <pkg> (plna AOT kompilace)
+  pxtune thermal explain        skin vs. prahy VIRTUAL-SKIN (co se stane pri prekroceni)
   pxtune app <list|show|set|rm|sync|json>
                                 per-app profily (bin/pxtune-perapp)
                                 'app enter <pkg>' / 'app leave' jsou INTERNI (demon)
@@ -2434,6 +2972,11 @@ main() {
 	NATIVE_DPI=$(native_dpi)
 
 	# interni: watchdog rozliseni (bezi na pozadi)
+	if [ "$1" = "__dpi_watchdog" ]; then
+		shift
+		dpi_watchdog "$1" "$2"
+		exit 0
+	fi
 	if [ "$1" = "__res_watchdog" ]; then
 		shift
 		res_watchdog "$1"
@@ -2471,8 +3014,12 @@ main() {
 		profile)           cmd_profile "$@" ;;
 		revert)            cmd_revert ;;
 		res)               cmd_res "$@" ;;
+		dpi)               cmd_dpi "$@" ;;
 		charge)            cmd_charge "$@" ;;
 		game)              cmd_game "$@" ;;
+		zram)              cmd_zram "$@" ;;
+		dexopt)            cmd_dexopt "$@" ;;
+		thermal)           cmd_thermal "$@" ;;
 		auto)              cmd_auto "$@" ;;
 		# per-app profily a tweaky jsou v samostatnych skriptech.
 		# exec, ne volani: setri jeden fork a chybovy kod probublá primo.

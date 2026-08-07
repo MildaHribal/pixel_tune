@@ -15,11 +15,21 @@ meta-overlayfs, pgs, playintegrityfix, susfs4ksu, tricky_store, zygisk-assistant
 
 ## TVRDÁ OMEZENÍ
 
-1. **Nic se nezapisuje do `/system` ani `/vendor`.** pixel_tune nemá žádný overlay.
+1. **Nic se nezapisuje do `/system` ani `/vendor` za běhu.** Modul nepřidává žádný
+   thermal/powerhint/vendor overlay. **Jediná vědomá známá výjimka:** modul má
+   `system/bin/pxtune` overlay v modulovém `system/` (viz „Vědomá známá výjimka" níže).
 2. **SELinux zůstává Enforcing.** Žádné `setenforce 0`.
 3. **Žádný undervolting** — na Tensoru řídí napětí ACPM firmware, kernel k tomu nemá přístup.
 4. **Refresh rate se globálně nesnižuje.** Adaptivní 60–120 Hz zůstává.
 5. Vše musí být reversibilní a zálohované.
+
+**Vědomá známá výjimka k bodu 1 — `system/bin/pxtune`:**
+Modul obsahuje jediný soubor v `system/` overlay: `system/bin/pxtune`. Slouží POUZE k tomu,
+aby byl příkaz `pxtune` v `PATH` z běžného shellu. **Není to `/vendor`, není to thermal ani
+powerhint overlay, neovlivňuje běh systému ani boot** — je to jen wrapper na dosažení CLI.
+Riziko je proto minimální a rozpor s bodem 1 je zde dokumentovaný a přijatý.
+Alternativa: symlink do adresáře, který už v `PATH` je. Prakticky to ale **teď ponecháme
+jako dokumentovanou výjimku — deployment neměníme.** Žádný _další_ overlay se nepřidává.
 
 ## Cesty
 
@@ -56,8 +66,29 @@ meta-overlayfs, pgs, playintegrityfix, susfs4ksu, tricky_store, zygisk-assistant
 | policy8 | Prime 1×X3 | 8 | 500000 880000 1164000 1298000 1557000 1745000 1885000 2049000 2147000 2294000 2363000 2556000 2687000 2850000 2914000 |
 
 - Governor `sched_pixel` na všech — **NEMĚNIT**.
-- `scaling_max_freq` má práva **0444, nejde zapsat ani jako root**. Ověřeno. Nepokoušej se o to.
-- Číst lze: `scaling_cur_freq`, `scaling_max_freq`, `stats/time_in_state`, `stats/trans_table`.
+- `scaling_max_freq` — **na tomhle A16 buildu (akita:16/CP1A.260505.005, ověřeno 2026-08-07)
+  je zapisovatelný**: práva `-rw-rw-r-- system system` (664) a **zápis DRŽÍ** i po 40 s
+  v ustáleném stavu. Ověřeno reverzibilním holds-testem: policy4 zapsáno 1418000,
+  policy8 1557000 — oba drží; vráceno na stock 2367000 / 2914000.
+  **ALE uzel vlastní power HAL** a přepíše ho při hintu `LAUNCH` (a dalších) — do profilu
+  tedy patří jen **s flagem reapply** (jako cooling devices). Není to tichá páka „nastav a zapomeň".
+  *(Historická poznámka: dřív / na jiných buildech měl `scaling_max_freq` práva 0444 a zápis
+  neprošel ani pod rootem. To NA TOMHLE buildu už NEPLATÍ. Původní tvrzení SPEC bylo pravdivé
+  pro tehdejší build, ne pro tenhle.)*
+- Číst lze vždy: `scaling_cur_freq`, `scaling_max_freq`, `stats/time_in_state`, `stats/trans_table`.
+
+**`sched_pixel/limit_frequency` — přímý zapisovatelný strop taktu (ověřeno 2026-08-07).**
+Vedle read-only obchvatu přes uclamp je tohle **první přímá páka na takt.**
+
+| Path | Cluster | Stock (kHz) | Práva |
+|---|---|---|---|
+| `…/policy0/sched_pixel/limit_frequency` | Little | 1328000 | 644 root:root |
+| `…/policy4/sched_pixel/limit_frequency` | Big/Mid | 1836000 | 644 root:root |
+| `…/policy8/sched_pixel/limit_frequency` | Prime | 2363000 | 644 root:root |
+
+Ověřeno přímým zápisem (policy8 testováno naživo). Cesta:
+`/sys/devices/system/cpu/cpufreq/policyN/sched_pixel/limit_frequency`.
+**Také vlastněno power HALem** (zvedá při LAUNCH) ⇒ do profilu jen **s flagem reapply.**
 
 ### Cooling devices (zapisovatelné 0644, ALE vlastní je thermal HAL)
 
@@ -99,6 +130,33 @@ Stock hodnoty: všude `min=0.00`, `max=max`, kromě `nnapi-hal` které má `min=
 by zakázalo uclamp boost v celém systému včetně Googlího `power-service.pixel-libperfmgr`.
 NESAHAT.
 
+### /proc/vendor_sched — DRUHÉ, nezávislé uclamp rozhraní (ověřeno 2026-08-07)
+
+Vedle `/dev/cpuctl` existuje druhé uclamp rozhraní `/proc/vendor_sched/`, **škála 0–1024**
+(ne 0–100 jako cpuctl!). **Hodnoty z obou zdrojů se AGREGUJÍ a platí ta PŘÍSNĚJŠÍ.**
+
+Skutečná sada **13 skupin** (probe): `bg cam cam_power dex2oat fg fg_wi nnapi ota rt sf sys
+sys_bg ta`. Každá má `groups/<skupina>/uclamp_min`, `uclamp_max`, `prefer_idle`, `prefer_high_cap`.
+
+Klíčové stock hodnoty (ověřeno):
+
+| Uzel | Stock | Poznámka |
+|---|---|---|
+| `groups/bg/uclamp_max` | **130** | = 12,7 % (0–1024). Už pod prahem Little 182/1024 = 17,8 % ⇒ **`UCLAMP_BG_MAX` v /dev/cpuctl je no-op** (vendor už drží pozadí přísněji). |
+| `groups/ta/uclamp_min` | 1 | top-app podlaha |
+| `groups/fg/uclamp_min` | 0 | foreground podlaha |
+| `groups/nnapi/uclamp_min` | 225 | |
+| `groups/ta/prefer_idle` | false (0) | |
+| `/proc/vendor_sched/dvfs_headroom` | **1100** | per-CPU vektor `×9`; zápis skaláru vrací vektor. 1100/1024 = 107,4 % přestřelení governoru. |
+| `/proc/vendor_sched/util_threshold` | `2048 2048 2048 2048 1280 1280 1280 1280 1280` | per-CPU |
+| `/proc/vendor_sched/reduce_prefer_idle` | **true** | (registr v2 mylně tvrdil 0) |
+| `/proc/vendor_sched/tapered_dvfs_headroom_enable` | 0 | |
+| `/proc/vendor_sched/uclamp_max_filter_enable` | 1 | |
+
+Všechny výše jsou zapisovatelné. `groups/bg/uclamp_max` a `dvfs_headroom` **vlastní power HAL**
+(zvedá při LAUNCH: bg→512, headroom→1280) ⇒ reapply, resp. bezpečné jen pro `night`
+(zhasnutý displej, žádné LAUNCH hinty).
+
 ### GPU Mali
 
 `/sys/class/misc/mali0/device/`
@@ -116,6 +174,27 @@ NESAHAT.
   trip pointy jsou **mrtvé**, nesahat na ně, nemá to efekt.
 - Reálně throttluje userspace HAL `android.hardware.thermal-service.pixel`
   podle `/vendor/etc/thermal_info_config.json` (ten NEMĚNÍME).
+
+**Škrcení řídí VÝHRADNĚ teplota POVRCHU (skin), NE junction (ověřeno z /vendor 2026-08-07).**
+Junction zóny (`BIG/MID/LITTLE`) mají `mode=disabled` právě proto — pro throttling se nepoužívají.
+Rozhoduje sada VIRTUAL-SKIN senzorů, každý s `TriggerSensor: soc_therm`. Reálné prahy čtené
+z `/vendor` na TOMHLE zařízení (°C):
+
+| Senzor | HotThreshold (°C) | Hystereze |
+|---|---|---|
+| `VIRTUAL-SKIN-CPU-MID` | 39,0 / 41,0 | 1,9 |
+| `VIRTUAL-SKIN-CPU-HIGH` | 41,0 / 43,0 / 52,0 | 1,9 |
+| `VIRTUAL-SKIN-CPU-LIGHT-ODPM` | 37,0 / 39,0 | 1,9 |
+| `VIRTUAL-SKIN-GPU` | 43 / 45 / 46,5 / 52 | 1,9 |
+
+Trigger senzor `soc_therm`: `HotThreshold 36,0`, `PollingDelay 60000` (ms), `PassiveDelay 7000` (ms).
+
+**Důsledek pro „5minutový slepý bod" (populární XDA mýtus):** VIRTUAL-SKIN senzory sice mají
+`PollingDelay 300000`, ale přepočítají se pokaždé, když se ozve `soc_therm`. A `soc_therm` je
+při jakékoli zátěži nad 36 °C během chvilky ⇒ přepíná z 60 s na 7 s pollingu. **Reálná expozice
+throttlingu je tedy prvních ~60 s od studeného startu, ne 5 minut.** 300s hodnota se v praxi
+skoro nikdy neuplatní. Snižovat `PollingDelay` má smysl jen u `soc_therm` — a to vyžaduje
+overlay do `/vendor` (tvrdé omezení č. 1) ⇒ NEDĚLÁME.
 
 Indexy zón pro čtení teplot (`/sys/class/thermal/thermal_zoneN/temp`, milicelsia):
 
@@ -136,9 +215,27 @@ jako `shell`, **ne přes `su`** (pod su visí na binderu).
 
 **Přepínání thermal profilů:** `setprop vendor.thermal.<SENZOR>.profile <game|camera|"">`
 Profily `game` a `camera` existují pro `VIRTUAL-SKIN-CPU-MID` a `VIRTUAL-SKIN-CPU-HIGH`.
-V profilu `game` mají CPU cdev vazby `"Disabled": true` ⇒ **méně CPU throttlingu**.
 Prázdný řetězec = default profil.
-POZOR: systém si tento prop nastavuje sám (při probu byl už na `camera`). Automat s tím
+
+**Profil `game` je DOLOŽENÝ i na tomhle A16 buildu (ověřeno z /vendor 2026-08-07 — zavírá
+otevřenou otázku č. 4).** V thermal configu má u obou senzorů (`VIRTUAL-SKIN-CPU-MID`
+i `-CPU-HIGH`) blok `"Mode":"game"` s `"Disabled":true` na `thermal-cpufreq-0/1/2`:
+
+```
+"Profile": [ { "Mode": "game", "BindedCdevInfo": [
+    { "CdevRequest": "thermal-cpufreq-0", "Disabled": true },
+    { "CdevRequest": "thermal-cpufreq-1", "Disabled": true },
+    { "CdevRequest": "thermal-cpufreq-2", "Disabled": true } ] } ]
+```
+
+Nastavením obou propů na `game` tedy **vypneš CPU škrcení ze 2 ze 4 senzorů**, které ho
+způsobují. Zbývají aktivní: `VIRTUAL-SKIN-CPU-LIGHT-ODPM` (37/39 °C) a `VIRTUAL-SKIN-GPU`
+(43/45/46,5/52 °C). `game` tedy neznamená „žádné škrcení", ale „škrcení jen podle
+LIGHT-ODPM a GPU" — což je výrazně volnější než stock.
+
+POZOR: vypnutím dvou senzorů se telefon **skutečně ohřeje víc** — teplotní pojistka ze skinu
+se stává zodpovědností modulu (viz `THERMAL_PROFILE_MAX_SKIN` v kontraktu v2 níže).
+POZOR 2: systém si tento prop nastavuje sám (při probu byl už na `camera`). Automat s tím
 musí počítat a nesmí systému skákat do řízení, když běží kamera.
 
 **Naměřené stock chování při trvalé zátěži** (150 s, 9 jader):
@@ -263,6 +360,53 @@ IO_READAHEAD_KB=""       # aplikuje se na sda..sdd
 # nabíjení
 CHARGE_STOP_LEVEL=""     # 1-100
 ```
+
+### KONTRAKT v2 — nové klíče (ověřený stock z probe 2026-08-07, build akita:16/CP1A.260505.005)
+
+Stejná sémantika jako v1: **prázdná hodnota / chybějící klíč = nesahat.** Neznámé klíče se
+ignorují (dopředná kompatibilita). Uzly označené „reapply" vlastní power HAL (přepíše je při
+LAUNCH ap.), takže je profil musí periodicky obnovovat, ne nastavit jednou.
+
+```sh
+# --- /proc/vendor_sched (škála 0–1024, prázdné = nesahat) ---
+VS_TA_UCLAMP_MIN=""     # /proc/vendor_sched/groups/ta/uclamp_min          stock 1
+VS_FG_UCLAMP_MIN=""     # /proc/vendor_sched/groups/fg/uclamp_min          stock 0
+VS_BG_UCLAMP_MAX=""     # /proc/vendor_sched/groups/bg/uclamp_max          stock 130   (reapply; jediná reálná páka na pozadí — cpuctl BG je no-op)
+VS_TA_PREFER_IDLE=""    # /proc/vendor_sched/groups/ta/prefer_idle         stock false/0
+VS_DVFS_HEADROOM=""     # /proc/vendor_sched/dvfs_headroom                 stock 1100  (per-CPU vektor; reapply)
+
+# --- sched_pixel governor (reapply — vlastní power HAL) ---
+SCHED_LIMIT_FREQ_LITTLE="" # policy0/sched_pixel/limit_frequency          stock 1328000
+SCHED_LIMIT_FREQ_MID=""    # policy4/sched_pixel/limit_frequency          stock 1836000
+SCHED_LIMIT_FREQ_BIG=""    # policy8/sched_pixel/limit_frequency          stock 2363000
+SCHED_DOWN_RATE_MID=""     # policy4/sched_pixel/down_rate_limit_us        stock 500   (POZOR: NE 20000, jak tvrdil registr/research)
+SCHED_DOWN_RATE_BIG=""     # policy8/sched_pixel/down_rate_limit_us        stock 500   (POZOR: NE 20000)
+
+# --- devfreq ---
+DEVFREQ_MIF_TARGET_LOAD="" # /sys/class/devfreq/…devfreq_mif/interactive/target_load  stock "20 40"  (POZOR: NE "20 80")
+DEVFREQ_DSU_MIN=""         # …devfreq_dsu/…/min_freq                       stock 324000 (POZOR: NE 0)
+DEVFREQ_MIF_MIN=""         # …devfreq_mif/…/min_freq                       stock 421000 (POZOR: NE 0)
+
+# --- idle (klidová spotřeba) ---
+CPUPM_CL1_RESIDENCY=""     # …/cpupm/cpupm/cpd_cl1_target_residency        stock 10000  (POZOR: NE 750000 — klidová residency je z výroby agresivní 10 ms)
+CPUPM_CL2_RESIDENCY=""     # …/cpupm/cpupm/cpd_cl2_target_residency        stock 10000  (POZOR: NE 750000; night=100000 by uspával POZDĚJI, opak záměru)
+
+# --- GPU ---
+GPU_DVFS_PERIOD=""         # /sys/devices/platform/…mali/dvfs_period       stock 20     (10 = svižnější, 20 = úspornější)
+
+# --- thermal, TVRDĚ HLÍDANÉ ---
+THERMAL_CDEV_BYPASS=""     # user_vote_bypass na 3 CPU cdev                stock 0      (riziko 3 — runtime vypínač skin-throttlingu; nikdy default, jen s pojistkou)
+                           #   /dev/thermal/cdev-by-name/thermal-cpufreq-{0,1,2}/user_vote_bypass
+THERMAL_PROFILE_MAX_SKIN="" # °C — NOVÁ POJISTKA: nad touhle teplotou skinu se THERMAL_PROFILE_*
+                           #   NEnasadí a pokud už běží, za běhu se sundá. Chrání před přehřátím,
+                           #   když profil `game` vypne 2 ze 4 skin senzorů.
+```
+
+**Pozn. ke stock hodnotám:** probe opravil několik dřívějších tvrzení registru/researche —
+`down_rate_limit_us` je 500 (ne 20000), `mif target_load` je „20 40" (ne „20 80"),
+`dsu/mif min_freq` nejsou 0 (324000 / 421000) a `cpd_clN_target_residency` je **už z výroby
+10000 (10 ms)**, ne 750000. To mění záměr night profilu: snižovat residency nemá smysl,
+protože je nízká už teď; night by ji naopak měl nechat, nebo řešit jinou pákou.
 
 ## KONTRAKT: CLI `pxtune`
 

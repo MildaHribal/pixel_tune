@@ -1944,6 +1944,32 @@ function editRule(rule){
     wrap.appendChild(el("div", "sub", cur.pkg));
   }
 
+  /* Rychlé presety — předvyplní viditelná pole (stejné hodnoty jako CLI
+     `pxtune app preset`). Ostatní klíče (priorita, sticky, thermal cap)
+     dosadí CLI výchozími hodnotami při uložení. */
+  var APP_PRESETS = [
+    { id:"game",     lb:"🎮 Hra",        set:{ GAME_MODE:"performance", GAME_FPS:"60", GAME_DOWNSCALE:"0.7",     APP_PROFILE:"game" } },
+    { id:"game-max", lb:"🎮 Hra naplno", set:{ GAME_MODE:"performance", GAME_FPS:"0",  GAME_DOWNSCALE:"disable", APP_PROFILE:"performance" } },
+    { id:"video",    lb:"🎬 Video",      set:{ GAME_MODE:"",           GAME_FPS:"",   GAME_DOWNSCALE:"",        APP_PROFILE:"balanced" } },
+    { id:"social",   lb:"📱 Social",     set:{ GAME_MODE:"",           GAME_FPS:"",   GAME_DOWNSCALE:"",        APP_PROFILE:"balanced" } },
+    { id:"saver",    lb:"🔋 Šetřič",     set:{ GAME_MODE:"",           GAME_FPS:"",   GAME_DOWNSCALE:"",        APP_PROFILE:"powersave" } }
+  ];
+  var prow = el("label", "fld");
+  prow.appendChild(el("span", "lbl", "Rychlý preset"));
+  var pbtns = el("div", "btn-row");
+  APP_PRESETS.forEach(function(p){
+    var b = el("button", "btn-sm", p.lb); b.type = "button";
+    b.onclick = function(){
+      Object.keys(p.set).forEach(function(kk){ if (fields[kk]) fields[kk].value = p.set[kk]; });
+      toast("Preset „" + p.lb + "“ předvyplněn — zkontroluj a ulož");
+    };
+    pbtns.appendChild(b);
+  });
+  prow.appendChild(pbtns);
+  prow.appendChild(el("span", "hint",
+    "Vyplní herní režim/FPS/downscale a profil. Ostatní hodnoty dosadí modul sám. Pak ulož tlačítkem dole."));
+  wrap.appendChild(prow);
+
   var profIds = (function(){
     var p = pick(S.data || {}, "profile") || {};
     var l = pick(p, "available");
