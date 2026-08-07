@@ -1,0 +1,6 @@
+id=pixel_tune
+name=Pixel Tune
+version=v1.2.0
+versionCode=3
+author=local
+description=Reverzibilní ladění výkonu, tepla a spotřeby pro Pixel 8a (Tensor G3). Profily přes uclamp cgroups a Mali scaling_max_freq, volitelná velikost zram (algoritmus lz77eh se nikdy nemění), limit nabíjení, per-app Game Mode. Nezapisuje do /system ani /vendor, SELinux zůstává Enforcing. Ovládání: WebUI (webroot/index.html) nebo CLI pxtune. Ochrana proti bootloopu přes boot_count.

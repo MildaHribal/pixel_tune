@@ -1,0 +1,2516 @@
+#!/system/bin/sh
+#
+# pxtune-auto - adaptivni event-driven demon pro pixel_tune
+#               Google Pixel 8a "akita" / Tensor G3 "zuma" / Android 16 / KernelSU-Next
+#
+# ===========================================================================
+# NAVRHOVE ZASADY (viz SPEC.md a tvrda omezeni zadani)
+# ===========================================================================
+#
+#  1. ZADNY POLLING SYSTEMU. Zadny dumpsys, zadny binder, zadny `cmd`.
+#     Proces visi blokovany na read() z FIFO. Kdyz se nic nedeje, nic nebezi.
+#
+#  2. NIKDY NEBRANIT DEEP SLEEPU. Jediny casovac (tikar) bezi VYHRADNE pri
+#     rozsvicene obrazovce a pri zhasnuti se okamzite zabiji. Watchdog pouziva
+#     `sleep` = nanosleep(CLOCK_MONOTONIC), ktery se v suspendu neposouva,
+#     takze negeneruje ani jedno probuzeni.
+#
+#  3. ZADNA accessibility sluzba. Vse jde z binarniho event bufferu logd.
+#
+#  4. POSIX sh (/system/bin/sh = mksh). Zadne bashismy.
+#
+#  5. Demon NEZAPISUJE do sysfs. Vsechny zapisy jdou pres `wr()` v bin/pxtune.
+#     JEDINA VYJIMKA je popsana u funkce prop_guard() - vraceni thermal
+#     profilu z "game" na default je uklid po vlastnim zasahu, ne ladeni.
+#
+# ===========================================================================
+# ZDROJE UDALOSTI (overeno proti AOSP android17-release, tj. platne i pro A16)
+# ===========================================================================
+#   frameworks/base/services/core/java/com/android/server/wm/EventLogTags.logtags
+#     30007 wm_resume_activity (User|1|5),(Token|1|5),(Task ID|1|5),(Component Name|3)
+#        -> POZOR: tag se od Androidu R jmenuje wm_resume_activity, NE
+#           am_resume_activity. Demon si nazev zjisti za behu z
+#           /system/etc/event-log-tags a adaptuje se.
+#   frameworks/base/services/core/java/com/android/server/EventLogTags.logtags
+#     2728 power_screen_state (offOrOn|1|5),(becauseOfUser|1|5),...
+#        -> offOrOn: 0 = obrazovka zhasla, 1 = rozsvitila se.
+#
+# ===========================================================================
+# POZADAVKY NA bin/pxtune - ZDE ZAMERNE NEIMPLEMENTOVANO
+# (bin/pxtune upravuje nekdo jiny; viz vystup ukolu)
+# ===========================================================================
+#
+#  R1 (KRITICKY)  `pxtune profile <name> --auto --reset`
+#     --reset = pred aplikaci profilu vratit VSECHNY klice kontraktu na
+#     hodnoty z backup/stock.conf, a teprve pak nalozit profil.
+#     DUVOD (znamy problem "lepivych" profilu): prazdna hodnota v profilu
+#     znamena "nesahat", takze prechod
+#        game -> balanced   NECHA  THERMAL_PROFILE_CPU_MID/HIGH="game"
+#                                  (= v HAL configu maji CPU cdev vazby
+#                                   "Disabled": true, tedy VYPNUTE CPU
+#                                   thermal throttling), UCLAMP_BG_MAX=30,
+#                                  UCLAMP_SYSBG_MAX=40
+#        night -> balanced  NECHA  CHARGE_STOP_LEVEL=80, UCLAMP_* z noci,
+#                                  GPU_MAX_FREQ=419000
+#     Demon podporu --reset ZJISTUJE ZA BEHU (viz apply_via_cli): kdyz ji
+#     pxtune neumi, spadne zpet na volani bez --reset a zaloguje to. Az bude
+#     R1 hotovy, demon ho zacne pouzivat BEZ jakekoli zmeny kodu.
+#
+#  R2  `pxtune profile <name> --auto` musi pri EXISTUJICIM manual_override
+#     neudelat nic a skoncit s kodem 0. Dnes profile_apply() manual_override
+#     vubec netestuje - kontrolu dela jen demon, coz je zavod (uzivatel
+#     stiskne profil ve WebUI presne v okamziku, kdy prijde udalost).
+#
+#  R3  `pxtune auto on|off` ma navic spustit / zastavit `pxtune-auto start|stop`.
+#
+#  R4  `pxtune profile auto` ma smazat manual_override A poslat demonu SIGHUP.
+#     (uz implementovano pres auto_signal HUP - jen potvrzuji kontrakt)
+#
+#  R5 (volitelne)  `pxtune profile-keys <name>` = vypis klicu, ktere dany
+#     profil realne nastavuje. Demon si to dnes parsuje sam (prof_keys).
+#
+# ===========================================================================
+# POUZITI
+#   pxtune-auto start | stop | restart | status | reload | run
+#     run = bezi na popredi (debug), start = odpoji se pres setsid
+#
+# SIGNALY
+#   SIGHUP  - znovu nacist auto.conf a okamzite prehodnotit stav
+#   SIGUSR1 - vypsat kompletni vnitrni stav do logu
+#   SIGTERM - cisty konec (vraci neutralni profil, viz cleanup)
+# ===========================================================================
+
+# ---------------------------------------------------------------- cesty
+
+STATE=/data/adb/pixel_tune
+PXTUNE=/data/adb/modules/pixel_tune/bin/pxtune
+
+case "$0" in
+    /*) SELF="$0" ;;
+    *)  SELF="$PWD/$0" ;;
+esac
+# Kdyz demon nebezi z /data/adb/modules (test z jineho adresare), hledej
+# pxtune vedle sebe.
+[ -x "$PXTUNE" ] || { _s="${SELF%/*}/pxtune"; [ -x "$_s" ] && PXTUNE="$_s"; }
+
+LOG="$STATE/pxtune.log"
+PIDF="$STATE/pxtune-auto.pid"
+LOCKD="$STATE/pxtune-auto.lock"
+FIFO="$STATE/pxtune-auto.fifo"
+EXITF="$STATE/pxtune-auto.exiting"   # existuje = konec je zamerny, watchdog nerestartuje
+ALIVEF="$STATE/pxtune-auto.alive"    # mtime = posledni zpracovana udalost (diagnostika)
+APPSTATS="$STATE/appstats"
+OVERRIDES="$STATE/appstats.override"
+MANUAL="$STATE/manual_override"
+ACTIVE="$STATE/active"
+AUTOF="$STATE/auto"                  # on|off, chybi = on (kontrakt sdileny s pxtune)
+CONF="$STATE/auto.conf"
+PROFDIR="$STATE/profiles"
+APPDIR="$STATE/apps"                 # per-app pravidla, jeden soubor na balicek
+APPMODE="$STATE/appmode.active"      # stav vrstvy 3 (jen pro cteni, pise pxtune-perapp)
+
+# ===========================================================================
+# LADITELNE HODNOTY
+#
+# VSECHNO nize jde prepsat v /data/adb/pixel_tune/auto.conf bez editace kodu.
+# auto.conf se NESOURCUJE (viz conf_load) a kazda ciselna hodnota se navic
+# ohranicuje (cfg_clamp_all), aby preklep typu TICK_SEC=0 nemohl z demona
+# udelat busy-loop, ktery sezere baterii.
+#
+# U kazde konstanty je uvedeno, na cem stoji. Kde merena data nemam,
+# je to napsano jako NEMERENO.
+# ===========================================================================
+
+# ---------------------------------------------------------------- teplota: skin
+#
+# MERENA VYCHOZI DATA (zatezovy test 150 s na 9 jadrech):
+#   ustaleny stav ....... skin 40,5 C, junction 58 C
+#   spicka junction ..... 81 C v prvnich ~40 s
+#   zotaveni ............ MaxReleaseStep=1 => ~84 s; 60 s po konci zateze
+#                         se neuvolnil ani jeden cluster
+#   v NECINNOSTI pri skin 44,6 C uz byl telefon zaskrcen na
+#                         Little 610 / Big 910 / Prime 1164 MHz, GPU 376 MHz
+#
+# THERM_WARN_MC = 41000
+#   40,5 C je STROP VLASTNIHO OHREVU - vic ze sebe telefon pri stock rizeni
+#   a plne zatezi vsech 9 jader nedostal. Cokoli nad 41,0 C tedy NELZE
+#   vysvetlit jen vlastni zatezi; je v tom vnejsi teplo (slunce, kapsa,
+#   nabijeni, drzak v aute). Prave tam ma nas zasah co resit.
+THERM_WARN_MC=41000
+#
+# THERM_HOT_MC = 43000  (+2,5 C nad merenym ustalenym stavem)
+#   Predchozi verze demona reagovala az tady a nic vic - to bylo cele
+#   reaktivni. Ted je 43 C az druhy stupen ze ctyr.
+THERM_HOT_MC=43000
+#
+# THERM_CRIT_MC = 45000
+#   Nad merenych 44,6 C, kde byl telefon zaskrcen UZ V NECINNOSTI. Nad timhle
+#   bodem HAL zadnou rezervu nema a nas zasah je levnejsi nez to, co udela on.
+THERM_CRIT_MC=45000
+#
+# THERM_OK_MC = 40000  (<= mereny ustaleny stav 40,5 C)
+#   Navrat na uroven 0 az kdyz je situace zpatky uvnitr toho, co zarizeni
+#   zvlada nativne.
+THERM_OK_MC=40000
+
+# ---------------------------------------------------------------- teplota: junction
+#
+# Skin je pomaly integrator. Junction (BIG/MID/LITTLE/G3D) roste o desitky
+# sekund driv - je to rychly kanal predikce.
+# MERENE dva body: trvala zatez v ustalenem stavu 58 C, nemitigovana spicka
+# v prvnich 40 s 81 C.
+#
+# JUNC_WARN_MC = 70000
+#   NENI PRIMO MERENA HRANICE - je to interpolace zhruba doprostred mezi dvema
+#   merenymi body. Semantika: 58 C je "normalni trvala zatez a NESMI spustit
+#   poplach", 81 C je "trajektorie nekontrolovaneho narustu".
+JUNC_WARN_MC=70000
+#
+# JUNC_HOT_MC = 78000  (tesne pod merenou spickou 81 C)
+JUNC_HOT_MC=78000
+#
+# Junction sam o sobe NIKDY nevyvola uroven 3 (crit) - crit je definovan na
+# skinu, protoze to je to, co pali uzivatele do ruky a co reguluje HAL.
+JUNC_MAX_LEVEL=2
+
+# ---------------------------------------------------------------- predikce
+#
+# THERM_HORIZON_SEC = 60
+#   Odvozeno z MERENI: MaxReleaseStep=1 => navrat ze stavu 12 trva ~84 s
+#   a 60 s po konci zateze se neuvolnil ANI JEDEN cluster. Cena pozdniho
+#   zasahu je tedy radove minuta prisneho throttlingu navic. Predikcni
+#   horizont musi byt s touto casovou konstantou srovnatelny. Volim 60 s =
+#   spodni mez merenim dolozeneho intervalu "nic se neuvolnilo". Delsi
+#   horizont (84 s) by zvysoval pocet falesnych poplachu, protoze chyba
+#   linearni extrapolace roste s horizontem.
+THERM_HORIZON_SEC=60
+#
+# SLOPE_MIN_DT = 15   kratsi zaklad se pro derivaci nepouzije (sum)
+# SLOPE_MAX_DT = 300  starsi vzorek uz nesouvisi (byl mezi tim suspend,
+#                     zastaveny tikar) => sklon se zahodi, ne extrapoluje
+# SLOPE_NOISE  = 100  sumova branka v mC/100 s (0,1 C za 100 s).
+#                     NEMERENO: sum a granularitu quiet_therm jsem nemeril.
+#                     Volena tak, aby 1 LSB (100 mC) na 100s zakladu jeste
+#                     neprosel jako "trend".
+SLOPE_MIN_DT=15
+SLOPE_MAX_DT=300
+SLOPE_NOISE=100
+
+# ---------------------------------------------------------------- potvrzovani a hystereze
+#
+# THERM_CONFIRM = 2
+#   Kolik po sobe jdoucich vyhodnoceni musi souhlasit, nez se uroven zmeni
+#   NA ZAKLADE PREDIKCE nebo JUNCTION. Pri TICK_BUSY_SEC=20 to je 40 s
+#   dukazu - presne delka merene nabehove faze, po ktere junction klesl
+#   z 81 C na 58 C. Tedy: mereny stress test by timhle filtrem NEPROSEL
+#   (a spravne - HAL si s nim poradil sam). Projde jen zatez, ktera se
+#   po 40 s neusadila.
+#   ABSOLUTNI prekroceni skinu se nepotvrzuje - to neni predikce, to je fakt.
+THERM_CONFIRM=2
+#
+# THERM_HOLD_SEC = 90
+#   MERENO: uvolneni ze stavu 12 pri MaxReleaseStep=1 trva ~84 s. Povolovat
+#   driv nez za 90 s nema smysl - HAL je porad omezujici clen a jen bychom
+#   pustili zatez zpet do jeste nevychladleho SoC.
+THERM_HOLD_SEC=90
+#
+# Deeskalace jde VZDY JEN O JEDEN STUPEN. Zamerne zrcadli HALovy
+# MaxReleaseStep=1: kdyz uvolnuje po jednom on, nemame duvod skakat my.
+# Cesta crit -> ok tak trva ~4,5 min, coz radove odpovida merenym 84 s/krok.
+
+# ---------------------------------------------------------------- tikar
+#
+# Jediny casovac. Perioda se meni podle situace - cim klidnejsi provoz,
+# tim min probuzeni.
+#
+# TICK_BUSY_SEC = 20  (uroven != 0, trida game/heavy, nebo ceka prepnuti)
+#   thermal HAL reguluje ~7 s (SPEC) - vyrazne rychlejsi vzorkovani nema smysl
+#   a skakali bychom mu do rizeni. Junction spicka nastala v prvnich ~40 s,
+#   pri 20 s tedy mame v tom okne 2 vzorky = minimum pro urceni sklonu
+#   a zaroven presne THERM_CONFIRM=2.
+TICK_BUSY_SEC=20
+#
+# TICK_SEC = 30  (obrazovka sviti, bezny provoz)
+TICK_SEC=30
+#
+# TICK_IDLE_SEC = 90  (obrazovka sviti, lehka aplikace, chladno)
+#   NEMERENO: voleno jako 3x TICK_SEC. Skin je pomaly integrator, na 90s
+#   zakladu je trend porad citelny. Setri ~2/3 probuzeni pri cteni/scrollovani.
+TICK_IDLE_SEC=90
+#
+# TICK_IDLE_MARGIN_MC = 3000  (do idle rezimu jen kdyz je skin >= 3 C pod WARN)
+TICK_IDLE_MARGIN_MC=3000
+
+# ---------------------------------------------------------------- anti-flapping
+#
+# MIN_SWITCH_SEC = 30
+#   Delsi nez shluk prechodu aktivit pri startu aplikace (splash -> hlavni
+#   aktivita, typicky 2-5 udalosti behem ~2 s), delsi nez 7s regulacni
+#   perioda thermal HALu (nechceme mu skakat do rizeni) a zaroven kratsi
+#   nez bezna delka pouziti aplikace, takze se stihne projevit.
+MIN_SWITCH_SEC=30
+#
+# Pojistka proti patologickemu prepinani (rozbita klasifikace, aplikace
+# strilici resume eventy). Po prekroceni se na SWLOCK_SEC povoli uz jen
+# teplotni zasahy, aby forkovani pxtune nezralo baterii.
+# NEMERENO: 40/h = prepnuti kazdych ~90 s, coz zadny normalni provoz nedosahne.
+MAX_SWITCH_HOUR=40
+SWLOCK_SEC=900
+
+# ---------------------------------------------------------------- per-app
+#
+# ANTI-FLAPPING JE ZAMERNE ASYMETRICKY. Vstup je OPOZDENY, odchod je LINY.
+#
+# APP_MIN_FG_DEF = 8   (vstup je opozdeny)
+#   Po udalosti popredi se do FIFO naplanuje "@APPARM <pkg>" az za tolik
+#   sekund a PRI ZPRACOVANI se overi, ze CUR_PKG je porad ten samy. Start
+#   aplikace udela 2-5 udalosti behem ~2 s (splash -> hlavni aktivita), takze
+#   rychle proletnuti aplikacemi nespusti VUBEC NIC - ani jedno binderove
+#   volani, ani jeden fork navic.
+#   Prepsatelne per-app klicem APP_MIN_FG_SEC.
+APP_MIN_FG_DEF=8
+#
+# APP_STICKY_DEF = 25  (odchod je liny)
+#   Po odchodu z aplikace se naplanuje "@APPLEAVE" az za tolik sekund. Navrat
+#   do TEHOZ balicku driv = udalost se zahodi. Alt-tab do zprav a zpatky tak
+#   nestoji ani jedno binderove volani. Delsi nez MIN_SWITCH_SEC zamerne
+#   NENI - vrstva 3 se sundává drive nez by se stihl prepnout profil.
+#   Prepsatelne per-app klicem APP_STICKY_SEC.
+APP_STICKY_DEF=25
+#
+# 1 = per-app pravidla jsou v provozu. 0 = demon je uplne ignoruje (vrstvy 1
+# a 2 zustanou, protoze ty si drzi system resp. profil; vrstva 3 se pri
+# vypnuti sundá pri nejblizsi prilezitosti).
+APP_RULES=1
+
+# ---------------------------------------------------------------- vzorkovani CPU
+SAMPLE_MIN_SEC=25          # kratsi navstevy aplikace se nezapocitavaji
+STATS_MAX_SAMPLES=20       # po 20 vzorcich uz je EWMA davno usazena
+STATS_MAX_LINES=300        # strop poctu radku appstats
+STATS_MAX_BYTES=65536      # tvrdy strop velikosti (ochrana pred poskozenim)
+
+# ---------------------------------------------------------------- klasifikace
+# Jednotka = procenta JEDNOHO jadra (soucet vlaken hlavniho procesu aplikace).
+# SoC ma 9 jader, takze teoreticke maximum je 900.
+CPU_GAME=150               # ~1,5 jadra trvale
+SESS_GAME=90               # + prumerna delka relace >= 90 s
+CPU_HEAVY=80
+CPU_NORMAL=20
+CLASS_MIN_SAMPLES=2        # dokud nemame 2 vzorky, aplikace je CLASS_DEFAULT
+CLASS_DEFAULT=normal
+
+# ---------------------------------------------------------------- mapovani trida -> profil
+# Poradi PROF_LIGHT < PROF_NORMAL < PROF_HEAVY < PROF_GAME tvori "zebrik",
+# po kterem se stropuje pri horku a slabe baterii (rank_of / prof_of_rank).
+PROF_LIGHT=powersave
+PROF_NORMAL=balanced
+PROF_HEAVY=performance
+PROF_GAME=game
+PROF_NIGHT=night           # obrazovka zhasla
+PROF_HOT=powersave         # teplotni uroven 2
+PROF_CRIT=powersave        # teplotni uroven 3 (viz "NEVYRESENO" ve vystupu)
+PROF_SAFE=balanced         # neutralni profil pri cistem konci / porouse
+
+# Profily, ktere smi automat pouzivat (pro startovni audit lepivosti).
+AUTO_PROFILES="powersave balanced performance game night"
+
+# ---------------------------------------------------------------- baterie
+#
+# BATT_TEMP_WARN_DC = 400 (40,0 C; jednotka 0,1 C jako v sysfs)
+#   KOTVA V DATECH: Google si na tomhle zarizeni sam nastavuje
+#   bd_trigger_temp=350 - tedy 35,0 C je hranice, od ktere ON SAM resi
+#   "battery defender". 40,0 C je bezpecne nad hodnotou, kterou vyrobce
+#   povazuje za hodnou reakce, takze to neni prehnane opatrne.
+BATT_TEMP_WARN_DC=400
+#
+# BATT_LOW_PCT / BATT_CRIT_PCT
+#   NEMERENO. Uvaha: baterie ma 602 cyklu (SPEC) => zvysena vnitrni odpornost
+#   => pri nizkem SoC vetsi propad napeti pri spickovem odberu a vyssi riziko
+#   nahleho vypnuti. Pri nabijeni se neuplatnuje.
+BATT_LOW_PCT=20            # strop na PROF_NORMAL
+BATT_CRIT_PCT=10           # strop na PROF_LIGHT
+BATT_RESPECT_CHARGING=1    # 1 = pri nabijeni se stropy podle SoC ignoruji
+
+# ---------------------------------------------------------------- kamera
+# SPEC: prop vendor.thermal.*.profile si prepina sam system (pri probu uz byl
+# na "camera"). Do toho automat nesmi skakat. Kdyby prop zustal viset,
+# po CAMERA_HOLD_MAX sekundach ho ignorujeme.
+THERM_PROP_MID=vendor.thermal.VIRTUAL-SKIN-CPU-MID.profile
+THERM_PROP_HIGH=vendor.thermal.VIRTUAL-SKIN-CPU-HIGH.profile
+CAMERA_HOLD_MAX=600
+CAMERA_PKGS="com.google.android.GoogleCamera com.android.camera com.google.android.apps.camera"
+
+# ---------------------------------------------------------------- ostatni
+# Balicky, na ktere se nereaguje (prechodne popredi behem odemykani apod.)
+IGNORE_PKGS="com.android.systemui android com.google.android.permissioncontroller"
+
+# 1 = demon smi vratit thermal prop z hodnoty "game" na default (prop_guard).
+THERMAL_PROP_CLEAR=1
+
+# 1 = zkusit `pxtune profile X --auto --reset` (pozadavek R1). Kdyz to CLI
+# neumi, demon to sam pozna a prepne se na volani bez --reset.
+AUTO_RESET=1
+
+# Kdyz je pxtune nedostupny, zkusit ho znovu az za tolik sekund (misto
+# trvaleho vypnuti prepinani, jak to delala predchozi verze).
+PXTUNE_RETRY_SEC=300
+
+# Watchdog: perioda kontroly, ze hlavni proces zije. Minimalne 60 s.
+# `sleep` = nanosleep(CLOCK_MONOTONIC), ktery se v suspendu neposouva =>
+# pri zhasle obrazovce zadne probuzeni.
+WD_SEC=300
+
+# Kolikrat po sobe smi selhat cteni skin cidla, nez se teplotni omezeni
+# pojistne zrusi. Fail-open je tu spravne: thermal HAL dela svou praci
+# nezavisle na nas a nase slepe cidlo nesmi telefon nechat trvale zaskrceny.
+THERM_READ_FAIL_MAX=5
+
+AUTO_DEBUG=0
+
+# ===========================================================================
+# STAV (globalni)
+# ===========================================================================
+
+NOW=0
+SCREEN=1
+
+THERM_LEVEL=0          # 0 ok / 1 warm / 2 hot / 3 crit
+THERM_SINCE=0          # NOW pri poslednim prechodu urovne
+THERM_UPC=0            # po sobe jdouci vyhodnoceni volajici po zvyseni
+THERM_DOWNC=0          # -"- po snizeni
+THERM_RDFAIL=0
+
+SKIN_MC=0
+SKIN_PREV_MC=-1
+SKIN_PREV_T=0
+SKIN_SLOPE=0           # mC za 100 s (kladne = roste)
+SKIN_PRED=0
+JUNC_MC=0
+JUNC_SRC=""
+
+BATT_PCT=-1
+BATT_CHG=0
+BATT_TEMP_DC=-1000
+
+CUR_PKG=""
+CUR_CLASS="$CLASS_DEFAULT"
+APPLIED=""
+PENDING=""
+LAST_SWITCH=0
+
+SW_WIN=0
+SW_CNT=0
+SW_LOCK_UNTIL=0
+
+SUP_PID=""
+TICK_PID=""
+TICK_CUR=0
+WD_PID=""
+
+FG_TAG=""
+SCR_TAG=""
+LOGN=0
+RDFAIL=0
+CAMERA_SINCE=0
+PXTUNE_FAIL_AT=0
+RESET_MODE=1           # 1 = zkousime --reset, 0 = CLI ho neumi
+OVERLAY_MODE=1         # 1 = zkousime --overlay <pkg>, 0 = CLI ho neumi
+
+# --- per-app stav ---
+AR_OK=0                # 1 = pro AR_PKG existuje platne a zapnute pravidlo
+AR_PKG=""
+AR_APP_PROFILE=""
+AR_APP_MIN_FG_SEC=$APP_MIN_FG_DEF
+AR_APP_STICKY_SEC=$APP_STICKY_DEF
+AR_APP_THERMAL_CAP=0
+APPMODE_PKG=""         # balicek, na ktery je PRAVE nasazena vrstva 3
+APPMODE_STICKY=$APP_STICKY_DEF
+APPARM_PID=""          # planovac opozdeneho vstupu
+APPLV_PID=""           # planovac lineho odchodu
+GREPLB=""
+SHELL_FILTER=0
+
+LOG_LAST=""
+LOG_REP=0
+
+# cidla (adresare, resolvuji se pri startu)
+Z_SKIN=""
+Z_BIG=""
+Z_MID=""
+Z_LIT=""
+Z_G3D=""
+BATTDIR=/sys/class/power_supply/battery
+
+# vzorkovaci okno
+SMP_PKG=""
+SMP_PID=""
+SMP_J=0
+SMP_T=0
+
+# ===========================================================================
+# UTILITY
+# ===========================================================================
+
+# Monotonni cas bez forku. /proc/uptime pouziva CLOCK_BOOTTIME, takze
+# zapocitava i dobu stravenou v suspendu - presne to, co pro cooldowny chceme.
+#
+# PAST ZE ZADANI: `read -r v < /proc/sys/...` vrati jen PRVNI ZNAK, protoze
+# procfs sysctl hlasi st_size=0 (swappiness 40 -> "4"). Na /proc/uptime,
+# /proc/<pid>/stat a na /sys/ to funguje spravne - a jine soubory demon
+# necte. Kdyby nekdy bylo potreba /proc/sys/*, MUSI se pouzit head -n1.
+tick_now() {
+    read -r _up _idle < /proc/uptime 2>/dev/null || { NOW=$((NOW + 1)); return 0; }
+    NOW=${_up%.*}
+    case "$NOW" in ''|*[!0-9]*) NOW=0 ;; esac
+    return 0
+}
+
+log_rotate() {
+    _sz=$(stat -c %s "$LOG" 2>/dev/null)
+    case "$_sz" in ''|*[!0-9]*) return 0 ;; esac
+    if [ "$_sz" -gt 524288 ]; then
+        mv -f "$LOG" "$LOG.old" 2>/dev/null
+        : > "$LOG" 2>/dev/null
+    fi
+    return 0
+}
+
+log_emit() {
+    printf '[%s] [%s] [auto] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" >> "$LOG" 2>/dev/null
+    LOGN=$((LOGN + 1))
+    [ "$((LOGN % 25))" -eq 0 ] && log_rotate
+    return 0
+}
+
+# Potlaceni opakovanych identickych zprav. Bez toho by porucha, ktera se
+# opakuje kazdych 20 s (nedostupny pxtune, nectene cidlo), za noc zaplnila
+# log a rotace by smazala uzitecnou historii.
+log() {
+    _lvl=$1
+    shift
+    _m="$*"
+    if [ "$_lvl$_m" = "$LOG_LAST" ]; then
+        LOG_REP=$((LOG_REP + 1))
+        [ "$((LOG_REP % 100))" -eq 0 ] && log_emit "$_lvl" "$_m (opakovano ${LOG_REP}x)"
+        return 0
+    fi
+    if [ "$LOG_REP" -gt 0 ]; then
+        log_emit INFO "predchozi zprava se opakovala jeste ${LOG_REP}x"
+        LOG_REP=0
+    fi
+    LOG_LAST="$_lvl$_m"
+    log_emit "$_lvl" "$_m"
+    return 0
+}
+
+dbg() {
+    [ "$AUTO_DEBUG" = "1" ] || return 0
+    log DEBUG "$@"
+}
+
+in_list() {
+    # in_list <jehla> <seznam oddeleny mezerami>
+    _n=$1
+    for _i in $2; do
+        [ "$_n" = "$_i" ] && return 0
+    done
+    return 1
+}
+
+# ===========================================================================
+# NACTENI auto.conf
+#
+# auto.conf se NESMI sourcovat: syntakticka chyba by shodila demona jeste
+# pred prvnim zapisem do logu a cokoli v souboru by se spustilo jako root.
+# Cteme ho vlastnim parserem: jen radky KLIC=hodnota, klic z velkych pismen,
+# hodnota bez shellovych metaznaku. (Stejny duvod jako u zram.conf
+# v post-fs-data.sh.)
+# ===========================================================================
+
+conf_load() {
+    [ -f "$CONF" ] || return 0
+    _drop=0
+    while IFS='=' read -r _ck _cv; do
+        case "$_ck" in
+            ''|\#*) continue ;;
+            *[!A-Z0-9_]*) continue ;;    # jen KLIC z velkych pismen/cislic/podtrzitka
+        esac
+        # obalujici uvozovky pryc, vnitrek nechavame (seznamy maji mezery)
+        _cv=${_cv%\"}
+        _cv=${_cv#\"}
+        case "$_cv" in
+            *[!A-Za-z0-9_.:/,+\ -]*) _drop=$((_drop + 1)); continue ;;
+        esac
+        eval "$_ck=\$_cv"
+    done < "$CONF"
+    [ "$_drop" -gt 0 ] && log WARN "auto.conf: $_drop radku zahozeno (hodnota obsahuje nepovolene znaky)"
+    return 0
+}
+
+# cfg_int <jmeno_promenne> <min> <max> <default>
+# Ohranici ciselnou hodnotu. Bez toho by preklep TICK_SEC=0 nebo WD_SEC=1
+# udelal z demona busy-loop, ktery sezere baterii.
+cfg_int() {
+    eval "_cv=\${$1}"
+    case "$_cv" in
+        ''|*[!0-9]*) _cv=$4 ;;
+    esac
+    [ "$_cv" -lt "$2" ] && _cv=$2
+    [ "$_cv" -gt "$3" ] && _cv=$3
+    eval "$1=\$_cv"
+    return 0
+}
+
+cfg_bool() {
+    eval "_cb=\${$1}"
+    case "$_cb" in
+        1|on|ON|true|yes) _cb=1 ;;
+        *) _cb=0 ;;
+    esac
+    eval "$1=\$_cb"
+    return 0
+}
+
+cfg_clamp_all() {
+    cfg_int THERM_WARN_MC        20000   90000    41000
+    cfg_int THERM_HOT_MC         20000   95000    43000
+    cfg_int THERM_CRIT_MC        20000   99000    45000
+    cfg_int THERM_OK_MC          15000   90000    40000
+    cfg_int JUNC_WARN_MC         30000  110000    70000
+    cfg_int JUNC_HOT_MC          30000  115000    78000
+    cfg_int JUNC_MAX_LEVEL           0       3        2
+    cfg_int THERM_HORIZON_SEC       10     600       60
+    cfg_int SLOPE_MIN_DT             5     120       15
+    cfg_int SLOPE_MAX_DT            60    3600      300
+    cfg_int SLOPE_NOISE              0   10000      100
+    cfg_int THERM_CONFIRM            1      10        2
+    cfg_int THERM_HOLD_SEC          10    3600       90
+    cfg_int TICK_BUSY_SEC           10    3600       20
+    cfg_int TICK_SEC                10    3600       30
+    cfg_int TICK_IDLE_SEC           10    3600       90
+    cfg_int TICK_IDLE_MARGIN_MC      0   20000     3000
+    cfg_int MIN_SWITCH_SEC           5    3600       30
+    cfg_int MAX_SWITCH_HOUR          4    1000       40
+    cfg_int APP_MIN_FG_DEF           1     600        8
+    cfg_int APP_STICKY_DEF           0    3600       25
+    cfg_int SWLOCK_SEC              60   86400      900
+    cfg_int SAMPLE_MIN_SEC           5    3600       25
+    cfg_int STATS_MAX_SAMPLES        1    1000       20
+    cfg_int STATS_MAX_LINES         10   10000      300
+    cfg_int STATS_MAX_BYTES       4096 1048576    65536
+    cfg_int CPU_GAME                10     900      150
+    cfg_int SESS_GAME               10   86400       90
+    cfg_int CPU_HEAVY                5     900       80
+    cfg_int CPU_NORMAL               1     900       20
+    cfg_int CLASS_MIN_SAMPLES        1     100        2
+    cfg_int BATT_TEMP_WARN_DC      200     800      400
+    cfg_int BATT_LOW_PCT             0     100       20
+    cfg_int BATT_CRIT_PCT            0     100       10
+    cfg_int CAMERA_HOLD_MAX         30   86400      600
+    cfg_int PXTUNE_RETRY_SEC        30   86400      300
+    cfg_int WD_SEC                  60   86400      300
+    cfg_int THERM_READ_FAIL_MAX      1     100        5
+    cfg_bool THERMAL_PROP_CLEAR
+    cfg_bool AUTO_RESET
+    cfg_bool BATT_RESPECT_CHARGING
+    cfg_bool APP_RULES
+    cfg_bool AUTO_DEBUG
+
+    # Vzajemna konzistence prahu. Kdyby je nekdo nastavil naopak, demon by
+    # se zasekl v jedne urovni - radeji je srovname a rekneme to.
+    if [ "$THERM_OK_MC" -ge "$THERM_WARN_MC" ]; then
+        THERM_OK_MC=$((THERM_WARN_MC - 1000))
+        log WARN "THERM_OK_MC >= THERM_WARN_MC, srovnano na $THERM_OK_MC"
+    fi
+    if [ "$THERM_HOT_MC" -le "$THERM_WARN_MC" ]; then
+        THERM_HOT_MC=$((THERM_WARN_MC + 1000))
+        log WARN "THERM_HOT_MC <= THERM_WARN_MC, srovnano na $THERM_HOT_MC"
+    fi
+    if [ "$THERM_CRIT_MC" -le "$THERM_HOT_MC" ]; then
+        THERM_CRIT_MC=$((THERM_HOT_MC + 1000))
+        log WARN "THERM_CRIT_MC <= THERM_HOT_MC, srovnano na $THERM_CRIT_MC"
+    fi
+    if [ "$JUNC_HOT_MC" -le "$JUNC_WARN_MC" ]; then
+        JUNC_HOT_MC=$((JUNC_WARN_MC + 2000))
+        log WARN "JUNC_HOT_MC <= JUNC_WARN_MC, srovnano na $JUNC_HOT_MC"
+    fi
+    return 0
+}
+
+# ===========================================================================
+# RESOLUCE CIDEL
+#
+# POZOR (overeno na zarizeni): indexy thermal_zoneN NEJSOU stabilni pres
+# reboot - soc_therm se presunul ze zone11 na zone13, battery ze zone16 na
+# zone12, thermal-cpufreq-2 z cd12 na cd11. Zadratovany index = chyba.
+# Poradi hledani: stabilni symlink /dev/thermal/tz-by-name -> scan podle
+# pole `type`. ZADNY fallback na cislo: kdyz cidlo nenajdeme, radeji ho
+# nemame vubec (prazdna promenna) nez abychom cetli nahodne jine.
+# ===========================================================================
+
+resolve_zone() {
+    if [ -r "/dev/thermal/tz-by-name/$1/temp" ]; then
+        print -rn -- "/dev/thermal/tz-by-name/$1"
+        return 0
+    fi
+    for _z in /sys/class/thermal/thermal_zone*; do
+        [ -r "$_z/type" ] || continue
+        read -r _ty < "$_z/type" 2>/dev/null || continue
+        if [ "$_ty" = "$1" ]; then
+            print -rn -- "$_z"
+            return 0
+        fi
+    done
+    return 1
+}
+
+resolve_sensors() {
+    Z_SKIN=$(resolve_zone quiet_therm) || Z_SKIN=""
+    Z_BIG=$(resolve_zone BIG)          || Z_BIG=""
+    Z_MID=$(resolve_zone MID)          || Z_MID=""
+    Z_LIT=$(resolve_zone LITTLE)       || Z_LIT=""
+    Z_G3D=$(resolve_zone G3D)          || Z_G3D=""
+
+    [ -n "$Z_SKIN" ] || log ERROR "cidlo quiet_therm (skin) NENALEZENO - teplotni ochrana pojede jen z junction cidel"
+    _j=""
+    [ -n "$Z_BIG" ] && _j="$_j BIG"
+    [ -n "$Z_MID" ] && _j="$_j MID"
+    [ -n "$Z_LIT" ] && _j="$_j LITTLE"
+    [ -n "$Z_G3D" ] && _j="$_j G3D"
+    [ -n "$_j" ] || log ERROR "zadne junction cidlo nenalezeno - rychly kanal predikce je mimo provoz"
+    log INFO "cidla: skin='${Z_SKIN:-?}' junction='${_j# }'"
+    [ -d "$BATTDIR" ] || log WARN "$BATTDIR neexistuje - stav baterie se nebude zohlednovat"
+    return 0
+}
+
+zread() {
+    # zread <adresar_zony> -> ZT (milicelsia); 1 pri chybe nebo nesmyslu
+    [ -n "$1" ] || return 1
+    read -r ZT < "$1/temp" 2>/dev/null || return 1
+    case "$ZT" in
+        ''|*[!0-9-]*) return 1 ;;
+    esac
+    # Odpojene cidlo hlasi 0 nebo zaporne cislo; nad 150 C uz je to porucha.
+    [ "$ZT" -le 0 ] && return 1
+    [ "$ZT" -gt 150000 ] && return 1
+    return 0
+}
+
+# ===========================================================================
+# ODECET CIDEL + DERIVACE
+# ===========================================================================
+
+sense() {
+    # ---- skin ------------------------------------------------------------
+    if zread "$Z_SKIN"; then
+        THERM_RDFAIL=0
+        _new=$ZT
+        if [ "$SKIN_PREV_MC" -lt 0 ]; then
+            SKIN_PREV_MC=$_new
+            SKIN_PREV_T=$NOW
+            SKIN_SLOPE=0
+        else
+            _dt=$((NOW - SKIN_PREV_T))
+            if [ "$_dt" -lt 0 ] || [ "$_dt" -gt "$SLOPE_MAX_DT" ]; then
+                # Mezi vzorky byla dira (suspend, zastaveny tikar). Stary sklon
+                # by se extrapoloval z nesouvisejicich bodu -> zahodit.
+                SKIN_SLOPE=0
+                SKIN_PREV_MC=$_new
+                SKIN_PREV_T=$NOW
+            elif [ "$_dt" -ge "$SLOPE_MIN_DT" ]; then
+                _s=$(( (_new - SKIN_PREV_MC) * 100 / _dt ))
+                # EWMA alfa = 0,5 v celociselne aritmetice. Tlumi jednorazovy
+                # skok cidla, ale porad reaguje behem dvou vzorku.
+                SKIN_SLOPE=$(( (SKIN_SLOPE + _s) / 2 ))
+                SKIN_PREV_MC=$_new
+                SKIN_PREV_T=$NOW
+            fi
+            # _dt < SLOPE_MIN_DT => vzorek je moc blizko, sklon nechavame beze zmeny
+        fi
+        SKIN_MC=$_new
+    else
+        THERM_RDFAIL=$((THERM_RDFAIL + 1))
+        if [ "$THERM_RDFAIL" -ge "$THERM_READ_FAIL_MAX" ] && [ "$THERM_LEVEL" -gt 0 ]; then
+            log ERROR "skin cidlo neni citelne ${THERM_RDFAIL}x po sobe - RUSIM teplotni omezeni (fail-open, HAL chladi dal sam)"
+            THERM_LEVEL=0
+            THERM_UPC=0
+            THERM_DOWNC=0
+            THERM_SINCE=$NOW
+        fi
+    fi
+
+    # ---- junction (maximum ze ctyr) --------------------------------------
+    JUNC_MC=0
+    JUNC_SRC=""
+    for _p in "BIG:$Z_BIG" "MID:$Z_MID" "LITTLE:$Z_LIT" "G3D:$Z_G3D"; do
+        _nm=${_p%%:*}
+        _dir=${_p#*:}
+        [ -n "$_dir" ] || continue
+        if zread "$_dir" && [ "$ZT" -gt "$JUNC_MC" ]; then
+            JUNC_MC=$ZT
+            JUNC_SRC=$_nm
+        fi
+    done
+
+    # ---- predikce --------------------------------------------------------
+    if [ "$SKIN_SLOPE" -gt "$SLOPE_NOISE" ]; then
+        SKIN_PRED=$(( SKIN_MC + SKIN_SLOPE * THERM_HORIZON_SEC / 100 ))
+    else
+        # Klesajici ani sumovy sklon se NEEXTRAPOLUJE. Predikce smi zasah jen
+        # uspisit, nikdy odlozit - kdybychom extrapolovali dolu, umlceli
+        # bychom skutecne prekroceni prahu.
+        SKIN_PRED=$SKIN_MC
+    fi
+
+    # ---- baterie ---------------------------------------------------------
+    BATT_PCT=-1
+    BATT_CHG=0
+    BATT_TEMP_DC=-1000
+    if [ -d "$BATTDIR" ]; then
+        if read -r _c < "$BATTDIR/capacity" 2>/dev/null; then
+            case "$_c" in
+                ''|*[!0-9]*) : ;;
+                *) [ "$_c" -le 100 ] && BATT_PCT=$_c ;;
+            esac
+        fi
+        if read -r _s < "$BATTDIR/status" 2>/dev/null; then
+            case "$_s" in
+                Charging|Full) BATT_CHG=1 ;;
+            esac
+        fi
+        if read -r _bt < "$BATTDIR/temp" 2>/dev/null; then
+            case "$_bt" in
+                ''|*[!0-9-]*) : ;;
+                *) BATT_TEMP_DC=$_bt ;;
+            esac
+        fi
+    fi
+    return 0
+}
+
+# ===========================================================================
+# TEPLOTNI STAVOVY AUTOMAT (PREDIKTIVNI)
+#
+# Ctyri urovne: 0 ok / 1 warm / 2 hot / 3 crit.
+# Uroven vznika jako MAXIMUM ze ctyr nezavislych kanalu:
+#
+#   A) ABSOLUTNI SKIN - fakt, ne odhad. Uplatnuje se OKAMZITE bez potvrzovani.
+#        >= THERM_CRIT_MC -> 3,  >= THERM_HOT_MC -> 2,  >= THERM_WARN_MC -> 1
+#
+#   B) PREDIKOVANY SKIN = skin + sklon * horizont. Uplatnuje se az po
+#      THERM_CONFIRM shodnych vyhodnocenich. Tohle je ta prediktivnost:
+#      pri narustu 3 C/min a skinu 39,5 C vyjde predikce na 60 s dopredu
+#      42,5 C -> uroven 1 uz ted, jeste pod absolutnim prahem.
+#
+#   C) JUNCTION - nejrychlejsi kanal, roste desitky sekund pred skinem.
+#      Take s potvrzovanim a stropovany na JUNC_MAX_LEVEL (2), protoze
+#      mereni pro uroven 3 mam jen na skinu.
+#
+#   D) TEPLOTA BATERIE >= BATT_TEMP_WARN_DC -> minimalne uroven 1.
+#
+# ZVYSOVANI je o libovolny pocet stupnu naraz (kdyz uz je pozde, stoupat po
+# jednom nema smysl). SNIZOVANI JE VZDY O JEDEN STUPEN a az po THERM_HOLD_SEC
+# - zrcadli HALovy MaxReleaseStep=1 a merenych ~84 s na uvolneni.
+#
+# Navratova hodnota: 0 = uroven se zmenila, 1 = beze zmeny.
+# ===========================================================================
+
+therm_level_from() {
+    if   [ "$1" -ge "$THERM_CRIT_MC" ]; then TL=3
+    elif [ "$1" -ge "$THERM_HOT_MC" ];  then TL=2
+    elif [ "$1" -ge "$THERM_WARN_MC" ]; then TL=1
+    else                                     TL=0
+    fi
+    return 0
+}
+
+therm_eval() {
+    therm_level_from "$SKIN_MC"
+    _abs=$TL
+    therm_level_from "$SKIN_PRED"
+    _pre=$TL
+
+    _jun=0
+    if   [ "$JUNC_MC" -ge "$JUNC_HOT_MC" ];  then _jun=2
+    elif [ "$JUNC_MC" -ge "$JUNC_WARN_MC" ]; then _jun=1
+    fi
+    [ "$_jun" -gt "$JUNC_MAX_LEVEL" ] && _jun=$JUNC_MAX_LEVEL
+
+    _bat=0
+    [ "$BATT_TEMP_DC" -ge "$BATT_TEMP_WARN_DC" ] && _bat=1
+
+    # potvrzovana cast (predikce + junction + baterie)
+    _soft=$_pre
+    [ "$_jun" -gt "$_soft" ] && _soft=$_jun
+    [ "$_bat" -gt "$_soft" ] && _soft=$_bat
+
+    _want=$_abs
+    [ "$_soft" -gt "$_want" ] && _want=$_soft
+
+    _old=$THERM_LEVEL
+
+    if [ "$_abs" -gt "$THERM_LEVEL" ]; then
+        # Merena skutecnost prekonala prah - zadne cekani na potvrzeni.
+        THERM_LEVEL=$_abs
+        THERM_SINCE=$NOW
+        THERM_UPC=0
+        THERM_DOWNC=0
+        log WARN "TEPLOTA uroven $_old -> $THERM_LEVEL (skin ${SKIN_MC}mC prekrocil prah; junction ${JUNC_MC}mC/${JUNC_SRC:-?})"
+    elif [ "$_want" -gt "$THERM_LEVEL" ]; then
+        THERM_UPC=$((THERM_UPC + 1))
+        THERM_DOWNC=0
+        if [ "$THERM_UPC" -ge "$THERM_CONFIRM" ]; then
+            THERM_LEVEL=$_want
+            THERM_SINCE=$NOW
+            THERM_UPC=0
+            log WARN "TEPLOTA uroven $_old -> $THERM_LEVEL PREDIKTIVNE (skin ${SKIN_MC}mC, sklon ${SKIN_SLOPE}mC/100s, predikce za ${THERM_HORIZON_SEC}s ${SKIN_PRED}mC, junction ${JUNC_MC}mC/${JUNC_SRC:-?}, baterie ${BATT_TEMP_DC}dC) - potvrzeno ${THERM_CONFIRM}x"
+        else
+            dbg "teplota: kandidat na uroven $_want ($THERM_UPC/$THERM_CONFIRM), skin ${SKIN_MC} pred ${SKIN_PRED} junc ${JUNC_MC}"
+        fi
+    elif [ "$_want" -lt "$THERM_LEVEL" ]; then
+        THERM_UPC=0
+        if [ "$THERM_LEVEL" -eq 1 ] && [ "$SKIN_MC" -gt "$THERM_OK_MC" ]; then
+            # Na uroven 0 az kdyz je skin opravdu dole, ne jen pod WARN.
+            THERM_DOWNC=0
+            dbg "teplota: drzim uroven 1, skin ${SKIN_MC} > THERM_OK_MC ${THERM_OK_MC}"
+        elif [ "$((NOW - THERM_SINCE))" -lt "$THERM_HOLD_SEC" ]; then
+            dbg "teplota: uroven $THERM_LEVEL drzena jeste $((THERM_HOLD_SEC - (NOW - THERM_SINCE)))s (HAL uvolnuje ~84s)"
+        else
+            THERM_DOWNC=$((THERM_DOWNC + 1))
+            if [ "$THERM_DOWNC" -ge "$THERM_CONFIRM" ]; then
+                THERM_LEVEL=$((THERM_LEVEL - 1))      # jen o jeden stupen
+                THERM_SINCE=$NOW
+                THERM_DOWNC=0
+                log INFO "TEPLOTA uroven $_old -> $THERM_LEVEL (skin ${SKIN_MC}mC, sklon ${SKIN_SLOPE}mC/100s, junction ${JUNC_MC}mC)"
+            fi
+        fi
+    else
+        THERM_UPC=0
+        THERM_DOWNC=0
+    fi
+
+    [ "$THERM_LEVEL" != "$_old" ] && return 0
+    return 1
+}
+
+# ===========================================================================
+# DETEKCE TAGU
+# ===========================================================================
+
+# /system/etc/event-log-tags je vygenerovany soubor "cislo nazev (popis)".
+have_tag() {
+    grep -q "^[0-9][0-9]* $1 " /system/etc/event-log-tags 2>/dev/null
+}
+
+detect_tags() {
+    FG_TAG=""
+    SCR_TAG=""
+    if [ ! -r /system/etc/event-log-tags ]; then
+        log WARN "/system/etc/event-log-tags neni citelny, pouzivam overene vychozi nazvy tagu"
+        FG_TAG=wm_resume_activity
+        SCR_TAG=power_screen_state
+        return 0
+    fi
+    for _t in wm_resume_activity am_resume_activity wm_on_resume_called am_on_resume_called; do
+        if have_tag "$_t"; then FG_TAG=$_t; break; fi
+    done
+    for _t in power_screen_state screen_toggled; do
+        if have_tag "$_t"; then SCR_TAG=$_t; break; fi
+    done
+
+    if [ -z "$FG_TAG" ]; then
+        log ERROR "v event-log-tags neni zadny znamy tag pro popredi - sledovani aplikaci NEBUDE fungovat"
+    else
+        log INFO "tag popredi: $FG_TAG"
+    fi
+    if [ -z "$SCR_TAG" ]; then
+        log ERROR "v event-log-tags neni power_screen_state ani screen_toggled - stav obrazovky NEBUDE detekovan (POZOR: bez nej se nevypina tikar)"
+    else
+        log INFO "tag obrazovky: $SCR_TAG"
+    fi
+    return 0
+}
+
+# ===========================================================================
+# PARSOVANI UDALOSTI
+#
+# Radek z binarniho bufferu vypada takto:
+#   08-07 12:34:56.789  1000  2345  2345 I wm_resume_activity: [0,141688585,73,com.foo/.Main]
+#   08-07 12:34:56.789  1000  1200  1200 I power_screen_state: [0,3,0,0,0]
+# ===========================================================================
+
+ev_payload() {
+    _p=${1#*: [}
+    [ "$_p" = "$1" ] && { EVP=""; return 1; }
+    EVP=${_p%]*}
+    [ -n "$EVP" ] || return 1
+    return 0
+}
+
+ev_pkg() {
+    EVPKG=""
+    case "$FG_TAG" in
+        *_on_resume_called)
+            # (User),(Component Name),(Reason) -> komponenta je 2. pole
+            _rest=${EVP#*,}
+            _comp=${_rest%%,*}
+            ;;
+        *)
+            # (User),(Token),(Task ID),(Component Name) -> komponenta je posledni
+            _comp=${EVP##*,}
+            ;;
+    esac
+    _comp=${_comp# }
+    EVPKG=${_comp%%/*}
+    case "$EVPKG" in
+        ''|*[!A-Za-z0-9._]*) EVPKG="" ; return 1 ;;
+    esac
+    return 0
+}
+
+# ===========================================================================
+# STATISTIKA APLIKACI
+# ===========================================================================
+
+# Poskozeny appstats (binarni smeti, useknuty zapis, plny /data) nesmi
+# demona rozhodit ani ho poslat do spatne tridy.
+stats_sanity() {
+    [ -f "$APPSTATS" ] || return 0
+    _sz=$(stat -c %s "$APPSTATS" 2>/dev/null)
+    case "$_sz" in ''|*[!0-9]*) _sz=0 ;; esac
+    if [ "$_sz" -gt "$STATS_MAX_BYTES" ]; then
+        log WARN "appstats ma $_sz B (> $STATS_MAX_BYTES) - odkladam na .bad a zacinam znovu"
+        mv -f "$APPSTATS" "$APPSTATS.bad" 2>/dev/null
+        return 0
+    fi
+    _tot=0
+    _bad=0
+    while IFS= read -r _l; do
+        _tot=$((_tot + 1))
+        # shellcheck disable=SC2086
+        set -- $_l
+        if [ $# -lt 6 ]; then _bad=$((_bad + 1)); continue; fi
+        case "$3$4$5$6" in *[!0-9]*) _bad=$((_bad + 1)) ;; esac
+    done < "$APPSTATS"
+    if [ "$_tot" -gt 0 ] && [ "$((_bad * 2))" -gt "$_tot" ]; then
+        log ERROR "appstats je poskozeny ($_bad z $_tot radku nesedi) - odkladam na .bad a zacinam znovu"
+        mv -f "$APPSTATS" "$APPSTATS.bad" 2>/dev/null
+    elif [ "$_bad" -gt 0 ]; then
+        log WARN "appstats: $_bad z $_tot radku je vadnych, budou se ignorovat"
+    fi
+    return 0
+}
+
+stats_get() {
+    # stats_get <pkg> -> S_CLASS S_N S_CPU S_FG S_SEEN
+    S_CLASS=""; S_N=0; S_CPU=0; S_FG=0; S_SEEN=0
+    [ -f "$APPSTATS" ] || return 0
+    _line=$(grep -m1 "^$1 " "$APPSTATS" 2>/dev/null)
+    [ -z "$_line" ] && return 0
+    # shellcheck disable=SC2086
+    set -- $_line
+    [ $# -ge 6 ] || return 0
+    case "$3$4$5$6" in *[!0-9]*) return 0 ;; esac
+    case "$2" in
+        game|heavy|normal|light) S_CLASS=$2 ;;
+        *) return 0 ;;
+    esac
+    S_N=$3; S_CPU=$4; S_FG=$5; S_SEEN=$6
+    return 0
+}
+
+classify() {
+    # classify <n> <ewma_cpu> <total_fg_sec> -> echo trida
+    _n=$1; _c=$2; _f=$3
+    if [ "$_n" -lt "$CLASS_MIN_SAMPLES" ]; then echo "$CLASS_DEFAULT"; return 0; fi
+    _avg=$((_f / _n))
+    if [ "$_c" -ge "$CPU_GAME" ] && [ "$_avg" -ge "$SESS_GAME" ]; then echo game; return 0; fi
+    if [ "$_c" -ge "$CPU_HEAVY" ]; then echo heavy; return 0; fi
+    if [ "$_c" -ge "$CPU_NORMAL" ]; then echo normal; return 0; fi
+    echo light
+    return 0
+}
+
+app_class() {
+    # app_class <pkg> -> echo trida (rucni override ma prednost)
+    if [ -f "$OVERRIDES" ]; then
+        _o=$(grep -m1 "^$1 " "$OVERRIDES" 2>/dev/null)
+        if [ -n "$_o" ]; then
+            _o=${_o#* }
+            _o=${_o%% *}
+            case "$_o" in
+                game|heavy|normal|light) echo "$_o"; return 0 ;;
+            esac
+        fi
+    fi
+    stats_get "$1"
+    if [ -n "$S_CLASS" ]; then echo "$S_CLASS"; else echo "$CLASS_DEFAULT"; fi
+    return 0
+}
+
+stats_update() {
+    # stats_update <pkg> <cpu_pct> <dur_sec>
+    _p=$1; _cpu=$2; _dur=$3
+    stats_get "$_p"
+    _n=$((S_N + 1))
+    if [ "$S_N" -eq 0 ]; then
+        _e=$_cpu
+    else
+        # EWMA, alfa = 0,3 v celociselne aritmetice
+        _e=$(((S_CPU * 7 + _cpu * 3) / 10))
+    fi
+    _fg=$((S_FG + _dur))
+    _cls=$(classify "$_n" "$_e" "$_fg")
+    _seen=$(date +%s 2>/dev/null)
+    case "$_seen" in ''|*[!0-9]*) _seen=0 ;; esac
+
+    {
+        [ -f "$APPSTATS" ] && grep -v "^$_p " "$APPSTATS" 2>/dev/null
+        printf '%s %s %s %s %s %s\n' "$_p" "$_cls" "$_n" "$_e" "$_fg" "$_seen"
+    } > "$APPSTATS.tmp" 2>/dev/null
+
+    if [ -s "$APPSTATS.tmp" ]; then
+        mv -f "$APPSTATS.tmp" "$APPSTATS" 2>/dev/null
+    else
+        rm -f "$APPSTATS.tmp" 2>/dev/null
+        log WARN "zapis appstats selhal (prazdny docasny soubor) - vzorek $_p zahozen"
+        return 0
+    fi
+
+    _lines=$(wc -l < "$APPSTATS" 2>/dev/null)
+    case "$_lines" in ''|*[!0-9]*) _lines=0 ;; esac
+    if [ "$_lines" -gt "$STATS_MAX_LINES" ]; then
+        if sort -k6 -n -r "$APPSTATS" 2>/dev/null | head -n "$STATS_MAX_LINES" > "$APPSTATS.tmp" 2>/dev/null; then
+            [ -s "$APPSTATS.tmp" ] && mv -f "$APPSTATS.tmp" "$APPSTATS" 2>/dev/null
+        fi
+        rm -f "$APPSTATS.tmp" 2>/dev/null
+    fi
+
+    if [ "$_cls" != "$S_CLASS" ]; then
+        log INFO "klasifikace $_p: ${S_CLASS:-?} -> $_cls (cpu ewma ${_e}%, vzorku $_n, popredi celkem ${_fg}s)"
+    else
+        dbg "vzorek $_p: cpu ${_cpu}% za ${_dur}s, ewma ${_e}%, n=$_n, trida $_cls"
+    fi
+    # Trida se prepise jen kdyz jde o AKTUALNE popredni aplikaci. Predchozi
+    # verze prepisovala CUR_CLASS vzdy, takze uzavreni okna odchazejici
+    # aplikace prepsalo tridu te nove.
+    [ "$_p" = "$CUR_PKG" ] && CUR_CLASS=$_cls
+    return 0
+}
+
+# ===========================================================================
+# VZORKOVANI CPU
+# ===========================================================================
+
+pkg_pid() {
+    PP=$(pidof -s "$1" 2>/dev/null)
+    case "$PP" in ''|*[!0-9]*) PP="" ; return 1 ;; esac
+    return 0
+}
+
+proc_jiffies() {
+    # proc_jiffies <pid> -> PJ = utime + stime (v tiku, USER_HZ = 100)
+    _pid=$1
+    [ -r "/proc/$_pid/stat" ] || return 1
+    read -r _st < "/proc/$_pid/stat" 2>/dev/null || return 1
+    _r=${_st#*") "}
+    [ "$_r" = "$_st" ] && return 1
+    # shellcheck disable=SC2086
+    set -- $_r
+    [ $# -ge 13 ] || return 1
+    _u=${12}; _s=${13}
+    case "$_u$_s" in *[!0-9]*) return 1 ;; esac
+    PJ=$((_u + _s))
+    return 0
+}
+
+sample_start() {
+    # Meri se JEN pri zapnute obrazovce a jen dokud o aplikaci nemame dost dat.
+    SMP_PKG=""; SMP_PID=""; SMP_J=0; SMP_T=0
+    [ "$SCREEN" = "1" ] || return 0
+    [ -n "$1" ] || return 0
+    stats_get "$1"
+    [ "$S_N" -ge "$STATS_MAX_SAMPLES" ] && return 0
+    pkg_pid "$1" || return 0
+    proc_jiffies "$PP" || return 0
+    SMP_PKG=$1; SMP_PID=$PP; SMP_J=$PJ; SMP_T=$NOW
+    return 0
+}
+
+sample_finish() {
+    [ -n "$SMP_PKG" ] || return 0
+    _dur=$((NOW - SMP_T))
+    _pkg=$SMP_PKG; _pid=$SMP_PID; _j0=$SMP_J
+    SMP_PKG=""; SMP_PID=""; SMP_J=0; SMP_T=0
+    [ "$_dur" -ge "$SAMPLE_MIN_SEC" ] || return 0
+    # Okno delsi nez hodinu znamena, ze se mezi tim neco stalo (suspend,
+    # zamrzly tikar) - prumer za takove okno nic nevypovida.
+    [ "$_dur" -gt 3600 ] && return 0
+    proc_jiffies "$_pid" || return 0      # proces mezitim umrel -> vzorek zahodit
+    _dj=$((PJ - _j0))
+    [ "$_dj" -lt 0 ] && return 0
+    # procenta jednoho jadra = delta_tiku / delta_sekund (100 tiku = 1 jadro-sekunda)
+    _cpu=$((_dj / _dur))
+    [ "$_cpu" -gt 900 ] && _cpu=900
+    stats_update "$_pkg" "$_cpu" "$_dur"
+    return 0
+}
+
+# ===========================================================================
+# KAMERA
+# ===========================================================================
+
+camera_active() {
+    # SPEC: systemovy thermal HAL si sam nastavuje profil "camera".
+    # Kdyz je aktivni, do rizeni nezasahujeme.
+    if [ -n "$CUR_PKG" ] && in_list "$CUR_PKG" "$CAMERA_PKGS"; then
+        return 0
+    fi
+    _a=$(getprop "$THERM_PROP_MID" 2>/dev/null)
+    _b=$(getprop "$THERM_PROP_HIGH" 2>/dev/null)
+    if [ "$_a" = "camera" ] || [ "$_b" = "camera" ]; then
+        [ "$CAMERA_SINCE" -eq 0 ] && CAMERA_SINCE=$NOW
+        if [ "$((NOW - CAMERA_SINCE))" -gt "$CAMERA_HOLD_MAX" ]; then
+            log WARN "prop thermal profile visi na 'camera' uz $((NOW - CAMERA_SINCE)) s - ignoruji a pokracuji"
+            return 1
+        fi
+        return 0
+    fi
+    CAMERA_SINCE=0
+    return 1
+}
+
+# ===========================================================================
+# PROFILY: CTENI, AUDIT LEPIVOSTI, POJISTKA NA THERMAL PROP
+# ===========================================================================
+
+# prof_val <soubor> <klic> -> echo hodnota bez uvozovek (prazdna kdyz chybi)
+# Profil se ZAMERNE nesourcuje - sourcovani by prepsalo promenne demona
+# (PROFILE_NAME, UCLAMP_*) a spustilo cokoli, co v souboru je.
+prof_val() {
+    [ -f "$1" ] || return 0
+    _l=$(grep -m1 "^$2=" "$1" 2>/dev/null) || return 0
+    _v=${_l#*=}
+    _v=${_v%\"}
+    _v=${_v#\"}
+    print -rn -- "$_v"
+    return 0
+}
+
+# prof_keys <soubor> -> klice, ktere profil REALNE nastavuje (neprazdna hodnota)
+prof_keys() {
+    [ -f "$1" ] || return 0
+    grep -E '^[A-Z][A-Z0-9_]*=' "$1" 2>/dev/null | while IFS= read -r _l; do
+        _k=${_l%%=*}
+        case "$_k" in PROFILE_NAME|PROFILE_DESC) continue ;; esac
+        _v=${_l#*=}
+        _v=${_v%\"}
+        _v=${_v#\"}
+        [ -n "$_v" ] && printf '%s ' "$_k"
+    done
+    return 0
+}
+
+# Startovni audit lepivosti profilu.
+#
+# STAV: pozadavek R1 je v CLI HOTOVY. `profile_apply()` vola
+# `restore_stock_values()` jako uplne prvni krok, takze se pred kazdou
+# aplikaci profilu vraci vsechny klice kontraktu na stock. Prazdny klic
+# v profilu uz tedy neznamena "zustane hodnota po predchozim profilu",
+# ale "zustane STOCK hodnota" - a to je presne zamer kontraktu.
+#
+# Overeno na zarizeni (nejhorsi pripady):
+#   game  -> balanced:  thermal prop [game] -> [], uclamp.min 30 -> 0, bg 30 -> max
+#   night -> balanced:  charge_stop 80 -> 100, gpu 419000 -> 890000
+#
+# Audit proto bezi jen jako DIAGNOSTIKA na urovni INFO a jen kdyz CLI
+# priznak --reset neumi (RESET_MODE=0). Puvodni WARN hlaseni uz neplatilo
+# a matlo v logu.
+audit_sticky() {
+    if [ "$RESET_MODE" = "1" ]; then
+        log INFO "audit lepivosti: CLI resetuje na stock pred kazdym profilem (R1 hotovo), audit preskocen"
+        return 0
+    fi
+    _union=""
+    for _p in $AUTO_PROFILES; do
+        _f="$PROFDIR/$_p.conf"
+        [ -f "$_f" ] || { log WARN "profil '$_p' z AUTO_PROFILES neexistuje ($_f)"; continue; }
+        for _k in $(prof_keys "$_f"); do
+            in_list "$_k" "$_union" || _union="$_union $_k"
+        done
+    done
+    _union=${_union# }
+    [ -n "$_union" ] || return 0
+
+    _any=0
+    for _p in $AUTO_PROFILES; do
+        _f="$PROFDIR/$_p.conf"
+        [ -f "$_f" ] || continue
+        _has=$(prof_keys "$_f")
+        _miss=""
+        for _k in $_union; do
+            in_list "$_k" "$_has" || _miss="$_miss $_k"
+        done
+        if [ -n "$_miss" ]; then
+            _any=1
+            log WARN "lepive klice: profil '$_p' NEnastavuje:$_miss (po prepnuti na nej zustanou hodnoty z predchoziho profilu)"
+        fi
+    done
+    if [ "$_any" = "1" ]; then
+        log WARN "lepivost se plne vyresi az pozadavkem R1 (pxtune profile <name> --auto --reset). Do te doby demon hlida aspon thermal prop (prop_guard)."
+    else
+        log INFO "audit lepivosti: vsechny profily z rotace nastavuji stejnou mnozinu klicu"
+    fi
+    return 0
+}
+
+# JEDINA VYJIMKA ZE ZASADY "demon nezapisuje".
+#
+# game.conf nastavuje THERMAL_PROFILE_CPU_MID/HIGH="game". V HAL profilu
+# "game" maji podle SPEC CPU cdev vazby "Disabled": true, tedy VYPNUTE CPU
+# thermal throttling. Protoze prazdna hodnota v jinem profilu znamena
+# "nesahat", zustal by prop na "game" i po odchodu ze hry - telefon by mel
+# trvale vypnutou CPU teplotni ochranu. To uz neni "lepivy profil", to je
+# bezpecnostni problem, a je to presne opak toho, co ma tenhle demon delat.
+#
+# Demon proto uklizi po sobe: kdyz odchazi z profilu, ktery prop nastavil na
+# "game", a novy profil ho nenastavuje, vrati ho na default.
+# NIKDY nesahne na hodnotu "camera" - tu rezirujec system.
+prop_guard() {
+    [ "$THERMAL_PROP_CLEAR" = "1" ] || return 0
+    _new=$1
+    _f="$PROFDIR/$_new.conf"
+    _pm=$(prof_val "$_f" THERMAL_PROFILE_CPU_MID)
+    _ph=$(prof_val "$_f" THERMAL_PROFILE_CPU_HIGH)
+
+    for _pp in "$THERM_PROP_MID|$_pm" "$THERM_PROP_HIGH|$_ph"; do
+        _prop=${_pp%%|*}
+        _want=${_pp#*|}
+        [ -n "$_want" ] && continue          # novy profil si to nastavuje sam
+        _cur=$(getprop "$_prop" 2>/dev/null)
+        if [ "$_cur" = "game" ]; then
+            if setprop "$_prop" "" 2>/dev/null; then
+                log WARN "$_prop vracen z 'game' na default (profil '$_new' ho nenastavuje; jinak by zustalo VYPNUTE CPU thermal throttling)"
+            else
+                log ERROR "$_prop je 'game' a nejde vratit na default - CPU thermal throttling zustava vypnute"
+            fi
+        fi
+    done
+    return 0
+}
+
+# ===========================================================================
+# PER-APP PRAVIDLA
+#
+# HORKA CESTA. apprule_load() se vola pri KAZDE udalosti popredi, tedy
+# i pri rychlem proletnuti aplikacemi. Proto tu NENI ANI JEDEN FORK:
+#   - vyhledani pravidla je `[ -f "$APPDIR/$pkg.conf" ]` (proto jeden soubor
+#     na balicek a ne jeden spolecny - ten by znamenal grep = fork = 7,7 ms),
+#   - parsovani je `while IFS='=' read` v aktualnim shellu (presmerovani
+#     vstupu z fajlu subshell nedela),
+#   - ctou se JEN klice, ktere demon opravdu potrebuje. Zbytek (GAME_*,
+#     APP_OVERLAY_*, APP_REFRESH_*, APP_RES*) je vec bin/pxtune-perapp
+#     a bin/pxtune, demon je nikdy necte.
+#
+# Soubor se ZAMERNE NESOURCUJE: sourcovani by prepsalo promenne demona
+# a spustilo cokoli, co v souboru je. Prirazeni jde pres
+# `eval "AR_$k=\$_arv"` = prirazeni Z PROMENNE, ne re-evaluace obsahu.
+# ===========================================================================
+
+apprule_load() {
+    # apprule_load <pkg> -> AR_OK, AR_PKG, AR_APP_*
+    AR_OK=0
+    AR_PKG=""
+    AR_APP_PROFILE=""
+    AR_APP_MIN_FG_SEC=$APP_MIN_FG_DEF
+    AR_APP_STICKY_SEC=$APP_STICKY_DEF
+    AR_APP_THERMAL_CAP=0
+    _arens=1
+
+    [ "$APP_RULES" = "1" ] || return 1
+    [ -n "$1" ] || return 1
+    case "$1" in
+        *[!A-Za-z0-9._]*) return 1 ;;
+    esac
+    [ -f "$APPDIR/$1.conf" ] || return 1
+
+    while IFS='=' read -r _ark _arv; do
+        case "$_ark" in
+            APP_ENABLED|APP_PROFILE|APP_MIN_FG_SEC|APP_STICKY_SEC|APP_THERMAL_CAP) ;;
+            *) continue ;;
+        esac
+        _arv=${_arv%%#*}
+        while :; do
+            case "$_arv" in
+                *' '|*"	") _arv=${_arv%?} ;;
+                *) break ;;
+            esac
+        done
+        case "$_arv" in
+            \"*\") _arv=${_arv#\"}; _arv=${_arv%\"} ;;
+            \'*\') _arv=${_arv#\'}; _arv=${_arv%\'} ;;
+        esac
+        case "$_arv" in
+            *[!A-Za-z0-9._-]*) continue ;;
+        esac
+        case "$_ark" in
+            APP_ENABLED)
+                case "$_arv" in 0|off|OFF|false|no) _arens=0 ;; esac
+                ;;
+            *) eval "AR_$_ark=\$_arv" ;;
+        esac
+    done < "$APPDIR/$1.conf"
+
+    [ "$_arens" = "1" ] || return 1
+
+    case "$AR_APP_MIN_FG_SEC" in ''|*[!0-9]*) AR_APP_MIN_FG_SEC=$APP_MIN_FG_DEF ;; esac
+    case "$AR_APP_STICKY_SEC" in ''|*[!0-9]*) AR_APP_STICKY_SEC=$APP_STICKY_DEF ;; esac
+    [ "$AR_APP_MIN_FG_SEC" -lt 1 ]    && AR_APP_MIN_FG_SEC=1
+    [ "$AR_APP_MIN_FG_SEC" -gt 600 ]  && AR_APP_MIN_FG_SEC=600
+    [ "$AR_APP_STICKY_SEC" -gt 3600 ] && AR_APP_STICKY_SEC=3600
+    case "$AR_APP_THERMAL_CAP" in
+        1|on|ON|true|yes) AR_APP_THERMAL_CAP=1 ;;
+        *) AR_APP_THERMAL_CAP=0 ;;
+    esac
+    case "$AR_APP_PROFILE" in
+        ''|*[!A-Za-z0-9_-]*) AR_APP_PROFILE="" ;;
+    esac
+
+    AR_PKG=$1
+    AR_OK=1
+    return 0
+}
+
+# app_sched <sekundy> <zprava> -> planovac do FIFO; pid v APP_SCHED_PID.
+# Jediny fork v cele per-app ceste, a jen kdyz pravidlo opravdu existuje.
+APP_SCHED_GEN=0
+app_sched() {
+    # Stejny problem jako u tikare: `kill` planovace koncil SIGTERMem
+    # u hlavniho procesu a shazoval demona (overeno na zarizeni).
+    # Reseni je stejne - generace misto zabijeni.
+    APP_SCHED_GEN=$((APP_SCHED_GEN + 1))
+    _asg=$APP_SCHED_GEN
+    (
+        trap - TERM INT HUP USR1
+        sleep "$1"
+        echo "$2 #$_asg" >&3 2>/dev/null
+    ) &
+    APP_SCHED_PID=$!
+}
+
+# app_unsched <jmeno_promenne_s_pidem> - zrus planovac.
+# Zabiji se subshell, ne jeho `sleep`. Osirely sleep dobehne sam (max
+# APP_STICKY_SEC) a nic uz nezapise - jeho rodic, ktery mel psat do FIFO,
+# uz neexistuje. Skupinovy kill tu delat NELZE: subshell neni vedouci
+# procesni skupiny, takze `kill -PID` by trefil skupinu celeho demona.
+app_unsched() {
+    # ZADNY kill - viz komentar u app_sched. Zneplatnime generaci; osirely
+    # planovac dobehne svuj sleep, zapise tik s cizi generaci a ten se zahodi.
+    APP_SCHED_GEN=$((APP_SCHED_GEN + 1))
+    eval "$1="
+    return 0
+}
+
+# apprule_on_foreground - vola se z on_foreground() PO nastaveni CUR_PKG.
+#
+# VSTUP OPOZDENY / ODCHOD LINY:
+#   - novy balicek s pravidlem  -> zrus planovany odchod, naplanuj @APPARM
+#     za AR_APP_MIN_FG_SEC; pri zpracovani se overi, ze CUR_PKG je porad on
+#   - navrat do balicku, ktery vrstvu 3 uz drzi -> jen zrus planovany odchod
+#     (nula binderovych volani)
+#   - odchod jinam                -> naplanuj @APPLEAVE za APPMODE_STICKY
+apprule_on_foreground() {
+    apprule_load "$CUR_PKG"
+
+    if [ -n "$APPMODE_PKG" ] && [ "$APPMODE_PKG" = "$CUR_PKG" ]; then
+        app_unsched APPLV_PID
+        app_unsched APPARM_PID
+        dbg "per-app: navrat do $CUR_PKG uvnitr sticky okna, nic se nemeni"
+        return 0
+    fi
+
+    app_unsched APPARM_PID
+
+    if [ -n "$APPMODE_PKG" ] && [ -z "$APPLV_PID" ]; then
+        app_sched "$APPMODE_STICKY" "@APPLEAVE"
+        APPLV_PID=$APP_SCHED_PID
+        dbg "per-app: odchod z $APPMODE_PKG naplanovan za ${APPMODE_STICKY}s"
+    fi
+
+    if [ "$AR_OK" = "1" ]; then
+        app_sched "$AR_APP_MIN_FG_SEC" "@APPARM $CUR_PKG"
+        APPARM_PID=$APP_SCHED_PID
+        dbg "per-app: pravidlo pro $CUR_PKG, vstup naplanovan za ${AR_APP_MIN_FG_SEC}s"
+    fi
+    return 0
+}
+
+# apprule_leave_now <duvod> - okamzity a IDEMPOTENTNI navrat vrstvy 3.
+# Nikdy neselze tak, aby shodila volajiciho.
+apprule_leave_now() {
+    app_unsched APPARM_PID
+    app_unsched APPLV_PID
+    if [ -x "$PXTUNE" ]; then
+        "$PXTUNE" app leave >/dev/null 2>&1
+    else
+        rm -f "$APPMODE" 2>/dev/null
+    fi
+    [ -n "$APPMODE_PKG" ] && log INFO "per-app: vrstva 3 sundana po '$APPMODE_PKG' ($1)"
+    APPMODE_PKG=""
+    APPMODE_STICKY=$APP_STICKY_DEF
+    return 0
+}
+
+# ===========================================================================
+# ROZHODOVANI O PROFILU
+# ===========================================================================
+
+rank_of() {
+    case "$1" in
+        "$PROF_LIGHT")  RANK=0 ;;
+        "$PROF_NORMAL") RANK=1 ;;
+        "$PROF_HEAVY")  RANK=2 ;;
+        "$PROF_GAME")   RANK=3 ;;
+        *)              RANK=1 ;;
+    esac
+    return 0
+}
+
+prof_of_rank() {
+    case "$1" in
+        0) print -rn -- "$PROF_LIGHT" ;;
+        1) print -rn -- "$PROF_NORMAL" ;;
+        2) print -rn -- "$PROF_HEAVY" ;;
+        *) print -rn -- "$PROF_GAME" ;;
+    esac
+    return 0
+}
+
+target_profile() {
+    # 1) Obrazovka zhasla -> noc. Nic dalsiho se neresi: pri zhasle obrazovce
+    #    demon zamerne nesnima (zasada c. 2) a "night" je nejrestriktivnejsi
+    #    profil, ktery mame.
+    #    MERENIM je podlozene, ze to nic nerozbije: uclamp.max=50 dava podle
+    #    tabulky Little 1349 / Big 1418 / Prime 1600 MHz, coz na hovor,
+    #    navigaci i prehravani hudby bohate staci. UCLAMP_BG_MAX=17 v night
+    #    presne odpovida merene hranici "uclamp.max <= 17,8 -> uloha zustane
+    #    na malych jadrech", tedy pozadi je pripoutane na A510.
+    if [ "$SCREEN" = "0" ]; then
+        print -rn -- "$PROF_NIGHT"
+        return 0
+    fi
+
+    # 2) Horko ma prednost pred vsim ostatnim.
+    [ "$THERM_LEVEL" -ge 3 ] && { print -rn -- "$PROF_CRIT"; return 0; }
+    [ "$THERM_LEVEL" -eq 2 ] && { print -rn -- "$PROF_HOT"; return 0; }
+
+    # 3) Zakladni volba podle tridy aplikace.
+    case "$CUR_CLASS" in
+        game)   _want=$PROF_GAME ;;
+        heavy)  _want=$PROF_HEAVY ;;
+        light)  _want=$PROF_LIGHT ;;
+        *)      _want=$PROF_NORMAL ;;
+    esac
+    # 3b) PER-APP PRAVIDLO prebiji volbu podle tridy.
+    #
+    # PORADI PRIORIT je NATVRDO V KODU, ne v konfiguraci:
+    #
+    #     rucni manual_override  >  teplotni/bateriovy strop
+    #                            >  per-app pravidlo  >  adaptivni automat
+    #
+    # manual_override se resi v apply_profile() (demon neprepina vubec).
+    # Teplotni uroven >= 2 se resi v kroku 2 vyse, tedy JESTE PRED timhle
+    # blokem - pravidlo se k ni tudiz vubec nedostane. Zbyva uroven 1 a
+    # bateriove stropy nize, ktere se na per-app volbu uplatnuji stejne
+    # jako na volbu automatu. Per-app tedy prebiji jen automat, nic vic.
+    #
+    # Podminka APPMODE_PKG: pravidlo se uplatni az kdyz PROSLO anti-flappingem
+    # (@APPARM po APP_MIN_FG_SEC a overeni, ze je balicek porad v popredi).
+    # Proletnuti aplikaci profil neprepne.
+    if [ "$APP_RULES" = "1" ] && [ -n "$APPMODE_PKG" ] && [ "$APPMODE_PKG" = "$CUR_PKG" ] &&
+       [ "$AR_OK" = "1" ] && [ -n "$AR_APP_PROFILE" ]; then
+        if [ -f "$PROFDIR/$AR_APP_PROFILE.conf" ]; then
+            _want=$AR_APP_PROFILE
+            dbg "per-app: profil '$_want' z pravidla pro $CUR_PKG"
+        else
+            log ERROR "per-app pravidlo $CUR_PKG chce profil '$AR_APP_PROFILE', ktery v $PROFDIR neexistuje - pouzivam volbu automatu"
+        fi
+    fi
+
+    rank_of "$_want"
+    _r=$RANK
+    _cap=3
+
+    # 4) Teplotni uroven 1 = "prestan pomahat teplu". Strop na PROF_NORMAL
+    #    (balanced = cisty stock). Dulezite hlavne pro hry: game.conf vypina
+    #    CPU thermal throttling pres vendor.thermal.*.profile=game, coz je
+    #    presne to, co pri stoupajici teplote nechceme. Zaroven to jeste NENI
+    #    zpomaleni pod stock - falesny poplach na urovni 1 tedy uzivatele
+    #    nemuze stat vic nez ztratu boostu.
+    #
+    #    APP_THERMAL_CAP=1 v pravidle smi tenhle strop VYPNOUT - ale VYHRADNE
+    #    pro uroven 1. Uroven >= 2 se sem nikdy nedostane (krok 2 vyse vraci
+    #    PROF_HOT/PROF_CRIT rovnou), a i kdyby se poradi nekdy zmenilo, test
+    #    je zamerne `-eq 1`, ne `-ge 1`. Bez tehle pojistky by si uzivatel
+    #    v PoGO uvaril telefon: hra bezi hodiny, casto na primem slunci,
+    #    a namereny strop VLASTNIHO ohrevu je 40,5 C - vsechno nad tim je
+    #    vnejsi teplo, se kterym snizeni zateze uz nic nezmuze.
+    if [ "$THERM_LEVEL" -ge 1 ]; then
+        if [ "$THERM_LEVEL" -eq 1 ] && [ "$AR_OK" = "1" ] &&
+           [ "$AR_APP_THERMAL_CAP" = "1" ] && [ "$APPMODE_PKG" = "$CUR_PKG" ]; then
+            dbg "per-app: $CUR_PKG ma APP_THERMAL_CAP=1, teplotni uroven 1 se ignoruje"
+        else
+            _cap=1
+        fi
+    fi
+
+    # 5) Baterie. Pri nabijeni se stropy podle SoC neuplatnuji.
+    if [ "$BATT_PCT" -ge 0 ]; then
+        if [ "$BATT_RESPECT_CHARGING" = "1" ] && [ "$BATT_CHG" = "1" ]; then
+            :
+        elif [ "$BATT_PCT" -le "$BATT_CRIT_PCT" ]; then
+            _cap=0
+        elif [ "$BATT_PCT" -le "$BATT_LOW_PCT" ]; then
+            [ "$_cap" -gt 1 ] && _cap=1
+        fi
+    fi
+
+    [ "$_r" -gt "$_cap" ] && _r=$_cap
+    prof_of_rank "$_r"
+    return 0
+}
+
+# ===========================================================================
+# APLIKACE PROFILU
+# ===========================================================================
+
+auto_enabled() {
+    [ -f "$AUTOF" ] || return 0
+    read -r _au < "$AUTOF" 2>/dev/null || return 0
+    case "$_au" in
+        off|OFF|0|false) return 1 ;;
+    esac
+    return 0
+}
+
+# Volani CLI vcetne detekce podpory --reset (pozadavek R1).
+# Kdyz pxtune --reset neumi, ohlasi to jako chybu argumentu (exit 1) JESTE
+# PREDTIM, nez cokoli aplikuje - sonda je tedy bezpecna a provede se nejvyse
+# jednou za zivot procesu.
+#
+# --overlay <pkg> (vrstva 2 per-app): APP_OVERLAY_* z apps/<pkg>.conf prebiji
+# klice profilu. Podpora se zjistuje za behu stejne jako u --reset - kdyz ji
+# pxtune neumi, ohlasi chybu argumentu (exit 1) JESTE PREDTIM, nez cokoli
+# aplikuje, takze je sonda bezpecna a provede se nejvyse jednou za zivot
+# procesu. Bez overlay se profil nasadi normalne, jen bez per-app doladeni.
+apply_via_cli() {
+    _t=$1
+    # Overlay se posila jen kdyz pravidlo PROSLO anti-flappingem (APPMODE_PKG)
+    # a je to porad ta aplikace v popredi.
+    _ovl=""
+    if [ "$APP_RULES" = "1" ] && [ "$OVERLAY_MODE" = "1" ] &&
+       [ -n "$APPMODE_PKG" ] && [ "$APPMODE_PKG" = "$CUR_PKG" ] && [ "$AR_OK" = "1" ]; then
+        _ovl=$APPMODE_PKG
+    fi
+
+    _rst=""
+    [ "$AUTO_RESET" = "1" ] && [ "$RESET_MODE" = "1" ] && _rst="--reset"
+
+    if [ -n "$_ovl" ] && [ -n "$_rst" ]; then
+        CLI_OUT=$("$PXTUNE" profile "$_t" --auto --reset --overlay "$_ovl" 2>&1)
+    elif [ -n "$_ovl" ]; then
+        CLI_OUT=$("$PXTUNE" profile "$_t" --auto --overlay "$_ovl" 2>&1)
+    elif [ -n "$_rst" ]; then
+        CLI_OUT=$("$PXTUNE" profile "$_t" --auto --reset 2>&1)
+    else
+        CLI_OUT=$("$PXTUNE" profile "$_t" --auto 2>&1)
+    fi
+    CLI_RC=$?
+
+    # Exit 1 = chyba argumentu, tedy JESTE PRED aplikaci cehokoli. Az tady
+    # se pozna, ktery priznak CLI neumi, a zopakuje se volani bez nej.
+    if [ "$CLI_RC" -eq 1 ]; then
+        _degr=0
+        if [ -n "$_ovl" ]; then
+            case "$CLI_OUT" in
+                *"--overlay"*)
+                    OVERLAY_MODE=0
+                    _ovl=""
+                    _degr=1
+                    log WARN "pxtune jeste neumi --overlay - per-app overlay (APP_OVERLAY_*) se nebude pouzivat, profily jedou bez per-app doladeni"
+                    ;;
+            esac
+        fi
+        if [ -n "$_rst" ]; then
+            case "$CLI_OUT" in
+                *neznamy*|*unknown*|*"--reset"*)
+                    RESET_MODE=0
+                    _rst=""
+                    _degr=1
+                    log WARN "pxtune jeste neumi --auto --reset (pozadavek R1) - prepinam na volani bez resetu; profily zustanou lepive"
+                    ;;
+            esac
+        fi
+        if [ "$_degr" = "1" ]; then
+            if [ -n "$_ovl" ]; then
+                CLI_OUT=$("$PXTUNE" profile "$_t" --auto --overlay "$_ovl" 2>&1)
+            elif [ -n "$_rst" ]; then
+                CLI_OUT=$("$PXTUNE" profile "$_t" --auto --reset 2>&1)
+            else
+                CLI_OUT=$("$PXTUNE" profile "$_t" --auto 2>&1)
+            fi
+            CLI_RC=$?
+        fi
+    fi
+    return 0
+}
+
+# Pojistka proti patologickemu prepinani. Teplotni zasahy (bypass) prochazi vzdy.
+switch_allowed() {
+    [ "$1" = "1" ] && return 0
+    [ "$SW_LOCK_UNTIL" -gt "$NOW" ] && return 1
+    if [ "$((NOW - SW_WIN))" -ge 3600 ]; then
+        SW_WIN=$NOW
+        SW_CNT=0
+    fi
+    if [ "$SW_CNT" -ge "$MAX_SWITCH_HOUR" ]; then
+        SW_LOCK_UNTIL=$((NOW + SWLOCK_SEC))
+        log ERROR "prepnuti profilu $SW_CNT/h prekrocilo strop $MAX_SWITCH_HOUR - na ${SWLOCK_SEC}s povoluji uz jen teplotni zasahy"
+        return 1
+    fi
+    return 0
+}
+
+apply_profile() {
+    # apply_profile <profil> <bypass 0|1> <duvod>
+    _t=$1; _bp=$2; _why=$3
+    [ -n "$_t" ] || return 0
+
+    # pxtune auto off -> jen pozorujeme, neprepiname (stejny soubor cte i CLI)
+    if ! auto_enabled; then
+        dbg "auto=off, neprepinam (chtel jsem $_t, duvod: $_why)"
+        PENDING=""
+        return 0
+    fi
+
+    if [ -e "$MANUAL" ]; then
+        dbg "manual_override existuje, neprepinam (chtel jsem $_t, duvod: $_why)"
+        PENDING=""
+        return 0
+    fi
+
+    # Resync proti skutecnosti - profil mohl prepnout nekdo zvenci (WebUI, CLI).
+    if [ -f "$ACTIVE" ]; then
+        read -r _act < "$ACTIVE" 2>/dev/null && [ -n "$_act" ] && APPLIED=$_act
+    fi
+    if [ "$_t" = "$APPLIED" ]; then
+        PENDING=""
+        return 0
+    fi
+
+    if [ ! -f "$PROFDIR/$_t.conf" ]; then
+        log ERROR "profil '$_t' neexistuje v $PROFDIR - pouzivam '$PROF_SAFE'"
+        _t=$PROF_SAFE
+        [ -f "$PROFDIR/$_t.conf" ] || { PENDING=""; return 0; }
+        [ "$_t" = "$APPLIED" ] && { PENDING=""; return 0; }
+    fi
+
+    if [ "$_bp" != "1" ] && [ "$((NOW - LAST_SWITCH))" -lt "$MIN_SWITCH_SEC" ]; then
+        PENDING=$_t
+        dbg "anti-flap: $_t odlozen o $((MIN_SWITCH_SEC - (NOW - LAST_SWITCH))) s ($_why)"
+        return 0
+    fi
+
+    if ! switch_allowed "$_bp"; then
+        PENDING=$_t
+        return 0
+    fi
+
+    if camera_active; then
+        PENDING=$_t
+        log INFO "bezi kamera, prepnuti na $_t odlozeno (do systemoveho rizeni kamery se nemichame)"
+        return 0
+    fi
+
+    if [ ! -x "$PXTUNE" ]; then
+        if [ "$((NOW - PXTUNE_FAIL_AT))" -ge "$PXTUNE_RETRY_SEC" ]; then
+            PXTUNE_FAIL_AT=$NOW
+            log ERROR "$PXTUNE neexistuje nebo neni spustitelny - zkusim znovu nejdriv za ${PXTUNE_RETRY_SEC}s"
+        fi
+        PENDING=$_t
+        return 0
+    fi
+
+    apply_via_cli "$_t"
+    if [ "$CLI_RC" -eq 0 ]; then
+        prop_guard "$_t"
+        APPLIED=$_t
+        LAST_SWITCH=$NOW
+        PENDING=""
+        SW_CNT=$((SW_CNT + 1))
+        PXTUNE_FAIL_AT=0
+        log INFO "profil -> $_t ($_why)"
+    else
+        # pxtune vraci 2 i kdyz jen CAST zapisu selhala - profil pritom uz
+        # nalozil a zapsal do 'active'. Nesmime tedy stav slepe zahodit
+        # (predchozi verze to delala a demon pak nevedel, co je nastaveno).
+        if [ -f "$ACTIVE" ]; then
+            read -r _act < "$ACTIVE" 2>/dev/null && [ -n "$_act" ] && APPLIED=$_act
+        fi
+        if [ "$APPLIED" = "$_t" ]; then
+            prop_guard "$_t"
+            LAST_SWITCH=$NOW
+            PENDING=""
+            SW_CNT=$((SW_CNT + 1))
+            log WARN "pxtune profile $_t skoncil s kodem $CLI_RC, ale profil JE aktivni (cast zapisu selhala): $CLI_OUT"
+        else
+            PENDING=$_t
+            PXTUNE_FAIL_AT=$NOW
+            log ERROR "pxtune profile $_t --auto skoncil s kodem $CLI_RC a profil NENI aktivni: $CLI_OUT"
+        fi
+    fi
+    return 0
+}
+
+evaluate() {
+    # evaluate <duvod> [bypass]
+    apply_profile "$(target_profile)" "${2:-0}" "$1"
+    ticker_sync
+    return 0
+}
+
+# ===========================================================================
+# TIKAR
+#
+# Jediny casovac v celem demonu. Bezi VYHRADNE pri rozsvicene obrazovce;
+# pri zhasnuti se okamzite zabiji, takze v suspendu neexistuje zadny budik.
+# (Navic: cekajici CLOCK_MONOTONIC timer stejne nebrani vstupu do suspendu
+#  ani z nej nebudi - suspend je rizen wakelocky. Vypinani je tu pro jistotu
+#  a pro uspornost.)
+# ===========================================================================
+
+tick_period() {
+    if [ "$SCREEN" != "1" ]; then
+        printf '0'
+        return 0
+    fi
+    if [ "$THERM_LEVEL" -gt 0 ] || [ -n "$PENDING" ] ||
+       [ "$CUR_CLASS" = "game" ] || [ "$CUR_CLASS" = "heavy" ]; then
+        print -rn -- "$TICK_BUSY_SEC"
+        return 0
+    fi
+    if [ "$CUR_CLASS" = "light" ] && [ "$SKIN_MC" -gt 0 ] &&
+       [ "$SKIN_MC" -lt "$((THERM_WARN_MC - TICK_IDLE_MARGIN_MC))" ]; then
+        print -rn -- "$TICK_IDLE_SEC"
+        return 0
+    fi
+    print -rn -- "$TICK_SEC"
+    return 0
+}
+
+# TIKAR BEZ ZABIJENI
+#
+# Puvodne se stary tikar ukoncoval pres `kill "$TICK_PID"`. Namereno na
+# zarizeni: demon pak dostal SIGTERM ~2 s po kazde zmene periody a skoncil
+# (log: "cleanup vyvolan: duvod='SIGTERM'" hned za "tikar: perioda Ns").
+# Reset trapu uvnitr podshellu to nevyresil, takze signal koncil u hlavniho
+# procesu - pravdepodobne pres procesni skupinu, jejimz vedoucim demon je
+# (bezi pod setsid).
+#
+# Reseni bez killu: kazdy tikar dostane GENERACI. Do FIFO pise "@TICK <gen>"
+# a hlavni smycka tiky s cizi generaci zahodi. Stary tikar navic sam skonci,
+# jakmile zjisti, ze uz neni aktualni. Zadny signal, zadne riziko.
+TICK_GEN=0
+GENF="$STATE/pxtune-auto.tickgen"
+ticker_stop() {
+    # Jen zneplatnime generaci. Stary podshell dobehne svuj sleep, zapise tik,
+    # ten se zahodi, a podshell se pri kontrole generace ukonci sam.
+    TICK_GEN=$((TICK_GEN + 1))
+    TICK_PID=""
+    TICK_CUR=0
+    return 0
+}
+
+ticker_sync() {
+    _p=$(tick_period)
+    if [ "$_p" = "0" ]; then
+        if [ -n "$TICK_PID" ]; then
+            dbg "tikar vypnut"
+            ticker_stop
+        fi
+        return 0
+    fi
+    [ "$_p" = "$TICK_CUR" ] && [ -n "$TICK_PID" ] && return 0
+    ticker_stop
+    _gen=$TICK_GEN
+    (
+        # Podshell dedi trapy hlavniho procesu (vcetne `trap cleanup TERM`),
+        # takze je pro jistotu resetujeme - i kdyz uz ho nikdo nezabiji.
+        trap - TERM INT HUP USR1
+        while :; do
+            sleep "$_p"
+            # Generace se posila s tikem; hlavni smycka cizi tiky zahodi.
+            echo "@TICK $_gen" >&3 2>/dev/null || exit 0
+            # Kdyz uz nejsme aktualni tikar, skoncime sami.
+            [ -f "$GENF" ] && { IFS= read -r _g < "$GENF" 2>/dev/null; [ "$_g" = "$_gen" ] || exit 0; }
+        done
+    ) &
+    TICK_PID=$!
+    TICK_CUR=$_p
+    { print -r -- "$_gen" > "$GENF"; } 2>/dev/null
+    dbg "tikar: perioda ${_p}s gen $_gen (pid $TICK_PID)"
+    return 0
+}
+
+# ===========================================================================
+# WATCHDOG NA SEBE SAMA
+#
+# Potomek hlavniho procesu. Kdyz hlavni proces zmizi BEZ vytvoreni znacky
+# EXITF (tj. spadl, dostal SIGKILL, sebral ho LMK), watchdog uklidi zamek
+# a nastartuje novou instanci. Pri cistem konci zdedi skupinovy kill
+# z cleanup() a umre s nim.
+#
+# `sleep` = nanosleep(CLOCK_MONOTONIC) se v suspendu neposouva => watchdog
+# v suspendu negeneruje ani jedno probuzeni. WD_SEC je ohranicen na min. 60 s.
+#
+# CO WATCHDOG NEUMI (a proc): rozeznat zablokovany demon od necinneho.
+# Necinnost je NORMALNI a zadouci stav (blokujici read na FIFO), takze
+# "dlouho nic nedelal" nesmi byt duvod k restartu. Heartbeat v $ALIVEF je
+# proto jen pro diagnostiku (`pxtune-auto status`), ne pro rozhodovani.
+# ===========================================================================
+
+watchdog() {
+    _parent=$1
+    while :; do
+        sleep "$WD_SEC"
+        [ -e "$EXITF" ] && exit 0
+        [ -d "/proc/$_parent" ] && continue
+        log ERROR "watchdog: hlavni proces (pid $_parent) zmizel bez uklidu - startuji novou instanci"
+        rm -f "$PIDF" "$FIFO" 2>/dev/null
+        rmdir "$LOCKD" 2>/dev/null
+        if command -v setsid >/dev/null 2>&1; then
+            setsid "$SELF" run >/dev/null 2>&1 &
+        else
+            "$SELF" run >/dev/null 2>&1 &
+        fi
+        exit 0
+    done
+}
+
+# ===========================================================================
+# OBSLUHA UDALOSTI
+# ===========================================================================
+
+on_screen() {
+    # on_screen <0|1>
+    _s=$1
+    [ "$_s" = "$SCREEN" ] && return 0
+    if [ "$_s" = "0" ]; then
+        sample_finish            # relace na popredi konci zhasnutim
+        SCREEN=0
+        # 2. z SESTI cest, ktere musi volat `app leave` (vycet a duvody viz
+        # komentar u cmd_leave() v bin/pxtune-perapp). Pri zhasle obrazovce
+        # uz uzivatel aplikaci nevidi a dalsi udalost popredi nemusi prijit
+        # vubec - bez tohohle by zustal zamceny na 60 Hz / cizim rozliseni
+        # klidne do dalsiho rebootu.
+        apprule_leave_now "obrazovka zhasla"
+        # Derivace se MUSI zneplatnit: pres suspend nemame vzorky a stary
+        # sklon by se po probuzeni extrapoloval z nesouvisejicich bodu.
+        SKIN_PREV_MC=-1
+        SKIN_SLOPE=0
+        log INFO "obrazovka zhasla -> $PROF_NIGHT (snimani zastaveno, zadne budiky)"
+        evaluate "obrazovka off" 1
+    else
+        SCREEN=1
+        SKIN_PREV_MC=-1
+        SKIN_SLOPE=0
+        sense
+        therm_eval
+        log INFO "obrazovka sviti (popredi ${CUR_PKG:-?}/$CUR_CLASS, skin ${SKIN_MC}mC, uroven $THERM_LEVEL)"
+        # Vrstva 3 byla pri zhasnuti sundana. Kdyz se uzivatel vraci do tehoz
+        # balicku, musi se znovu NAPLANOVAT (ne nasadit hned) - jinak by
+        # probliknuti obrazovky obeslo cely anti-flapping.
+        apprule_on_foreground
+        evaluate "obrazovka on" 1
+        sample_start "$CUR_PKG"
+    fi
+    return 0
+}
+
+on_foreground() {
+    # on_foreground <pkg>
+    _p=$1
+    [ -n "$_p" ] || return 0
+    in_list "$_p" "$IGNORE_PKGS" && return 0
+    [ "$_p" = "$CUR_PKG" ] && return 0
+
+    sample_finish                 # uzavri okno predchozi aplikace
+    CUR_PKG=$_p
+    CUR_CLASS=$(app_class "$_p")
+    dbg "popredi: $_p ($CUR_CLASS)"
+    # Per-app pravidlo: nacteni je bezforkove (`[ -f ]` + builtin read), takze
+    # tohle nic nestoji ani pri rychlem proletnuti aplikacemi. Vlastni zasah
+    # se JEN NAPLANUJE - vstup je opozdeny, odchod je liny. Viz apprule_load().
+    apprule_on_foreground
+    sense
+    therm_eval
+    evaluate "popredi $_p/$CUR_CLASS" 0
+    sample_start "$_p"
+    return 0
+}
+
+on_tick() {
+    sense
+    if therm_eval; then
+        # Uroven se zmenila -> zasah bez cekani na anti-flap. Kdyz uz nas HAL
+        # bude 84 s uvolnovat, nema smysl pridavat vlastni prodlevu.
+        evaluate "teplota uroven $THERM_LEVEL (skin ${SKIN_MC}mC sklon ${SKIN_SLOPE}mC/100s predikce ${SKIN_PRED}mC junction ${JUNC_MC}mC)" 1
+        return 0
+    fi
+    dbg "tik: skin ${SKIN_MC}mC sklon ${SKIN_SLOPE} pred ${SKIN_PRED} junc ${JUNC_MC}/${JUNC_SRC:-?} uroven $THERM_LEVEL bat ${BATT_PCT}% chg $BATT_CHG ceka '${PENDING}'"
+    if [ -n "$PENDING" ]; then
+        evaluate "odlozene prepnuti" 0
+    else
+        evaluate "tik" 0
+    fi
+    return 0
+}
+
+handle_line() {
+    _l=$1
+    case "$_l" in
+        '@TICK'|'@TICK '*)
+            on_tick
+            return 0
+            ;;
+        '@RESTART '*)
+            log WARN "logcat spadl, restart za ${_l#@RESTART } s"
+            return 0
+            ;;
+        '@UP')
+            dbg "logcat bezi"
+            return 0
+            ;;
+        '@APPARM '*)
+            # OPOZDENY VSTUP. Naplanovano v apprule_on_foreground() pred
+            # APP_MIN_FG_SEC sekundami. TEPRVE TED se overi, ze je balicek
+            # porad v popredi - start aplikace udela 2-5 udalosti behem ~2 s
+            # (splash -> hlavni aktivita) a rychle proletnuti aplikacemi tudy
+            # neprojde vubec.
+            APPARM_PID=""
+            _ap=${_l#@APPARM }
+            # Planovac pripoji " #<generace>" (viz app_sched) - jen ji odrizneme.
+            # Generaci tu ZAMERNE NEKONTROLUJEME: kazde naplanovani ji zvysi,
+            # takze by si cekajici udalost zneplatnila sama (namereno - pravidlo
+            # se nacetlo, ale nikdy nenasadilo). Skutecnou pojistkou je test
+            # nize, ze je balicek PORAD v popredi; ten rychle proletnuti
+            # aplikacemi odfiltruje spolehlive a bez vedlejsich ucinku.
+            case "$_ap" in
+                *" #"*) _ap=${_ap%" #"*} ;;
+            esac
+            if [ "$_ap" != "$CUR_PKG" ]; then
+                dbg "per-app: @APPARM $_ap zahozen, v popredi je uz ${CUR_PKG:-?}"
+                return 0
+            fi
+            [ "$APPMODE_PKG" = "$_ap" ] && return 0
+            apprule_load "$_ap" || return 0
+            # Vrstvu 3 zapisuje pxtune-perapp (binder!), ne demon. Demon jen
+            # forkne CLI - `cmd`/`settings` v tomhle procesu nikdy nebezi.
+            if [ -x "$PXTUNE" ]; then
+                "$PXTUNE" app enter "$_ap" >/dev/null 2>&1
+            else
+                log ERROR "$PXTUNE neni spustitelny - vrstva 3 pro $_ap se nenasadila"
+                return 0
+            fi
+            APPMODE_PKG=$_ap
+            APPMODE_STICKY=$AR_APP_STICKY_SEC
+            log INFO "per-app: $_ap nasazen (vrstva 3; profil='${AR_APP_PROFILE:-automat}' thermal_cap=$AR_APP_THERMAL_CAP sticky=${APPMODE_STICKY}s)"
+            evaluate "per-app $_ap" 1
+            return 0
+            ;;
+        '@APPLEAVE'|'@APPLEAVE '*)
+            # planovac pripoji " #<generace>" - zahodit tik od zneplatneneho
+            case "$_l" in
+                *" #"*)
+                    _alg=${_l##*" #"}
+                    if [ "$_alg" != "$APP_SCHED_GEN" ]; then
+                        dbg "per-app: @APPLEAVE zahozen (stara generace $_alg)"
+                        return 0
+                    fi
+                    ;;
+            esac
+            # LINY ODCHOD. Naplanovano pred APPMODE_STICKY sekundami. Kdyz se
+            # uzivatel mezitim vratil, apprule_on_foreground() planovac uz
+            # zrusil; tohle je jen druha pojistka pro pripad zavodu.
+            APPLV_PID=""
+            [ -n "$APPMODE_PKG" ] || return 0
+            if [ "$CUR_PKG" = "$APPMODE_PKG" ]; then
+                dbg "per-app: navrat do $APPMODE_PKG, odchod zrusen"
+                return 0
+            fi
+            apprule_leave_now "odchod z aplikace"
+            apprule_load "$CUR_PKG"
+            evaluate "per-app odchod" 0
+            return 0
+            ;;
+        '@SRCFAIL')
+            # Zdroj udalosti se nedari udrzet nazivu. Nesmime zustat viset
+            # v restriktivnim profilu jen proto, ze uz nevidime, co se deje.
+            if [ "$APPLIED" != "$PROF_SAFE" ] && [ "$THERM_LEVEL" -eq 0 ]; then
+                log ERROR "zdroj udalosti opakovane pada - vracim neutralni profil $PROF_SAFE, aby telefon nezustal zaskrceny naslepo"
+                apply_profile "$PROF_SAFE" 1 "porucha zdroje udalosti"
+            fi
+            return 0
+            ;;
+    esac
+
+    if [ -n "$SCR_TAG" ]; then
+        case "$_l" in
+            *" $SCR_TAG: ["*)
+                ev_payload "$_l" || return 0
+                case "${EVP%%,*}" in
+                    0) on_screen 0 ;;
+                    1) on_screen 1 ;;
+                esac
+                return 0
+                ;;
+        esac
+    fi
+
+    if [ -n "$FG_TAG" ]; then
+        case "$_l" in
+            *" $FG_TAG: ["*)
+                ev_payload "$_l" || return 0
+                ev_pkg || return 0
+                on_foreground "$EVPKG"
+                return 0
+                ;;
+        esac
+    fi
+    return 0
+}
+
+# ===========================================================================
+# ZDROJ UDALOSTI
+# ===========================================================================
+
+grep_re() {
+    _re=""
+    [ -n "$FG_TAG" ] && _re="$FG_TAG"
+    if [ -n "$SCR_TAG" ]; then
+        if [ -n "$_re" ]; then _re="$_re|$SCR_TAG"; else _re="$SCR_TAG"; fi
+    fi
+    [ -z "$_re" ] && _re="wm_resume_activity|power_screen_state"
+    printf ' (%s): \\[' "$_re"
+}
+
+probe_grep() {
+    # toybox grep umi --line-buffered, ale nespolehame na to naslepo: bez
+    # radkoveho bufferovani by se udalosti hromadily v roure (az 4 kB)
+    # a reakce na zhasnuti obrazovky by prisla se zpozdenim minut.
+    if printf 'x\n' | grep --line-buffered x >/dev/null 2>&1; then
+        GREPLB="--line-buffered"
+        SHELL_FILTER=0
+    else
+        GREPLB=""
+        SHELL_FILTER=1
+        log WARN "grep neumi --line-buffered, filtruji az v shellu (vic probuzeni pri zapnute obrazovce)"
+    fi
+    return 0
+}
+
+supervisor() {
+    # Blokujici ctenar. Kdyz logcat umre, restartuje se s exponencialnim
+    # backoffem. Zadny polling - visi v rource, dokud logcat nezkonci.
+    _bo=1
+    _fails=0
+    _re=$(grep_re)
+    while :; do
+        tick_now; _t0=$NOW
+        echo "@UP" >&3 2>/dev/null || return 0
+        if [ "$SHELL_FILTER" = "1" ]; then
+            logcat -b events -v threadtime -T 1 2>/dev/null >&3
+        else
+            logcat -b events -v threadtime -T 1 2>/dev/null |
+                grep -E $GREPLB "$_re" >&3
+        fi
+        tick_now
+        if [ "$((NOW - _t0))" -ge 60 ]; then
+            _bo=1
+            _fails=0
+        else
+            _bo=$((_bo * 2))
+            [ "$_bo" -gt 300 ] && _bo=300
+            _fails=$((_fails + 1))
+            # 5 padu za sebou, kazdy do 60 s => logcat na tomhle systemu
+            # nefunguje. Rekni to hlavnimu procesu, at nezustane viset
+            # v restriktivnim profilu naslepo.
+            [ "$_fails" -eq 5 ] && echo "@SRCFAIL" >&3 2>/dev/null
+        fi
+        echo "@RESTART $_bo" >&3 2>/dev/null || return 0
+        sleep "$_bo"
+    done
+}
+
+# ===========================================================================
+# POCATECNI STAV
+#
+# Jednorazove nacteni pri startu - probehne presne jednou, neni to polling.
+# Zamerne se NEPOUZIVA dumpsys: SPEC upozornuje, ze pod su visi na binderu.
+# ===========================================================================
+
+prime_state() {
+    _dump=$(logcat -b events -v threadtime -d -t 600 2>/dev/null)
+
+    if [ -n "$SCR_TAG" ]; then
+        _l=$(print -r -- "$_dump" | grep -E " $SCR_TAG: \[" 2>/dev/null | tail -n 1)
+        if [ -n "$_l" ] && ev_payload "$_l"; then
+            case "${EVP%%,*}" in
+                0) SCREEN=0 ;;
+                1) SCREEN=1 ;;
+            esac
+        fi
+    fi
+
+    if [ -n "$FG_TAG" ]; then
+        _l=$(print -r -- "$_dump" | grep -E " $FG_TAG: \[" 2>/dev/null | tail -n 1)
+        if [ -n "$_l" ] && ev_payload "$_l" && ev_pkg; then
+            if ! in_list "$EVPKG" "$IGNORE_PKGS"; then
+                CUR_PKG=$EVPKG
+                CUR_CLASS=$(app_class "$EVPKG")
+            fi
+        fi
+    fi
+
+    # 4. z SESTI cest, ktere musi volat `app leave`. Predchozi instance mohla
+    # umrit uprostred epizody (SIGKILL, LMK, pad) a nechat nasazenou vrstvu 3
+    # - appmode.active v /data to prezije, ale zadny stav v pameti uz ne.
+    # Zaciname proto z ciste podlahy; kdyz je aplikace porad v popredi,
+    # nasadi se znovu za APP_MIN_FG_SEC pri prvni udalosti.
+    APPMODE_PKG=""
+    if [ -f "$APPMODE" ]; then
+        log WARN "nalezen $APPMODE ze zivota predchozi instance - vracim vrstvu 3 do vychoziho stavu"
+        apprule_leave_now "start nove instance"
+    fi
+    apprule_load "$CUR_PKG"
+
+    sense
+    therm_eval
+    if [ -f "$ACTIVE" ]; then
+        read -r APPLIED < "$ACTIVE" 2>/dev/null
+    fi
+
+    # Uklid po pripadnem padu: kdyz visi thermal prop na "game", ale aktivni
+    # profil hru nehlasi, mel by telefon vypnute CPU thermal throttling.
+    if [ -n "$APPLIED" ] && [ "$APPLIED" != "$PROF_GAME" ]; then
+        camera_active || prop_guard "$APPLIED"
+    fi
+
+    log INFO "vychozi stav: obrazovka=$SCREEN popredi=${CUR_PKG:-?} trida=$CUR_CLASS skin=${SKIN_MC}mC junction=${JUNC_MC}mC uroven=$THERM_LEVEL baterie=${BATT_PCT}%/chg=$BATT_CHG/${BATT_TEMP_DC}dC profil=${APPLIED:-?}"
+    return 0
+}
+
+# ===========================================================================
+# ZIVOTNI CYKLUS
+# ===========================================================================
+
+cleanup() {
+    log WARN "cleanup vyvolan: duvod='${1:-neznamy}' (diagnostika)"
+    trap '' TERM INT HUP USR1
+    : > "$EXITF" 2>/dev/null          # watchdog: tohle je zamerny konec
+
+    # 3. z SESTI cest, ktere musi volat `app leave`. Po SIGTERM uz vrstvu 3
+    # nikdo nesundá - a na rozdil od profilu (vrstva 2, navrat zdarma pres
+    # restore_stock_values) by refresh rate a rozliseni zustaly viset.
+    # Musi to byt PRED skupinovym killem nize, jinak by fork CLI neprezil.
+    apprule_leave_now "cisty konec demona"
+
+    # DEADMAN: nenechavej telefon v restriktivnim profilu, kdyz uz ho nikdo
+    # nehlida. Delame to jen kdyz profil ridil automat (zadny manual_override)
+    # a jen kdyz to fakticky neni uz PROF_SAFE.
+    if [ -x "$PXTUNE" ] && [ ! -e "$MANUAL" ] && auto_enabled; then
+        if [ -n "$APPLIED" ] && [ "$APPLIED" != "$PROF_SAFE" ]; then
+            log INFO "koncim - vracim neutralni profil $PROF_SAFE (byl '$APPLIED')"
+            "$PXTUNE" profile "$PROF_SAFE" --auto >/dev/null 2>&1
+            prop_guard "$PROF_SAFE"
+        else
+            prop_guard "${APPLIED:-$PROF_SAFE}"
+        fi
+    fi
+
+    log INFO "koncim (pid $$)"
+    ticker_stop
+    [ -n "$WD_PID" ]  && kill "$WD_PID"  2>/dev/null
+    [ -n "$SUP_PID" ] && kill "$SUP_PID" 2>/dev/null
+    # Skupinovy kill dobere logcat/grep/sleep. Funguje jen kdyz jsme vedouci
+    # procesni skupiny (tj. kdyz nas spustil `start` pres setsid); jinak
+    # skupina s pgid == $$ neexistuje a kill jen vrati chybu. Bezpecne -
+    # pgid se vzdy rovna pidu vedouciho, takze cizi skupinu trefit nelze.
+    kill -TERM "-$$" 2>/dev/null
+    exec 3>&- 2>/dev/null
+    rm -f "$FIFO" "$PIDF" "$APPSTATS.tmp" 2>/dev/null
+    rmdir "$LOCKD" 2>/dev/null
+    exit 0
+}
+
+on_hup() {
+    tick_now
+    conf_load
+    cfg_clamp_all
+    sense
+    therm_eval
+    log INFO "SIGHUP - auto.conf znovu nacten, prehodnocuji stav"
+    evaluate "sighup" 1
+    return 0
+}
+
+on_usr1() {
+    tick_now
+    log INFO "STAV: obrazovka=$SCREEN popredi=${CUR_PKG:-?} trida=$CUR_CLASS profil=${APPLIED:-?} ceka=${PENDING:-'-'}"
+    log INFO "STAV: skin=${SKIN_MC}mC sklon=${SKIN_SLOPE}mC/100s predikce=${SKIN_PRED}mC junction=${JUNC_MC}mC/${JUNC_SRC:-?} uroven=$THERM_LEVEL (up=$THERM_UPC down=$THERM_DOWNC drzeno $((NOW - THERM_SINCE))s)"
+    log INFO "STAV: baterie=${BATT_PCT}% nabijeni=$BATT_CHG teplota=${BATT_TEMP_DC}dC | prepnuti $SW_CNT/h lock=$SW_LOCK_UNTIL | tikar=${TICK_CUR}s(${TICK_PID:-'-'}) | reset_mode=$RESET_MODE overlay_mode=$OVERLAY_MODE | tagy $FG_TAG/$SCR_TAG"
+    log INFO "STAV: per-app pravidlo=${AR_PKG:-'-'}(ok=$AR_OK profil=${AR_APP_PROFILE:-'-'} thermal_cap=$AR_APP_THERMAL_CAP min_fg=${AR_APP_MIN_FG_SEC}s sticky=${AR_APP_STICKY_SEC}s) | vrstva3 na=${APPMODE_PKG:-'-'} | planovace arm=${APPARM_PID:-'-'} leave=${APPLV_PID:-'-'}"
+    return 0
+}
+
+acquire_lock() {
+    if mkdir "$LOCKD" 2>/dev/null; then
+        return 0
+    fi
+    # zamek existuje - je vlastnik jeste nazivu?
+    if [ -f "$PIDF" ]; then
+        read -r _op < "$PIDF" 2>/dev/null
+        case "$_op" in
+            ''|*[!0-9]*) _op="" ;;
+        esac
+        if [ -n "$_op" ] && [ -d "/proc/$_op" ]; then
+            _cl=$(tr '\0' ' ' < "/proc/$_op/cmdline" 2>/dev/null)
+            case "$_cl" in
+                *pxtune-auto*) return 1 ;;
+            esac
+        fi
+        # Vlastnik je mrtvy. Jeho potomci (logcat, grep, sleep) ale mohou zit
+        # dal a viset zapisem do stareho FIFO. Byl vedoucim procesni skupiny,
+        # takze pgid == jeho pid -> sklidime celou skupinu naraz.
+        [ -n "$_op" ] && kill -TERM "-$_op" 2>/dev/null
+    fi
+    log WARN "odstranuji osirely zamek"
+    rm -f "$PIDF" 2>/dev/null
+    rmdir "$LOCKD" 2>/dev/null
+    mkdir "$LOCKD" 2>/dev/null || return 1
+    return 0
+}
+
+do_run() {
+    if ! acquire_lock; then
+        echo "pxtune-auto uz bezi (pid $(cat "$PIDF" 2>/dev/null))" >&2
+        exit 1
+    fi
+    echo $$ > "$PIDF"
+    rm -f "$EXITF" 2>/dev/null
+
+    trap 'cleanup SIGTERM' TERM
+    trap 'cleanup SIGINT' INT
+    trap on_hup HUP
+    trap on_usr1 USR1
+
+    log INFO "start (pid $$)"
+    tick_now
+    conf_load
+    cfg_clamp_all
+    resolve_sensors
+    stats_sanity
+    detect_tags
+    probe_grep
+    audit_sticky
+
+    if [ ! -d "$PROFDIR" ]; then
+        log ERROR "$PROFDIR neexistuje - automat nema co prepinat, koncim"
+        cleanup "chybi PROFDIR"
+    fi
+
+    rm -f "$FIFO" 2>/dev/null
+    if ! mkfifo "$FIFO" 2>/dev/null; then
+        log ERROR "nelze vytvorit FIFO $FIFO"
+        cleanup "nelze mkfifo"
+    fi
+    # <> drzi rouru trvale otevrenou pro cteni i zapis => read nikdy nedostane EOF
+    exec 3<> "$FIFO" || { log ERROR "nelze otevrit FIFO"; cleanup "nelze otevrit FIFO"; }
+
+    prime_state
+    evaluate "start" 1
+    sample_start "$CUR_PKG"
+
+    supervisor &
+    SUP_PID=$!
+    watchdog $$ &
+    WD_PID=$!
+    log INFO "supervizor pid $SUP_PID, watchdog pid $WD_PID (perioda ${WD_SEC}s)"
+
+    # Hlavni smycka: blokujici read. Mezi udalostmi tenhle proces NEBEZI.
+    while :; do
+        if IFS= read -r _line <&3; then
+            RDFAIL=0
+            tick_now
+            : > "$ALIVEF" 2>/dev/null      # heartbeat pro diagnostiku (bez forku)
+            handle_line "$_line"
+        else
+            # read prerusen signalem (trap uz probehl) - EOF nehrozi, drzime fd 3 <>
+            RDFAIL=$((RDFAIL + 1))
+            if [ "$RDFAIL" -gt 20 ]; then
+                log WARN "read selhal ${RDFAIL}x po sobe, pauza 1 s"
+                sleep 1
+                RDFAIL=0
+            fi
+        fi
+    done
+}
+
+do_start() {
+    if [ -f "$PIDF" ]; then
+        read -r _op < "$PIDF" 2>/dev/null
+        if [ -n "$_op" ] && [ -d "/proc/$_op" ]; then
+            _cl=$(tr '\0' ' ' < "/proc/$_op/cmdline" 2>/dev/null)
+            case "$_cl" in
+                *pxtune-auto*) echo "uz bezi (pid $_op)"; exit 0 ;;
+            esac
+        fi
+    fi
+    # UKLID PO PREDCHOZICH BEZICH - bez tohohle vznikaji DVE instance.
+    #
+    # Namereno: kdyz po zabitem/spadlem demonovi prezije jeho supervizor nebo
+    # watchdog, spusti novou instanci. Ta pri startu udela `rm -f FIFO;
+    # mkfifo FIFO` - cimz PRVNI instanci podtrhne rouru: jeji FD 3 ukazuje na
+    # smazany inode, `read` dostane EOF a hlavni smycka skonci. V logu to
+    # vypadalo jako "koncim" BEZ "cleanup vyvolan" a doprovazela to hlaska
+    # "predchozi zprava se opakovala" (obe instance logovaly totez).
+    #
+    # PID soubor to nezachyti, protoze ten patri uz mrtvemu vlastnikovi.
+    # Hledame proto podle prikazove radky vsechny cizi pxtune-auto procesy.
+    _self=$$
+    for _p in /proc/[0-9]*; do
+        _pp="${_p##*/}"
+        [ "$_pp" = "$_self" ] && continue
+        _cl=$(tr ' ' ' ' < "$_p/cmdline" 2>/dev/null) || continue
+        # POZOR: hledat jen "pxtune-auto run" - to je rezim, ve kterem bezi
+        # DEMON. Kdyby se matchovalo jen "pxtune-auto", zabil by tenhle uklid
+        # i shell, ktery prave vola `pxtune-auto start` (ma to v cmdline)
+        # a tedy sam sebe. Overeno: stalo se to, adb relace skoncila kodem 137.
+        case "$_cl" in
+            *pxtune-auto*run*) kill -KILL "$_pp" 2>/dev/null ;;
+        esac
+    done
+    # osirele logcaty po nich
+    for _lp in $(pidof logcat 2>/dev/null); do
+        if grep -qs -e 'wm_resume_activity' -e 'power_screen_state' "/proc/$_lp/cmdline" 2>/dev/null; then
+            kill -KILL "$_lp" 2>/dev/null
+        fi
+    done
+    rm -f "$PIDF" "$FIFO" 2>/dev/null
+    rmdir "$LOCKD" 2>/dev/null
+
+    rm -f "$EXITF" 2>/dev/null
+    # setsid => vlastni procesni skupina, aby sel cely strom (logcat, grep,
+    # sleep, watchdog) zabit jednim `kill -TERM -PID`
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$SELF" run >/dev/null 2>&1 &
+    else
+        "$SELF" run >/dev/null 2>&1 &
+    fi
+    sleep 1
+    do_status
+    return 0
+}
+
+do_stop() {
+    : > "$EXITF" 2>/dev/null          # watchdog nesmi restartovat
+    [ -f "$PIDF" ] || { echo "nebezi"; exit 0; }
+    read -r _op < "$PIDF" 2>/dev/null
+    case "$_op" in
+        ''|*[!0-9]*) rm -f "$PIDF"; echo "nebezi (rozbity pid soubor)"; exit 0 ;;
+    esac
+    kill -TERM "$_op" 2>/dev/null
+    _i=0
+    while [ "$_i" -lt 10 ]; do
+        [ -d "/proc/$_op" ] || break
+        sleep 1
+        _i=$((_i + 1))
+    done
+    if [ -d "/proc/$_op" ]; then
+        kill -KILL "-$_op" 2>/dev/null
+        kill -KILL "$_op" 2>/dev/null
+        echo "zastaveno natvrdo (pid $_op)"
+    else
+        echo "zastaveno (pid $_op)"
+    fi
+
+    # Uklid osirelych `logcat` potomku.
+    # Overeno na zarizeni: po `stop` zustaval viset logcat po mrtvem demonovi
+    # (pid 7082 pod jiz neexistujicim 7069). Deje se to, kdyz demon dostane
+    # TERM driv, nez staci zabit svou rouru - potomek pak prezije, protoze uz
+    # neni ve stejne procesni skupine. Dohledame je podle toho, ze jejich
+    # rodic uz neexistuje NEBO je to nas mrtvy pid, a jsou to nase logcaty.
+    for _lp in $(pidof logcat 2>/dev/null); do
+        [ -r "/proc/$_lp/stat" ] || continue
+        read -r _lx _lc _ls _lppid _rest < "/proc/$_lp/stat" 2>/dev/null
+        # rodic je init (osirel) nebo primo nas prave zabity demon
+        if [ "$_lppid" = "1" ] || [ "$_lppid" = "$_op" ]; then
+            # jistota, ze je to nas: cteme events buffer s nasim filtrem
+            if grep -qs -e 'wm_resume_activity' -e 'power_screen_state' "/proc/$_lp/cmdline" 2>/dev/null; then
+                kill -KILL "$_lp" 2>/dev/null
+                log INFO "uklizen osireli logcat pid $_lp"
+            fi
+        fi
+    done
+
+    rm -f "$PIDF" "$FIFO" 2>/dev/null
+    rmdir "$LOCKD" 2>/dev/null
+    return 0
+}
+
+do_status() {
+    if [ -f "$PIDF" ]; then
+        read -r _op < "$PIDF" 2>/dev/null
+        if [ -n "$_op" ] && [ -d "/proc/$_op" ]; then
+            echo "bezi (pid $_op)"
+            [ -f "$ACTIVE" ] && echo "profil: $(cat "$ACTIVE" 2>/dev/null)"
+            [ -e "$MANUAL" ] && echo "manual_override: ANO (automat neprepina)"
+            if [ -f "$ALIVEF" ]; then
+                echo "posledni udalost: $(date -r "$ALIVEF" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+                echo "  (necinnost je NORMALNI - demon visi na blokujicim read)"
+            fi
+            kill -USR1 "$_op" 2>/dev/null
+            echo "podrobny stav zapsan do $LOG"
+            return 0
+        fi
+    fi
+    echo "nebezi"
+    return 1
+}
+
+do_reload() {
+    [ -f "$PIDF" ] || { echo "nebezi"; return 1; }
+    read -r _op < "$PIDF" 2>/dev/null
+    case "$_op" in
+        ''|*[!0-9]*) echo "nebezi"; return 1 ;;
+    esac
+    kill -HUP "$_op" 2>/dev/null && echo "SIGHUP odeslan (pid $_op)"
+    return 0
+}
+
+# ---------------------------------------------------------------- vstup
+
+[ -d "$STATE" ] || mkdir -p "$STATE" 2>/dev/null
+
+case "${1:-run}" in
+    run)     do_run ;;
+    start)   do_start ;;
+    stop)    do_stop ;;
+    restart) do_stop; sleep 1; do_start ;;
+    status)  do_status ;;
+    reload)  do_reload ;;
+    *)
+        echo "pouziti: pxtune-auto {run|start|stop|restart|status|reload}" >&2
+        exit 1
+        ;;
+esac

@@ -1,0 +1,1656 @@
+#!/system/bin/sh
+#
+# pxtune-tweaks - engine tweaku pro pixel_tune
+# Google Pixel 8a "akita" / Tensor G3 "zuma" / Android 16 / KernelSU-Next
+#
+# TENHLE SOUBOR SE SOURCUJE Z bin/pxtune ( . "$TWEAKS_LIB" ), nespousti se sam.
+# Prebira z nej: rdv, nv, bracketv, wr, log, warn, msg, is_int, framework_ok,
+# settings_get, settings_run, stock_load, STATE_DIR, BACKUP_DIR, SELF.
+#
+# ---------------------------------------------------------------------------
+# VYKON - ZAVAZNE, WebUI vola modul pres SYNCHRONNI most.
+#
+# Namereno na tomhle zarizeni:
+#   fork ( $(...), sed, grep, head, cut )  ~7,7 ms
+#   builtin read ze sysfs                   0,44 ms
+#   zapis do sysfs                         27-31 ms  (inherentni, kernel)
+#
+# Z toho plynou pravidla, ktera se tady NESMI porusit:
+#   1. V CTECICH cestach (list, info, get, json, categories) ZADNY fork.
+#      Registr se cte jednim pruchodem `while IFS='|' read`, tweaks.conf
+#      a tweaks.stock se nactou jednou do promennych TWC_* / TWS_*.
+#      Zadny grep, zadny sed, zadny $(...).
+#   2. Popisy v registru se do JSON emituji BEZ escapovani. Proto registr
+#      nesmi obsahovat uvozovku ani zpetne lomitko - hlida to `tweak selftest`.
+#   3. Hodnoty ctene ze zarizeni se pred vlozenim do JSON jen zkontroluji
+#      pattern-matchem; kdyz obsahuji cokoli neceakvaneho, nahradi se "?".
+#      Nikdy se nevola sed.
+#   4. Forky jsou povolene jen v ZAPISOVYCH cestach (set/reset/apply-boot),
+#      kde stejne kazdy zapis do sysfs stoji 27-31 ms.
+#
+# PASTI (namereno, neopravovat "zjednodusenim"):
+#   a) mksh je 32bitovy: 3969961984 + 0 = -325005312. Validator int:MIN:MAX
+#      proto NEPOUZIVA aritmetiku vubec - porovnava cisla jako retezce
+#      (tw_num_le) a delsi nez 10 cifer odmita rovnou.
+#   b) `read < /proc/sys/*` vraci jen PRVNI ZNAK. Resi to rdv() z bin/pxtune,
+#      ktere na /proc/sys/* prepne na head. Nikdy necti procfs primo.
+#   c) Uzly ve tvaru "a [b] c" (scheduler, THP, comp_algorithm) se pred
+#      porovnanim normalizuji pres bracketv - jinak by wr() videlo porad
+#      rozdil a zapisovalo dokola po 30 ms.
+#   d) Poradi redirekci: `> soubor 2>/dev/null` chybu OTEVRENI nepotlaci.
+#      Vzdy { printf ... > "$p"; } 2>/dev/null.
+#   e) settings/cmd jsou binder -> vzdy pres settings_run/settings_get
+#      (maji timeout 10) a nikdy z cesty `status --json`.
+# ---------------------------------------------------------------------------
+
+PXTUNE_TWEAKS_VERSION="1.0.0"
+
+# --- cesty -----------------------------------------------------------------
+: "${STATE_DIR:=/data/adb/pixel_tune}"
+: "${BACKUP_DIR:=$STATE_DIR/backup}"
+
+TWEAKS_CONF="$STATE_DIR/tweaks.conf"
+TWEAKS_STOCK="$BACKUP_DIR/tweaks.stock"
+TWEAKS_COUNT="$STATE_DIR/tweaks.count"
+# Cache vygenerovaneho JSONu. Registr je STATICKY soubor v modulu (27 kB textu),
+# takze jeho JSON se meni jen kdyz se zmeni registr, tweaks.conf nebo
+# tweaks.stock. Namereno na zarizeni: generovani trvalo 21 s a WebUI kvuli tomu
+# zamrzalo pri kazdem otevreni zalozky Tweaky. Z cache je to jedno cteni.
+TWEAKS_JCACHE="$STATE_DIR/tweaks.json.cache"
+
+# Registr lezi v modulu (vedle bin/), ne ve stavovem adresari - je to kod,
+# ne stav, a pri reinstalaci modulu se ma vymenit.
+if [ -z "${TWEAKS_DEF:-}" ]; then
+	_twb="${SELF:-/data/adb/modules/pixel_tune/bin/pxtune}"
+	_twb="${_twb%/*}"
+	TWEAKS_DEF="${_twb%/*}/tweaks/registry.def"
+	[ -f "$TWEAKS_DEF" ] || TWEAKS_DEF="/data/adb/modules/pixel_tune/tweaks/registry.def"
+fi
+
+# Poradi kategorii je zavazne pro WebUI.
+TW_CATS="cpu gpu mem io batt net ui exp"
+
+TW_MECHS="sysfs proc prop settings cmd bootcfg ro"
+TW_FLAGS_KNOWN="boot reapply unverified adv"
+
+# ---------------------------------------------------------------------------
+# Vystup
+#
+# VYKON: `printf` NENI na tomhle systemu builtin, je to /system/bin/printf,
+# tedy fork za ~17 ms (stejne zjisteni jako u status_json v bin/pxtune).
+# `tweak list` ma 60 radku po 6 sloupcich, `tweak json` by melo pres 600
+# volani printf - to je pres 10 sekund jen na vypis. Vsechno se proto
+# akumuluje do promenne a vypisuje JEDNIM `print`, ktery builtin je.
+#
+# Zarovnani sloupcu proto nedela printf '%-42s', ale tw_pad() - cista
+# expanze parametru, nula forku.
+# ---------------------------------------------------------------------------
+TW_NL='
+'
+TW_OUT=""
+
+# o <radek> - prida radek do vystupniho bufferu
+o() { TW_OUT="$TW_OUT$1$TW_NL"; }
+
+# oflush - vypise cely buffer jednim volanim a vyprazdni ho
+oflush() {
+	[ -n "$TW_OUT" ] && print -rn -- "$TW_OUT"
+	TW_OUT=""
+	return 0
+}
+
+# tw_pad <text> <sirka> -> TW_PAD (doplneno mezerami zprava)
+tw_pad() {
+	TW_PAD="$1"
+	_tpn=$(( $2 - ${#TW_PAD} ))
+	while [ "$_tpn" -ge 8 ]; do TW_PAD="$TW_PAD        "; _tpn=$((_tpn - 8)); done
+	while [ "$_tpn" -gt 0 ]; do TW_PAD="$TW_PAD "; _tpn=$((_tpn - 1)); done
+}
+
+# col <text> <sirka> - prida zarovnany sloupec do TW_ROW
+# (posledni sloupec radku se pridava primo, aby se neplytvalo mezerami)
+col() { tw_pad "$1" "$2"; TW_ROW="$TW_ROW$TW_PAD "; }
+
+# ---------------------------------------------------------------------------
+# Drobne pomocniky (vse bez forku)
+# ---------------------------------------------------------------------------
+
+# tw_cat_name <kat> -> TW_CATNAME
+tw_cat_name() {
+	case "$1" in
+		cpu)  TW_CATNAME="Procesor a plánovač" ;;
+		gpu)  TW_CATNAME="Grafika" ;;
+		mem)  TW_CATNAME="Paměť, zram a cache" ;;
+		io)   TW_CATNAME="Úložiště a I/O" ;;
+		batt) TW_CATNAME="Baterie, nabíjení a spotřeba" ;;
+		net)  TW_CATNAME="Síť" ;;
+		ui)   TW_CATNAME="Displej, rozhraní a haptika" ;;
+		exp)  TW_CATNAME="Experimentální (neověřený efekt)" ;;
+		*)    TW_CATNAME="$1" ;;
+	esac
+}
+
+# tw_risk_name <0-3> -> TW_RISKNAME
+tw_risk_name() {
+	case "$1" in
+		0) TW_RISKNAME="bez rizika" ;;
+		1) TW_RISKNAME="nízké" ;;
+		2) TW_RISKNAME="střední" ;;
+		3) TW_RISKNAME="VYSOKÉ" ;;
+		*) TW_RISKNAME="?" ;;
+	esac
+}
+
+# tw_hasflag <seznam flagu> <flag>
+tw_hasflag() {
+	case ",$1," in
+		*",$2,"*) return 0 ;;
+	esac
+	return 1
+}
+
+# tw_key <id> -> TW_KEY (tecky na podtrzitka, aby slo id pouzit jako promennou)
+tw_key() {
+	TW_KEY=""
+	_twk="$1"
+	while :; do
+		case "$_twk" in
+			*.*) TW_KEY="$TW_KEY${_twk%%.*}_"; _twk="${_twk#*.}" ;;
+			*)   TW_KEY="$TW_KEY$_twk"; break ;;
+		esac
+	done
+}
+
+# tw_num_le <a> <b> -> 0 kdyz a <= b. Oba argumenty jen cislice.
+#
+# PROC ne $(( )): mksh je 32bitovy a uz stock velikost zramu (3969961984)
+# pretece do zaporne hodnoty. Porovnani retezcu pretect nemuze.
+tw_num_le() {
+	_tnla="$1"
+	_tnlb="$2"
+	while :; do case "$_tnla" in 0?*) _tnla="${_tnla#0}" ;; *) break ;; esac; done
+	while :; do case "$_tnlb" in 0?*) _tnlb="${_tnlb#0}" ;; *) break ;; esac; done
+	[ -n "$_tnla" ] || _tnla=0
+	[ -n "$_tnlb" ] || _tnlb=0
+	if [ "${#_tnla}" -lt "${#_tnlb}" ]; then return 0; fi
+	if [ "${#_tnla}" -gt "${#_tnlb}" ]; then return 1; fi
+	# stejna delka -> lexikograficke porovnani po znacich je i ciselne
+	while [ -n "$_tnla" ]; do
+		_tnlca="${_tnla%"${_tnla#?}"}"
+		_tnlcb="${_tnlb%"${_tnlb#?}"}"
+		if [ "$_tnlca" != "$_tnlcb" ]; then
+			case "0123456789" in
+				*"$_tnlca"*"$_tnlcb"*) return 0 ;;
+				*) return 1 ;;
+			esac
+		fi
+		_tnla="${_tnla#?}"
+		_tnlb="${_tnlb#?}"
+	done
+	return 0
+}
+
+# tw_nth <index od 1> <seznam> -> TW_NTH
+tw_nth() {
+	TW_NTH=""
+	_tnti=0
+	for _tnte in $2; do
+		_tnti=$((_tnti + 1))
+		if [ "$_tnti" -eq "$1" ]; then
+			TW_NTH="$_tnte"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# tw_count_items <seznam> -> TW_NITEMS
+tw_count_items() {
+	TW_NITEMS=0
+	for _tci in $1; do
+		TW_NITEMS=$((TW_NITEMS + 1))
+	done
+}
+
+# tw_jsafe <hodnota> -> TW_JS
+#
+# Hodnoty jsou validovane typem, takze sem prakticky nic divneho nedotece.
+# Kdyby prece jen (poskozeny tweaks.conf, exoticky sysfs uzel), nahradi se
+# cela hodnota otaznikem. Nikdy se nevola sed - to je fork.
+#
+# Proc smycka a ne jeden case: mezera MUSI byt povolena (stock globovych cilu
+# je seznam, napr. "128 1024 1024 1024"), ale do zavorkoveho vyrazu se
+# v POSIX sh neda bezpecne dostat - `\ ` uvnitr [] pridava i zpetne lomitko,
+# a to je presne ten znak, ktery se do JSON dostat nesmi. Rozdeleni pres IFS
+# mezery vyresi a zaroven zahodi tabulatory a nove radky.
+tw_jsafe() {
+	TW_JS=""
+	for _tjs in $1; do
+		case "$_tjs" in
+			*[!A-Za-z0-9_.:,+/@%-]*) TW_JS="?"; return 0 ;;
+		esac
+		TW_JS="$TW_JS $_tjs"
+	done
+	TW_JS="${TW_JS# }"
+	return 0
+}
+
+# tw_jstr <hodnota> - prida do J JSON retezec, nebo null kdyz je hodnota prazdna
+tw_jstr() {
+	if [ -z "$1" ]; then
+		J="${J}null"
+	else
+		tw_jsafe "$1"
+		J="$J\"$TW_JS\""
+	fi
+}
+
+# tw_jflags <flagy> - prida do J pole ["a","b"]
+tw_jflags() {
+	J="${J}["
+	_tjf_first=1
+	_tjf="$1"
+	while [ -n "$_tjf" ]; do
+		case "$_tjf" in
+			*,*) _tjf_one="${_tjf%%,*}"; _tjf="${_tjf#*,}" ;;
+			*)   _tjf_one="$_tjf"; _tjf="" ;;
+		esac
+		[ -n "$_tjf_one" ] || continue
+		[ "$_tjf_first" -eq 1 ] || J="$J,"
+		_tjf_first=0
+		J="$J\"$_tjf_one\""
+	done
+	J="$J]"
+}
+
+# ---------------------------------------------------------------------------
+# Nacitani stavovych souboru do promennych (jeden pruchod, zadny fork)
+#
+# tweaks.conf  -> TWC_<klic>   (id=hodnota; klic = id s teckami -> podtrzitky)
+# tweaks.stock -> TWS_<klic>   (id=stock;  append-only, prvni zapis vyhrava)
+#
+# Bezpecnost: hodnota se prirazuje pres eval "TWC_$k=\$_v", tedy Z PROMENNE.
+# Obsah se znovu nevyhodnocuje, $(...) ani backtick v souboru se neprovede.
+# ---------------------------------------------------------------------------
+TW_CONF_LOADED=0
+TW_CONF_IDS=""
+TW_CONF_N=0
+
+tw_conf_load() {
+	[ "$TW_CONF_LOADED" = "1" ] && return 0
+	TW_CONF_LOADED=1
+	TW_CONF_IDS=""
+	TW_CONF_N=0
+	[ -f "$TWEAKS_CONF" ] || return 0
+	while IFS='=' read -r _twcl_k _twcl_v || [ -n "$_twcl_k" ]; do
+		case "$_twcl_k" in
+			''|\#*)          continue ;;
+			*[!a-z0-9._]*)   continue ;;
+		esac
+		case "$_twcl_v" in
+			*[!A-Za-z0-9_.:+-]*)
+				log ERROR "tweak: tweaks.conf: nepovolene znaky v hodnote klice '$_twcl_k', ignoruji"
+				continue
+				;;
+		esac
+		tw_key "$_twcl_k"
+		eval "TWC_$TW_KEY=\$_twcl_v"
+		TW_CONF_IDS="$TW_CONF_IDS $_twcl_k"
+		TW_CONF_N=$((TW_CONF_N + 1))
+	done < "$TWEAKS_CONF"
+	TW_CONF_IDS="${TW_CONF_IDS# }"
+	return 0
+}
+
+TW_STOCK_LOADED=0
+TW_STOCK_EXISTS=0
+
+tw_stock_load() {
+	[ "$TW_STOCK_LOADED" = "1" ] && return 0
+	TW_STOCK_LOADED=1
+	[ -f "$TWEAKS_STOCK" ] || return 0
+	TW_STOCK_EXISTS=1
+	while IFS='=' read -r _twsl_k _twsl_v || [ -n "$_twsl_k" ]; do
+		case "$_twsl_k" in
+			''|\#*)        continue ;;
+			*[!a-z0-9._]*) continue ;;
+		esac
+		tw_key "$_twsl_k"
+		# prvni zapis vyhrava - pozdejsi radek se stejnym id se ignoruje
+		eval "_twsl_h=\${TWS_$TW_KEY+x}"
+		[ -n "${_twsl_h:-}" ] && continue
+		eval "TWS_$TW_KEY=\$_twsl_v"
+	done < "$TWEAKS_STOCK"
+	return 0
+}
+
+# tw_conf_get <id> -> TW_CVAL, TW_CSET (0/1)
+tw_conf_get() {
+	tw_conf_load
+	tw_key "$1"
+	eval "_twcg=\${TWC_$TW_KEY+x}"
+	if [ -n "${_twcg:-}" ]; then
+		eval "TW_CVAL=\$TWC_$TW_KEY"
+		TW_CSET=1
+	else
+		TW_CVAL=""
+		TW_CSET=0
+	fi
+}
+
+# tw_stock_get <id> -> TW_SVAL, TW_SSET (0/1)
+tw_stock_get() {
+	tw_stock_load
+	tw_key "$1"
+	eval "_twsg=\${TWS_$TW_KEY+x}"
+	if [ -n "${_twsg:-}" ]; then
+		eval "TW_SVAL=\$TWS_$TW_KEY"
+		TW_SSET=1
+	else
+		TW_SVAL=""
+		TW_SSET=0
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# Zapis stavovych souboru (jen v zapisovych cestach, forky jsou tu OK)
+# ---------------------------------------------------------------------------
+
+# tw_conf_put <id> <hodnota|"" = smazat radek>
+tw_conf_put() {
+	_twcp_t="$TWEAKS_CONF.tmp.$$"
+	{
+		if [ -f "$TWEAKS_CONF" ]; then
+			while IFS= read -r _twcp_l || [ -n "$_twcp_l" ]; do
+				case "$_twcp_l" in
+					"$1="*) continue ;;
+				esac
+				print -r -- "$_twcp_l"
+			done < "$TWEAKS_CONF"
+		fi
+		[ "$#" -ge 2 ] && [ -n "${2+x}" ] && [ "$2" != "__DEL__" ] && print -r -- "$1=$2"
+	} > "$_twcp_t" 2>/dev/null
+	if mv -f "$_twcp_t" "$TWEAKS_CONF" 2>/dev/null; then
+		chmod 0600 "$TWEAKS_CONF" 2>/dev/null
+		# cache uz neplati
+		TW_CONF_LOADED=0
+		return 0
+	fi
+	rm -f "$_twcp_t" 2>/dev/null
+	log ERROR "tweak: nepodarilo se prepsat $TWEAKS_CONF"
+	return 1
+}
+
+# tw_count_write <pocet chyb>
+#
+# Format souboru: jediny radek "<aktivnich> <chyb> <epoch>".
+# Cte ho `status --json` jednim rdv(), aby WebUI nemuselo parsovat registr.
+tw_count_write() {
+	_twcw_n=0
+	if [ -f "$TWEAKS_CONF" ]; then
+		while IFS= read -r _twcw_l || [ -n "$_twcw_l" ]; do
+			case "$_twcw_l" in
+				''|\#*) continue ;;
+			esac
+			_twcw_n=$((_twcw_n + 1))
+		done < "$TWEAKS_CONF"
+	fi
+	_twcw_t=$(date '+%s' 2>/dev/null)
+	is_int "$_twcw_t" || _twcw_t=0
+	_twcw_e="${1:-0}"
+	is_int "$_twcw_e" || _twcw_e=0
+	{ print -r -- "$_twcw_n $_twcw_e $_twcw_t" > "$TWEAKS_COUNT"; } 2>/dev/null
+	chmod 0600 "$TWEAKS_COUNT" 2>/dev/null
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# Registr
+# ---------------------------------------------------------------------------
+
+# tw_reset_rec - vynuluje pole aktualniho zaznamu
+tw_reset_rec() {
+	TW_ID=""; TW_KAT=""; TW_MECH=""; TW_CIL=""
+	TW_TYP=""; TW_RISK=""; TW_FLAGS=""; TW_NAME=""; TW_DESC=""
+}
+
+# tw_find <id> -> naplni TW_* pole, 0 = nalezeno
+#
+# Cte registr jednim pruchodem a KONCI hned po nalezeni - u tweak get/set
+# to znamena, ze se prumerne precte pulka souboru. Zadny grep.
+tw_find() {
+	tw_reset_rec
+	[ -f "$TWEAKS_DEF" ] || return 2
+	while IFS='|' read -r TW_ID TW_KAT TW_MECH TW_CIL TW_TYP TW_RISK TW_FLAGS TW_NAME TW_DESC || [ -n "$TW_ID" ]; do
+		case "$TW_ID" in
+			''|\#*|' '*) continue ;;
+		esac
+		[ "$TW_ID" = "$1" ] && return 0
+	done < "$TWEAKS_DEF"
+	tw_reset_rec
+	return 1
+}
+
+# tw_paths <cil> -> TW_PATHS (mezerou oddelene EXISTUJICI cesty), TW_P1 = prvni
+#
+# Zamerne neuvozeny $1 - to je to, co rozbali glob (napr. sd[a-d]).
+tw_paths() {
+	TW_PATHS=""
+	TW_P1=""
+	for _twp in $1; do
+		[ -e "$_twp" ] || continue
+		TW_PATHS="$TW_PATHS $_twp"
+		[ -n "$TW_P1" ] || TW_P1="$_twp"
+	done
+	TW_PATHS="${TW_PATHS# }"
+	[ -n "$TW_PATHS" ]
+}
+
+# tw_read_cur - aktualni hodnota podle TW_MECH -> TW_CUR ("" = nelze precist)
+# ===========================================================================
+# MECHANISMUS `bootcfg`
+#
+# Nektera nastaveni jdou zmenit JEN pri bootu - typicky velikost zramu, ktera
+# vyzaduje swapoff (za behu pri plnem swapu hrozi OOM). Zapisuji se proto do
+# konfiguraku, ktery cte `post-fs-data.sh` pri pristim startu.
+#
+# Cil ma tvar "soubor/KLIC", soubor je relativni ke STATE_DIR.
+# Format souboru musi zustat takovy, jaky umi precist post-fs-data.sh:
+#   grep -m1 '^[ \t]*ZRAM_DISKSIZE[ \t]*='
+# ===========================================================================
+
+# tw_bc_split <cil> -> TW_BC_FILE, TW_BC_KEY
+tw_bc_split() {
+	case "$1" in
+		*/*) ;;
+		*)   return 1 ;;
+	esac
+	TW_BC_FILE="$STATE_DIR/${1%%/*}"
+	TW_BC_KEY="${1##*/}"
+	case "$TW_BC_KEY" in
+		''|*[!A-Za-z0-9_]*) return 1 ;;
+	esac
+	return 0
+}
+
+# tw_bc_get <cil> -> TW_BC_VAL ("" = klic tam neni)
+tw_bc_get() {
+	TW_BC_VAL=""
+	tw_bc_split "$1" || return 1
+	[ -f "$TW_BC_FILE" ] || return 0
+	while IFS='=' read -r _bck _bcv || [ -n "$_bck" ]; do
+		# osekat mezery kolem klice
+		while :; do case "$_bck" in ' '*|"	"*) _bck="${_bck#?}" ;; *) break ;; esac; done
+		while :; do case "$_bck" in *' '|*"	") _bck="${_bck%?}" ;; *) break ;; esac; done
+		if [ "$_bck" = "$TW_BC_KEY" ]; then
+			_bcv="${_bcv%%#*}"
+			while :; do case "$_bcv" in *' '|*"	") _bcv="${_bcv%?}" ;; *) break ;; esac; done
+			case "$_bcv" in \"*\") _bcv="${_bcv#\"}"; _bcv="${_bcv%\"}" ;; esac
+			TW_BC_VAL="$_bcv"
+		fi
+	done < "$TW_BC_FILE"
+	return 0
+}
+
+# tw_bc_put <cil> <hodnota>   (prazdna hodnota = klic smazat)
+tw_bc_put() {
+	tw_bc_split "$1" || return 1
+	_bct="$TW_BC_FILE.tmp.$$"
+	: > "$_bct" 2>/dev/null || return 1
+	if [ -f "$TW_BC_FILE" ]; then
+		while IFS= read -r _bcl || [ -n "$_bcl" ]; do
+			case "$_bcl" in
+				"$TW_BC_KEY"=*|" $TW_BC_KEY"=*|"	$TW_BC_KEY"=*) continue ;;
+			esac
+			print -r -- "$_bcl" >> "$_bct" 2>/dev/null
+		done < "$TW_BC_FILE"
+	fi
+	if [ -n "$2" ]; then
+		print -r -- "$TW_BC_KEY=$2" >> "$_bct" 2>/dev/null
+	fi
+	mv -f "$_bct" "$TW_BC_FILE" 2>/dev/null || { rm -f "$_bct" 2>/dev/null; return 1; }
+	chmod 0600 "$TW_BC_FILE" 2>/dev/null
+	return 0
+}
+
+tw_read_cur() {
+	TW_CUR=""
+	case "$TW_MECH" in
+		sysfs|proc|ro)
+			tw_paths "$TW_CIL" || return 1
+			rdv "$TW_P1" ""
+			bracketv
+			TW_CUR="$V"
+			;;
+		bootcfg)
+			# hodnota, ktera se pouzije az pri pristim bootu
+			tw_bc_get "$TW_CIL" || return 1
+			TW_CUR="$TW_BC_VAL"
+			;;
+		prop)
+			# getprop je fork, ale NENI to binder (property area je sdilena pamet)
+			TW_CUR=$(getprop "$TW_CIL" 2>/dev/null)
+			;;
+		settings)
+			framework_ok || return 1
+			TW_CUR=$(settings_get "${TW_CIL%%/*}" "${TW_CIL#*/}")
+			;;
+		*)
+			return 1
+			;;
+	esac
+	return 0
+}
+
+# tw_read_all - hodnoty vsech cest globu -> TW_CURS (jen sysfs/proc/ro)
+tw_read_all() {
+	TW_CURS=""
+	for _twra in $TW_PATHS; do
+		rdv "$_twra" ""
+		bracketv
+		TW_CURS="$TW_CURS $V"
+	done
+	TW_CURS="${TW_CURS# }"
+}
+
+# tw_enum_options - povolene hodnoty pro typ enumf: -> TW_OPTS
+tw_enum_options() {
+	TW_OPTS=""
+	_tweo_src="${TW_TYP#enumf:}"
+	if [ "$_tweo_src" = "@self" ]; then
+		tw_paths "$TW_CIL" || return 1
+		_tweo_src="$TW_P1"
+	fi
+	[ -r "$_tweo_src" ] || return 1
+	rdv "$_tweo_src" ""
+	[ -n "$V" ] || return 1
+	# "none [mq-deadline] kyber bfq" -> "none mq-deadline kyber bfq"
+	for _tweo in $V; do
+		case "$_tweo" in
+			"["*"]") _tweo="${_tweo#[}"; _tweo="${_tweo%]}" ;;
+		esac
+		TW_OPTS="$TW_OPTS $_tweo"
+	done
+	TW_OPTS="${TW_OPTS# }"
+	[ -n "$TW_OPTS" ]
+}
+
+# tw_type_hint - lidsky citelny popis povolenych hodnot -> TW_HINT
+tw_type_hint() {
+	case "$TW_TYP" in
+		bool)   TW_HINT="0 nebo 1" ;;
+		ro)     TW_HINT="jen ke čtení" ;;
+		int:*)  _twth="${TW_TYP#int:}"; TW_HINT="celé číslo ${_twth%%:*} až ${_twth#*:}" ;;
+		enum:*) TW_HINT="${TW_TYP#enum:}" ;;
+		enumf:*)
+			if tw_enum_options; then
+				TW_HINT="$TW_OPTS"
+			else
+				TW_HINT="(nabídku nelze načíst z ${TW_TYP#enumf:})"
+			fi
+			;;
+		*)      TW_HINT="?" ;;
+	esac
+}
+
+# ---------------------------------------------------------------------------
+# Validace
+# ---------------------------------------------------------------------------
+
+# tw_validate <typ> <hodnota> -> 0 = OK, jinak duvod v TW_ERR
+tw_validate() {
+	TW_ERR=""
+	# Univerzalni filtr znaku. Chrani i case-patterny nize pred tim, aby
+	# uzivatelska hodnota fungovala jako glob (napr. '*' by matchlo cokoli).
+	case "$2" in
+		'')                   TW_ERR="prázdná hodnota"; return 1 ;;
+		*[!A-Za-z0-9_.:+-]*)  TW_ERR="nepovolené znaky v hodnotě"; return 1 ;;
+	esac
+	case "$1" in
+		ro)
+			TW_ERR="položka je jen ke čtení"
+			return 1
+			;;
+		bool)
+			case "$2" in
+				0|1) return 0 ;;
+			esac
+			TW_ERR="povoleno jen 0 nebo 1"
+			return 1
+			;;
+		int:*)
+			case "$2" in
+				*[!0-9]*) TW_ERR="očekáváno celé nezáporné číslo"; return 1 ;;
+			esac
+			# mksh je 32bitovy - delku odmitni DRIV, nez se cislo dostane
+			# do jakekoli aritmetiky. 11 znaku a vic = koncime.
+			case "$2" in
+				???????????*) TW_ERR="hodnota je příliš dlouhá (nejvýš 10 číslic)"; return 1 ;;
+			esac
+			_twv_r="${1#int:}"
+			_twv_min="${_twv_r%%:*}"
+			_twv_max="${_twv_r#*:}"
+			if ! tw_num_le "$_twv_min" "$2" || ! tw_num_le "$2" "$_twv_max"; then
+				TW_ERR="mimo povolený rozsah $_twv_min až $_twv_max"
+				return 1
+			fi
+			return 0
+			;;
+		enum:*)
+			case ",${1#enum:}," in
+				*",$2,"*) return 0 ;;
+			esac
+			TW_ERR="povoleno: ${1#enum:}"
+			return 1
+			;;
+		enumf:*)
+			if ! tw_enum_options; then
+				TW_ERR="nabídku hodnot nelze načíst (${1#enumf:})"
+				return 1
+			fi
+			for _twv_o in $TW_OPTS; do
+				[ "$_twv_o" = "$2" ] && return 0
+			done
+			TW_ERR="povoleno: $TW_OPTS"
+			return 1
+			;;
+	esac
+	TW_ERR="neznámý typ '$1' v registru"
+	return 1
+}
+
+# ---------------------------------------------------------------------------
+# Zapis hodnoty do zarizeni
+# ---------------------------------------------------------------------------
+
+# tw_write_val <hodnota> -> pocet neuspesnych zapisu v TW_WERR
+tw_write_val() {
+	TW_WERR=0
+	case "$TW_MECH" in
+		sysfs|proc)
+			if ! tw_paths "$TW_CIL"; then
+				log ERROR "tweak: $TW_ID: cíl neexistuje ($TW_CIL)"
+				TW_WERR=1
+				return 1
+			fi
+			for _tww in $TW_PATHS; do
+				# PAST: uzly "a [b] c" - bez normalizace by wr() videlo
+				# porad rozdil a zapisovalo dokola po 27-31 ms.
+				rdv "$_tww" ""
+				bracketv
+				[ "$V" = "$1" ] && continue
+				wr "$_tww" "$1" || TW_WERR=$((TW_WERR + 1))
+			done
+			;;
+		bootcfg)
+			if tw_bc_put "$TW_CIL" "$1"; then
+				log INFO "tweak: $TW_ID -> '$1' (projevi se az po restartu)"
+			else
+				log ERROR "tweak: $TW_ID: zapis do bootcfg selhal ($TW_CIL)"
+				TW_WERR=1
+			fi
+			;;
+		prop)
+			_tww_old=$(getprop "$TW_CIL" 2>/dev/null)
+			if [ "$_tww_old" = "$1" ]; then
+				return 0
+			fi
+			if setprop "$TW_CIL" "$1" 2>/dev/null; then
+				log INFO "tweak: setprop $TW_CIL: '$_tww_old' -> '$1'"
+			else
+				log ERROR "tweak: setprop $TW_CIL <- '$1' selhal"
+				TW_WERR=1
+			fi
+			;;
+		settings)
+			if ! framework_ok; then
+				log ERROR "tweak: $TW_ID: framework (binder) není k dispozici, nenastavuji"
+				TW_WERR=1
+				return 1
+			fi
+			_tww_ns="${TW_CIL%%/*}"
+			_tww_k="${TW_CIL#*/}"
+			if [ -z "$1" ]; then
+				settings_run delete "$_tww_ns" "$_tww_k" \
+					|| settings_run put "$_tww_ns" "$_tww_k" ""
+				log INFO "tweak: settings $_tww_ns $_tww_k -> (smazáno)"
+			elif settings_run put "$_tww_ns" "$_tww_k" "$1"; then
+				log INFO "tweak: settings $_tww_ns $_tww_k -> '$1'"
+			else
+				log ERROR "tweak: settings put $_tww_ns $_tww_k '$1' selhalo"
+				TW_WERR=1
+			fi
+			;;
+		cmd)
+			log ERROR "tweak: $TW_ID: mechanismus 'cmd' zatím není implementovaný"
+			TW_WERR=1
+			return 1
+			;;
+		*)
+			log ERROR "tweak: $TW_ID: neznámý mechanismus '$TW_MECH'"
+			TW_WERR=1
+			return 1
+			;;
+	esac
+	[ "$TW_WERR" -eq 0 ]
+}
+
+# tw_write_list <seznam hodnot> - obnova stocku u globovych cilu
+# (sda ma read_ahead_kb 128, sdb-sdd 1024 - jedna hodnota na vsechny by byla chyba)
+tw_write_list() {
+	TW_WERR=0
+	case "$TW_MECH" in
+		sysfs|proc) ;;
+		*) tw_write_val "$1"; return $? ;;
+	esac
+	if ! tw_paths "$TW_CIL"; then
+		log ERROR "tweak: $TW_ID: cíl neexistuje ($TW_CIL)"
+		TW_WERR=1
+		return 1
+	fi
+	tw_count_items "$TW_PATHS"; _twl_np="$TW_NITEMS"
+	tw_count_items "$1";        _twl_nv="$TW_NITEMS"
+	if [ "$_twl_np" -ne "$_twl_nv" ]; then
+		log WARN "tweak: $TW_ID: počet cest ($_twl_np) != počet uložených hodnot ($_twl_nv), používám první hodnotu na všechny"
+		tw_nth 1 "$1" || return 1
+		tw_write_val "$TW_NTH"
+		return $?
+	fi
+	_twl_i=0
+	for _twl_p in $TW_PATHS; do
+		_twl_i=$((_twl_i + 1))
+		tw_nth "$_twl_i" "$1" || continue
+		rdv "$_twl_p" ""
+		bracketv
+		[ "$V" = "$TW_NTH" ] && continue
+		wr "$_twl_p" "$TW_NTH" || TW_WERR=$((TW_WERR + 1))
+	done
+	[ "$TW_WERR" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Zachyceni stock hodnoty
+#
+# Stock se bere PRI PRVNIM DOTEKU, ne z registru - registr popisuje, co uzel
+# umi, ne jakou ma zrovna hodnotu. Soubor je append-only a prvni zapis vyhrava,
+# takze opakovany `set` uz stock neprepise.
+# ---------------------------------------------------------------------------
+
+# tw_stock_seed <id> -> TW_SEED / TW_SEED_SET
+#
+# Nektere uzly uz ovlada profil (charge_stop_level, read_ahead_kb). Kdyby se
+# stock cetl ze zarizeni az potom, co je profil prepsal, ulozili bychom jako
+# "stock" hodnotu profilu. Pro tyhle tri polozky proto bereme prednostne
+# skutecny stock z backup/stock.conf, ktery vznikl pred prvni zmenou.
+tw_stock_seed() {
+	TW_SEED=""
+	TW_SEED_SET=0
+	case "$1" in
+		batt.charge_stop_level)
+			stock_load
+			eval "_twss=\${SC_STOCK_CHARGE_STOP_LEVEL:-}"
+			;;
+		batt.charge_start_level)
+			stock_load
+			eval "_twss=\${SC_STOCK_CHARGE_START_LEVEL:-}"
+			;;
+		io.read_ahead_kb)
+			stock_load
+			_twss=""
+			for _twss_d in SDA SDB SDC SDD; do
+				eval "_twss_x=\${SC_STOCK_IO_READAHEAD_$_twss_d:-}"
+				[ -n "$_twss_x" ] && _twss="$_twss $_twss_x"
+			done
+			_twss="${_twss# }"
+			;;
+		*)
+			return 0
+			;;
+	esac
+	if [ -n "$_twss" ]; then
+		TW_SEED="$_twss"
+		TW_SEED_SET=1
+	fi
+	return 0
+}
+
+# tw_stock_ensure <id> - zachyti stock, kdyz jeste zachyceny neni
+tw_stock_ensure() {
+	tw_stock_get "$1"
+	[ "$TW_SSET" = "1" ] && return 0
+
+	tw_stock_seed "$1"
+	if [ "$TW_SEED_SET" = "1" ]; then
+		_twse_v="$TW_SEED"
+	else
+		case "$TW_MECH" in
+			sysfs|proc)
+				tw_paths "$TW_CIL" || return 1
+				tw_read_all
+				_twse_v="$TW_CURS"
+				;;
+			*)
+				tw_read_cur || return 1
+				_twse_v="$TW_CUR"
+				;;
+		esac
+	fi
+
+	[ -d "$BACKUP_DIR" ] || mkdir -p "$BACKUP_DIR" 2>/dev/null
+	if ! { print -r -- "$1=$_twse_v" >> "$TWEAKS_STOCK"; } 2>/dev/null; then
+		log ERROR "tweak: nelze zapsat stock do $TWEAKS_STOCK"
+		return 1
+	fi
+	chmod 0600 "$TWEAKS_STOCK" 2>/dev/null
+	tw_key "$1"
+	eval "TWS_$TW_KEY=\$_twse_v"
+	TW_STOCK_EXISTS=1
+	log INFO "tweak: zachycen stock $1='$_twse_v'"
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# set / reset
+# ---------------------------------------------------------------------------
+
+cmd_tweak_set() {
+	if [ -z "$1" ] || [ "$#" -lt 2 ]; then
+		warn "pxtune: použití: pxtune tweak set <id> <hodnota>"
+		exit 1
+	fi
+	if ! tw_find "$1"; then
+		warn "pxtune: neznámý tweak '$1' (seznam: pxtune tweak list)"
+		exit 1
+	fi
+	if [ "$TW_MECH" = "ro" ] || [ "$TW_TYP" = "ro" ]; then
+		warn "pxtune: '$1' je jen ke čtení a pixel_tune ho záměrně nenastavuje."
+		warn "        Důvod: $TW_DESC"
+		exit 1
+	fi
+	if ! tw_validate "$TW_TYP" "$2"; then
+		warn "pxtune: neplatná hodnota '$2' pro '$1': $TW_ERR"
+		log ERROR "tweak set $1='$2' odmítnuto: $TW_ERR"
+		exit 1
+	fi
+	case "$TW_MECH" in
+		sysfs|proc)
+			if ! tw_paths "$TW_CIL"; then
+				warn "pxtune: cíl neexistuje: $TW_CIL"
+				log ERROR "tweak set $1: cíl neexistuje ($TW_CIL)"
+				return 2
+			fi
+			;;
+		settings)
+			if ! framework_ok; then
+				warn "pxtune: '$1' se nastavuje přes 'settings' (binder) a framework teď není k dispozici."
+				return 2
+			fi
+			;;
+	esac
+
+	if ! tw_stock_ensure "$1"; then
+		warn "pxtune: nepodařilo se zachytit stock hodnotu pro '$1' - nenastavuji."
+		warn "        Bez zálohy by nešlo vrátit původní stav (TVRDÉ OMEZENÍ č. 5 ze SPEC)."
+		return 2
+	fi
+
+	if [ "$TW_RISK" = "3" ]; then
+		warn "pxtune: POZOR, '$1' má vysoké riziko. Přečti si 'pxtune tweak info $1'."
+		log WARN "tweak set $1='$2' - polozka s rizikem 3"
+	fi
+
+	tw_write_val "$2"
+	_twcs_e="$TW_WERR"
+
+	tw_conf_put "$1" "$2" || return 2
+	tw_count_write "$_twcs_e"
+
+	tw_stock_get "$1"
+	if [ "$_twcs_e" -eq 0 ]; then
+		log INFO "tweak set $1='$2' (stock '$TW_SVAL')"
+		msg "$1 = $2   (stock: ${TW_SVAL:-?})"
+		if tw_hasflag "$TW_FLAGS" unverified; then
+			msg "POZNÁMKA: efekt téhle položky na tomhle buildu není doložený."
+		fi
+		case "$TW_MECH" in
+			prop)     msg "POZNÁMKA: hodnotu čte HAL při startu - plně se projeví až po rebootu." ;;
+		esac
+		return 0
+	fi
+	warn "pxtune: '$1' uloženo, ale $_twcs_e zápisů selhalo (viz pxtune log)."
+	return 2
+}
+
+# tw_reset_one <id> <0|1 = ticho> -> 0 OK
+tw_reset_one() {
+	if ! tw_find "$1"; then
+		[ "$2" = "1" ] || warn "pxtune: neznámý tweak '$1'"
+		# Zaznam uz v registru neni (upgrade modulu) - radek z conf pryc.
+		tw_conf_put "$1" __DEL__
+		return 1
+	fi
+	tw_stock_get "$1"
+	if [ "$TW_SSET" != "1" ]; then
+		log WARN "tweak reset $1: stock není zachycen, jen mažu z tweaks.conf"
+		[ "$2" = "1" ] || warn "pxtune: pro '$1' není zachycený stock, vracet není co - jen ho odebírám z tweaks.conf."
+		tw_conf_put "$1" __DEL__
+		return 1
+	fi
+	TW_WERR=0
+	if [ -z "$TW_SVAL" ]; then
+		# Prazdny stock = polozka puvodne NEBYLA nastavena. To dava smysl jen
+		# u settings a propu (smazat / vyprazdnit). Do sysfs se prazdna hodnota
+		# zapsat nesmi - jadro by ji odmitlo nebo, hur, prijalo.
+		case "$TW_MECH" in
+			# prazdny stock = "klic tam puvodne nebyl" -> smazat
+			settings|prop|bootcfg) tw_write_val "" ;;
+			*) log WARN "tweak reset $1: zachyceny stock je prazdny a $TW_MECH cil nelze vyprazdnit, uzel necham byt" ;;
+		esac
+	else
+		tw_write_list "$TW_SVAL"
+	fi
+	_twro_e="$TW_WERR"
+	tw_conf_put "$1" __DEL__
+	log INFO "tweak reset $1 -> stock '$TW_SVAL' (chyb: $_twro_e)"
+	[ "$2" = "1" ] || msg "$1 vráceno na stock: ${TW_SVAL:-(nenastaveno)}"
+	[ "$_twro_e" -eq 0 ]
+}
+
+cmd_tweak_reset() {
+	if [ -z "$1" ]; then
+		warn "pxtune: použití: pxtune tweak reset <id>"
+		exit 1
+	fi
+	tw_conf_get "$1"
+	if [ "$TW_CSET" != "1" ]; then
+		msg "$1 není v tweaks.conf (nic k vrácení)."
+		return 0
+	fi
+	tw_reset_one "$1" 0
+	_twcr_rc=$?
+	tw_count_write 0
+	return $_twcr_rc
+}
+
+# tweak_reset_all - vrati VSECHNY tweaky na stock a vyprazdni tweaks.conf.
+#
+# Vola se z cmd_revert v bin/pxtune, ale AZ ZA vetvi RESTORE_ONLY=1.
+# restore_stock_values() vola cmd_revert pri KAZDEM prepnuti profilu; kdyby
+# se tweaky resetovaly i tam, uzivatel by o ne prisel pri kazde zmene profilu.
+tweak_reset_all() {
+	tw_conf_load
+	if [ "$TW_CONF_N" -eq 0 ]; then
+		tw_count_write 0
+		return 0
+	fi
+	_twra_ids="$TW_CONF_IDS"
+	_twra_e=0
+	log INFO "=== tweak reset-all ($TW_CONF_N položek) ==="
+	for _twra_id in $_twra_ids; do
+		tw_reset_one "$_twra_id" 1 || _twra_e=$((_twra_e + 1))
+	done
+	{ : > "$TWEAKS_CONF"; } 2>/dev/null
+	TW_CONF_LOADED=0
+	tw_count_write "$_twra_e"
+	log INFO "tweak reset-all hotovo (nevrácených: $_twra_e)"
+	return 0
+}
+
+cmd_tweak_reset_all() {
+	tw_conf_load
+	_twcra_n="$TW_CONF_N"
+	tweak_reset_all
+	msg "Vráceno na stock: $_twcra_n tweaků. tweaks.conf je prázdný."
+	msg "POZNÁMKA: tweaks.stock se záměrně nemaže - je to jediný záznam původních hodnot."
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# Davkove nasazeni (boot / po profilu)
+#
+# Obe funkce delaji JEDEN pruchod registrem a pro kazdy radek se podivaji,
+# jestli je id v tweaks.conf. Opacne poradi (pro kazdy radek conf projit
+# registr) by znamenalo N pruchodu souborem.
+# ---------------------------------------------------------------------------
+
+# tw_apply_flagged <flag> -> TW_AP_N (nasazeno), TW_AP_E (chyb)
+tw_apply_flagged() {
+	TW_AP_N=0
+	TW_AP_E=0
+	tw_conf_load
+	[ "$TW_CONF_N" -eq 0 ] && return 0
+	[ -f "$TWEAKS_DEF" ] || {
+		log ERROR "tweak: registr nenalezen: $TWEAKS_DEF"
+		TW_AP_E=1
+		return 1
+	}
+	_twaf_flag="$1"
+	while IFS='|' read -r TW_ID TW_KAT TW_MECH TW_CIL TW_TYP TW_RISK TW_FLAGS TW_NAME TW_DESC || [ -n "$TW_ID" ]; do
+		case "$TW_ID" in
+			''|\#*|' '*) continue ;;
+		esac
+		tw_hasflag "$TW_FLAGS" "$_twaf_flag" || continue
+		tw_key "$TW_ID"
+		eval "_twaf_h=\${TWC_$TW_KEY+x}"
+		[ -n "${_twaf_h:-}" ] || continue
+		eval "_twaf_v=\$TWC_$TW_KEY"
+
+		if ! tw_validate "$TW_TYP" "$_twaf_v"; then
+			log ERROR "tweak: $TW_ID='$_twaf_v' v tweaks.conf je neplatné ($TW_ERR), přeskakuji"
+			TW_AP_E=$((TW_AP_E + 1))
+			continue
+		fi
+		# stock musi byt zachyceny, jinak by nesel revert
+		tw_stock_get "$TW_ID"
+		if [ "$TW_SSET" != "1" ]; then
+			if ! tw_stock_ensure "$TW_ID"; then
+				log ERROR "tweak: $TW_ID: chybí stock a nelze ho zachytit, nenasazuji"
+				TW_AP_E=$((TW_AP_E + 1))
+				continue
+			fi
+		fi
+		if tw_write_val "$_twaf_v"; then
+			TW_AP_N=$((TW_AP_N + 1))
+		else
+			TW_AP_N=$((TW_AP_N + 1))
+			TW_AP_E=$((TW_AP_E + TW_WERR))
+		fi
+	done < "$TWEAKS_DEF"
+	return 0
+}
+
+# tweak_apply_boot - vola service.sh pres `pxtune tweak apply-boot`
+#
+# Nasazuje jen polozky s flagem `boot`, tedy ty, ktere reboot nepreziji.
+# settings a persist.* propy si Android pamatuje sam a zamerne se jich
+# pri bootu nedotykame.
+tweak_apply_boot() {
+	tw_conf_load
+	if [ "$TW_CONF_N" -eq 0 ]; then
+		log INFO "tweak apply-boot: tweaks.conf je prázdný, nic k nasazení"
+		tw_count_write 0
+		return 0
+	fi
+
+	# TVRDE OMEZENI c. 5 ze SPEC: vse musi byt reversibilni a zalohovane.
+	# Kdyz mame co nasazovat, ale chybi zaznam stock hodnot, nesmime nic
+	# zapsat - jinak vznikne stav, ze ktereho neni cesta zpatky.
+	tw_stock_load
+	if [ "$TW_STOCK_EXISTS" != "1" ]; then
+		log ERROR "tweak apply-boot: tweaks.conf má $TW_CONF_N položek, ale $TWEAKS_STOCK CHYBÍ - NIC nenasazuji (bez zálohy není revert)"
+		warn "pxtune: chybí $TWEAKS_STOCK, tweaky se nenasazují (viz log)"
+		tw_count_write "$TW_CONF_N"
+		return 2
+	fi
+
+	log INFO "=== tweak apply-boot ==="
+	tw_apply_flagged boot
+	tw_count_write "$TW_AP_E"
+	log INFO "tweak apply-boot: nasazeno $TW_AP_N, chyb $TW_AP_E"
+	msg "Nasazeno tweaků: $TW_AP_N, chyb: $TW_AP_E."
+	[ "$TW_AP_E" -gt 0 ] && return 2
+	return 0
+}
+
+# tweak_reapply - vola se z profile_apply v bin/pxtune, na jeho konci.
+#
+# Profil sahá na stejné uzly jako nektere tweaky (charge_stop_level,
+# read_ahead_kb). Poradi je zamerne: profil zapise sve, tweak s flagem
+# `reapply` to potom prepise - uzivateluv tweak ma posledni slovo.
+tweak_reapply() {
+	tw_conf_load
+	[ "$TW_CONF_N" -eq 0 ] && return 0
+
+	# statistiky zapisu patri profilu, tweaky si je nesmi zamichat
+	_twrp_ok="${WR_OK:-0}"
+	_twrp_fail="${WR_FAIL:-0}"
+
+	tw_apply_flagged reapply
+
+	WR_OK="$_twrp_ok"
+	WR_FAIL="$_twrp_fail"
+
+	[ "$TW_AP_N" -gt 0 ] && log INFO "tweak reapply: přepsáno $TW_AP_N položek po profilu (chyb: $TW_AP_E)"
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# Vypisy
+# ---------------------------------------------------------------------------
+cmd_tweak_list() {
+	_twl_filter="$1"
+	if [ -n "$_twl_filter" ]; then
+		case " $TW_CATS " in
+			*" $_twl_filter "*) ;;
+			*)
+				warn "pxtune: neznámá kategorie '$_twl_filter' (dostupné: $TW_CATS)"
+				exit 1
+				;;
+		esac
+	fi
+	[ -f "$TWEAKS_DEF" ] || { warn "pxtune: registr nenalezen: $TWEAKS_DEF"; return 2; }
+	tw_conf_load
+	tw_stock_load
+
+	TW_ROW=""; col "" 2; col "ID" 42; col "KAT" 6; col "RIZ" 4; col "HODNOTA" 16
+	o "${TW_ROW}NÁZEV"
+	_twl_n=0
+	while IFS='|' read -r TW_ID TW_KAT TW_MECH TW_CIL TW_TYP TW_RISK TW_FLAGS TW_NAME TW_DESC || [ -n "$TW_ID" ]; do
+		case "$TW_ID" in
+			''|\#*|' '*) continue ;;
+		esac
+		[ -n "$_twl_filter" ] && [ "$TW_KAT" != "$_twl_filter" ] && continue
+		_twl_n=$((_twl_n + 1))
+
+		tw_key "$TW_ID"
+		eval "_twl_h=\${TWC_$TW_KEY+x}"
+		if [ -n "${_twl_h:-}" ]; then
+			eval "_twl_v=\$TWC_$TW_KEY"
+			_twl_m="*"
+		elif [ "$TW_MECH" = "ro" ]; then
+			_twl_v="-"
+			_twl_m="#"
+		else
+			_twl_v="-"
+			_twl_m=" "
+		fi
+		tw_hasflag "$TW_FLAGS" unverified && _twl_m="$_twl_m?" || _twl_m="$_twl_m "
+		TW_ROW=""
+		col "$_twl_m" 2; col "$TW_ID" 42; col "$TW_KAT" 6; col "$TW_RISK" 4; col "$_twl_v" 16
+		o "${TW_ROW}$TW_NAME"
+	done < "$TWEAKS_DEF"
+
+	o ""
+	o "Položek: $_twl_n   * = nastaveno v tweaks.conf   # = jen ke čtení   ? = efekt neověřen"
+	o "Detail včetně popisu: pxtune tweak info <id>"
+	oflush
+	return 0
+}
+
+cmd_tweak_categories() {
+	[ -f "$TWEAKS_DEF" ] || { warn "pxtune: registr nenalezen: $TWEAKS_DEF"; return 2; }
+	for _twc_c in $TW_CATS; do
+		eval "TWCAT_$_twc_c=0"
+		eval "TWCATRW_$_twc_c=0"
+	done
+	while IFS='|' read -r TW_ID TW_KAT TW_MECH TW_CIL TW_TYP TW_RISK TW_FLAGS TW_NAME TW_DESC || [ -n "$TW_ID" ]; do
+		case "$TW_ID" in
+			''|\#*|' '*) continue ;;
+		esac
+		case " $TW_CATS " in
+			*" $TW_KAT "*) ;;
+			*) continue ;;
+		esac
+		eval "TWCAT_$TW_KAT=\$((TWCAT_$TW_KAT + 1))"
+		[ "$TW_MECH" = "ro" ] || eval "TWCATRW_$TW_KAT=\$((TWCATRW_$TW_KAT + 1))"
+	done < "$TWEAKS_DEF"
+
+	TW_ROW=""; col "KAT" 7; col "CELKEM" 6; col "NASTAVITELNÝCH" 14
+	o "${TW_ROW}POPIS"
+	for _twc_c in $TW_CATS; do
+		eval "_twc_n=\$TWCAT_$_twc_c"
+		eval "_twc_w=\$TWCATRW_$_twc_c"
+		tw_cat_name "$_twc_c"
+		TW_ROW=""; col "$_twc_c" 7; col "$_twc_n" 6; col "$_twc_w" 14
+		o "${TW_ROW}$TW_CATNAME"
+	done
+	o ""
+	o "Výpis kategorie: pxtune tweak list <kat>"
+	oflush
+	return 0
+}
+
+cmd_tweak_info() {
+	if [ -z "$1" ]; then
+		warn "pxtune: použití: pxtune tweak info <id>"
+		exit 1
+	fi
+	if ! tw_find "$1"; then
+		warn "pxtune: neznámý tweak '$1' (seznam: pxtune tweak list)"
+		exit 1
+	fi
+	tw_cat_name "$TW_KAT"
+	tw_risk_name "$TW_RISK"
+	tw_conf_get "$1"
+	tw_stock_get "$1"
+
+	o "=== $TW_ID ==="
+	o "$TW_NAME"
+	o ""
+	o "$TW_DESC"
+	o ""
+	o "  kategorie     $TW_KAT ($TW_CATNAME)"
+	o "  mechanismus   $TW_MECH"
+	o "  cíl           $TW_CIL"
+	tw_type_hint
+	o "  povoleno      $TW_HINT"
+	o "  riziko        $TW_RISK ($TW_RISKNAME)"
+	o "  příznaky      ${TW_FLAGS:-(žádné)}"
+
+	if tw_read_cur; then
+		o "  aktuálně      ${TW_CUR:-(prázdné)}"
+	else
+		o "  aktuálně      (nelze přečíst)"
+	fi
+	if [ "$TW_CSET" = "1" ]; then
+		o "  nastaveno     $TW_CVAL"
+	else
+		o "  nastaveno     ne (řídí to systém)"
+	fi
+	if [ "$TW_SSET" = "1" ]; then
+		o "  stock         ${TW_SVAL:-(nebylo nastaveno)}"
+	else
+		o "  stock         (dosud nezachycen - zachytí se při prvním 'tweak set')"
+	fi
+
+	case "$TW_MECH" in
+		ro) o ""; o "Tuhle položku pixel_tune ZÁMĚRNĚ nenastavuje - důvod je v popisu výše." ;;
+	esac
+	if tw_hasflag "$TW_FLAGS" boot; then
+		o ""
+		o "Nastavení nepřežije reboot; znovu ho nasadí service.sh přes 'tweak apply-boot'."
+	fi
+	if tw_hasflag "$TW_FLAGS" reapply; then
+		o "Na stejný uzel sahá i profil - tweak se proto nasazuje až po něm."
+	fi
+	if tw_hasflag "$TW_FLAGS" unverified; then
+		o "POZOR: efekt téhle položky na tomhle buildu NENÍ doložený."
+	fi
+	oflush
+	return 0
+}
+
+cmd_tweak_get() {
+	if [ -z "$1" ]; then
+		warn "pxtune: použití: pxtune tweak get <id>"
+		exit 1
+	fi
+	if ! tw_find "$1"; then
+		warn "pxtune: neznámý tweak '$1'"
+		exit 1
+	fi
+	if tw_read_cur; then
+		print -r -- "$TW_CUR"
+		return 0
+	fi
+	warn "pxtune: hodnotu '$1' se nepodařilo přečíst ($TW_CIL)"
+	return 2
+}
+
+# ---------------------------------------------------------------------------
+# JSON pro WebUI
+#
+# `tweak json` je SAMOSTATNY prikaz, zamerne NENI soucasti `status --json`:
+#   - status --json bezi kazdych ~5 s, registr se meni jen pri instalaci,
+#   - status --json by tim narostl o desitky kB popisu na kazde volani.
+# WebUI si registr nacte jednou a v `status --json` pak sleduje jen
+# objekt "tweaks" (aktivnich / chyb / cas posledni zmeny) z tweaks.count.
+#
+# Bez --live se nic nečte ze zarizeni - jen registr + tweaks.conf + tweaks.stock.
+# ---------------------------------------------------------------------------
+cmd_tweak_json() {
+	_twj_live=0
+	case "$1" in
+		"")      ;;
+		--live)  _twj_live=1 ;;
+		*)       warn "pxtune: použití: pxtune tweak json [--live]"; exit 1 ;;
+	esac
+	if [ ! -f "$TWEAKS_DEF" ]; then
+		print -r -- '{"error":"registry_missing","tweaks":[],"categories":[]}'
+		return 2
+	fi
+
+	# --- CACHE ---------------------------------------------------------
+	# Klic = mtime registru + tweaks.conf + tweaks.stock. Kdyz se ani jeden
+	# nezmenil, je vysledek bitove stejny a staci ho vypsat.
+	# --live se NEcachuje: cte zive hodnoty ze sysfs, ktere se meni.
+	_twj_key=""
+	for _twj_f in "$TWEAKS_DEF" "$TWEAKS_CONF" "$TWEAKS_STOCK"; do
+		if [ -f "$_twj_f" ]; then
+			_twj_key="$_twj_key$(stat -c %Y "$_twj_f" 2>/dev/null)-"
+		else
+			_twj_key="${_twj_key}0-"
+		fi
+	done
+	if [ "$_twj_live" -eq 0 ] && [ -s "$TWEAKS_JCACHE" ]; then
+		IFS= read -r _twj_hdr < "$TWEAKS_JCACHE" 2>/dev/null
+		if [ "$_twj_hdr" = "#$_twj_key" ]; then
+			# prvni radek je klic, zbytek je JSON
+			sed -n '2p' "$TWEAKS_JCACHE" 2>/dev/null
+			return 0
+		fi
+	fi
+
+	tw_conf_load
+	tw_stock_load
+
+	for _twj_c in $TW_CATS; do
+		eval "TWCAT_$_twj_c=0"
+	done
+
+	J="{\"version\":\"$PXTUNE_TWEAKS_VERSION\",\"live\":"
+	if [ "$_twj_live" -eq 1 ]; then J="${J}true"; else J="${J}false"; fi
+	J="$J,\"tweaks\":["
+
+	_twj_first=1
+	while IFS='|' read -r TW_ID TW_KAT TW_MECH TW_CIL TW_TYP TW_RISK TW_FLAGS TW_NAME TW_DESC || [ -n "$TW_ID" ]; do
+		case "$TW_ID" in
+			''|\#*|' '*) continue ;;
+		esac
+		case " $TW_CATS " in
+			*" $TW_KAT "*) eval "TWCAT_$TW_KAT=\$((TWCAT_$TW_KAT + 1))" ;;
+		esac
+		[ "$_twj_first" -eq 1 ] || J="$J,"
+		_twj_first=0
+
+		tw_key "$TW_ID"
+		eval "_twj_h=\${TWC_$TW_KEY+x}"
+		if [ -n "${_twj_h:-}" ]; then
+			eval "_twj_v=\$TWC_$TW_KEY"
+			_twj_set=true
+		else
+			_twj_v=""
+			_twj_set=false
+		fi
+		eval "_twj_sh=\${TWS_$TW_KEY+x}"
+		if [ -n "${_twj_sh:-}" ]; then
+			eval "_twj_s=\$TWS_$TW_KEY"
+		else
+			_twj_s=""
+		fi
+
+		# POPISY SE EMITUJI BEZ ESCAPOVANI - registr nesmi obsahovat " ani \,
+		# hlida to `tweak selftest`. Escapovani pres sed by stalo 7,7 ms/radek.
+		J="$J{\"id\":\"$TW_ID\",\"cat\":\"$TW_KAT\",\"mech\":\"$TW_MECH\""
+		J="$J,\"target\":\"$TW_CIL\",\"type\":\"$TW_TYP\",\"risk\":${TW_RISK:-0},\"flags\":"
+		tw_jflags "$TW_FLAGS"
+		J="$J,\"name\":\"$TW_NAME\",\"desc\":\"$TW_DESC\",\"set\":$_twj_set,\"value\":"
+		tw_jstr "$_twj_v"
+		J="$J,\"stock\":"
+		tw_jstr "$_twj_s"
+		if [ "$_twj_live" -eq 1 ]; then
+			J="$J,\"current\":"
+			if tw_read_cur; then
+				tw_jstr "$TW_CUR"
+			else
+				J="${J}null"
+			fi
+		fi
+		J="$J}"
+	done < "$TWEAKS_DEF"
+
+	J="$J],\"categories\":["
+	_twj_first=1
+	for _twj_c in $TW_CATS; do
+		eval "_twj_n=\$TWCAT_$_twj_c"
+		tw_cat_name "$_twj_c"
+		[ "$_twj_first" -eq 1 ] || J="$J,"
+		_twj_first=0
+		J="$J{\"id\":\"$_twj_c\",\"name\":\"$TW_CATNAME\",\"n\":$_twj_n}"
+	done
+	J="$J],\"count\":{"
+
+	rdv "$TWEAKS_COUNT" ""
+	_twj_a=0; _twj_e=0; _twj_t=0
+	if [ -n "$V" ]; then
+		tw_nth 1 "$V" && _twj_a="$TW_NTH"
+		tw_nth 2 "$V" && _twj_e="$TW_NTH"
+		tw_nth 3 "$V" && _twj_t="$TW_NTH"
+	fi
+	case "$_twj_a" in ''|*[!0-9]*) _twj_a=0 ;; esac
+	case "$_twj_e" in ''|*[!0-9]*) _twj_e=0 ;; esac
+	case "$_twj_t" in ''|*[!0-9]*) _twj_t=0 ;; esac
+	J="$J\"active\":$_twj_a,\"errors\":$_twj_e,\"ts\":$_twj_t}}"
+	if [ "$_twj_live" -eq 0 ] && [ -d "$STATE_DIR" ]; then
+		{ print -r -- "#$_twj_key"; print -r -- "$J"; } > "$TWEAKS_JCACHE.tmp" 2>/dev/null &&
+			mv -f "$TWEAKS_JCACHE.tmp" "$TWEAKS_JCACHE" 2>/dev/null
+	fi
+	print -r -- "$J"
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# selftest
+# ---------------------------------------------------------------------------
+cmd_tweak_selftest() {
+	TWST_ERR=0
+	TWST_WARN=0
+	o "pxtune-tweaks $PXTUNE_TWEAKS_VERSION selftest"
+	o "registr  : $TWEAKS_DEF"
+	o "conf     : $TWEAKS_CONF"
+	o "stock    : $TWEAKS_STOCK"
+	o "pocitadlo: $TWEAKS_COUNT"
+	o ""
+
+	if [ ! -f "$TWEAKS_DEF" ]; then
+		o "CHYBA: registr neexistuje"
+		oflush
+		return 2
+	fi
+
+	TWST_SEEN=""
+	TWST_KEYS=""
+	TWST_N=0
+	TW_ROW=""; col "ID" 42; col "KAT" 6; col "MECH" 9; col "EXI" 4; col "ZAP" 5
+	o "${TW_ROW}POZNAMKA"
+
+	while IFS='|' read -r TW_ID TW_KAT TW_MECH TW_CIL TW_TYP TW_RISK TW_FLAGS TW_NAME TW_DESC || [ -n "$TW_ID" ]; do
+		case "$TW_ID" in
+			''|\#*|' '*) continue ;;
+		esac
+		TWST_N=$((TWST_N + 1))
+		_twst_note=""
+
+		# --- syntaxe id ---
+		case "$TW_ID" in
+			*[!a-z0-9._]*) _twst_note="$_twst_note ID:nepovolene-znaky"; TWST_ERR=$((TWST_ERR + 1)) ;;
+		esac
+		case " $TWST_SEEN " in
+			*" $TW_ID "*) _twst_note="$_twst_note ID:duplicita"; TWST_ERR=$((TWST_ERR + 1)) ;;
+		esac
+		TWST_SEEN="$TWST_SEEN $TW_ID"
+		tw_key "$TW_ID"
+		case " $TWST_KEYS " in
+			*" $TW_KEY "*) _twst_note="$_twst_note KLIC:kolize-po-nahrazeni-tecek"; TWST_ERR=$((TWST_ERR + 1)) ;;
+		esac
+		TWST_KEYS="$TWST_KEYS $TW_KEY"
+
+		# --- kategorie / mechanismus / riziko / flagy ---
+		case " $TW_CATS " in
+			*" $TW_KAT "*) ;;
+			*) _twst_note="$_twst_note KAT:neznama"; TWST_ERR=$((TWST_ERR + 1)) ;;
+		esac
+		case " $TW_MECHS " in
+			*" $TW_MECH "*) ;;
+			*) _twst_note="$_twst_note MECH:neznamy"; TWST_ERR=$((TWST_ERR + 1)) ;;
+		esac
+		case "$TW_RISK" in
+			0|1|2|3) ;;
+			*) _twst_note="$_twst_note RIZIKO:mimo-0-3"; TWST_ERR=$((TWST_ERR + 1)) ;;
+		esac
+		_twst_f="$TW_FLAGS"
+		while [ -n "$_twst_f" ]; do
+			case "$_twst_f" in
+				*,*) _twst_one="${_twst_f%%,*}"; _twst_f="${_twst_f#*,}" ;;
+				*)   _twst_one="$_twst_f"; _twst_f="" ;;
+			esac
+			[ -n "$_twst_one" ] || continue
+			case " $TW_FLAGS_KNOWN " in
+				*" $_twst_one "*) ;;
+				*) _twst_note="$_twst_note FLAG:$_twst_one"; TWST_ERR=$((TWST_ERR + 1)) ;;
+			esac
+		done
+
+		# --- typ ---
+		case "$TW_TYP" in
+			bool|ro|enum:*|enumf:*) ;;
+			int:*)
+				_twst_r="${TW_TYP#int:}"
+				case "$_twst_r" in
+					*:*) ;;
+					*) _twst_note="$_twst_note TYP:int-bez-rozsahu"; TWST_ERR=$((TWST_ERR + 1)) ;;
+				esac
+				;;
+			*) _twst_note="$_twst_note TYP:neznamy"; TWST_ERR=$((TWST_ERR + 1)) ;;
+		esac
+		if [ "$TW_MECH" = "ro" ] && [ "$TW_TYP" != "ro" ]; then
+			_twst_note="$_twst_note MECH-ro-ale-TYP-neni-ro"; TWST_ERR=$((TWST_ERR + 1))
+		fi
+
+		# --- texty (JSON se emituje bez escapovani) ---
+		case "$TW_NAME$TW_DESC" in
+			*'"'*)  _twst_note="$_twst_note TEXT:uvozovka"; TWST_ERR=$((TWST_ERR + 1)) ;;
+		esac
+		case "$TW_NAME$TW_DESC" in
+			*'\'*)  _twst_note="$_twst_note TEXT:zpetne-lomitko"; TWST_ERR=$((TWST_ERR + 1)) ;;
+		esac
+		[ -n "$TW_NAME" ] || { _twst_note="$_twst_note NAZEV:prazdny"; TWST_ERR=$((TWST_ERR + 1)); }
+		[ -n "$TW_DESC" ] || { _twst_note="$_twst_note POPIS:prazdny"; TWST_ERR=$((TWST_ERR + 1)); }
+
+		# --- cil ---
+		_twst_e="-"; _twst_w="-"
+		case "$TW_MECH" in
+			sysfs|proc|ro)
+				if tw_paths "$TW_CIL"; then
+					_twst_e="ano"
+					_twst_w="ne"
+					[ -w "$TW_P1" ] && _twst_w="ano"
+					if [ "$TW_MECH" != "ro" ] && [ "$_twst_w" = "ne" ]; then
+						_twst_note="$_twst_note CIL:neni-zapisovatelny"
+						TWST_ERR=$((TWST_ERR + 1))
+					fi
+				else
+					_twst_e="NE"
+					if tw_hasflag "$TW_FLAGS" unverified; then
+						_twst_note="$_twst_note CIL:chybi(unverified)"
+						TWST_WARN=$((TWST_WARN + 1))
+					else
+						_twst_note="$_twst_note CIL:CHYBI"
+						TWST_ERR=$((TWST_ERR + 1))
+					fi
+				fi
+				;;
+			settings)
+				case "$TW_CIL" in
+					*/*) ;;
+					*) _twst_note="$_twst_note CIL:ocekavano namespace/klic"; TWST_ERR=$((TWST_ERR + 1)) ;;
+				esac
+				;;
+			prop)
+				case "$TW_CIL" in
+					*.*) ;;
+					*) _twst_note="$_twst_note CIL:nevypada-jako-property"; TWST_ERR=$((TWST_ERR + 1)) ;;
+				esac
+				;;
+		esac
+
+		# --- enumf musi jit precist ---
+		case "$TW_TYP" in
+			enumf:*)
+				if tw_enum_options; then
+					_twst_note="$_twst_note [$TW_OPTS]"
+				else
+					_twst_note="$_twst_note ENUMF:nabidku-nelze-nacist"
+					TWST_WARN=$((TWST_WARN + 1))
+				fi
+				;;
+		esac
+
+		TW_ROW=""
+		col "$TW_ID" 42; col "$TW_KAT" 6; col "$TW_MECH" 9; col "$_twst_e" 4; col "$_twst_w" 5
+		o "${TW_ROW}${_twst_note# }"
+	done < "$TWEAKS_DEF"
+
+	# --- stav ---
+	o ""
+	o "== Stav =="
+	tw_conf_load
+	tw_stock_load
+	o "polozek v registru        : $TWST_N"
+	o "nastaveno (tweaks.conf)   : $TW_CONF_N"
+	if [ "$TW_STOCK_EXISTS" = "1" ]; then
+		o "tweaks.stock              : existuje"
+	elif [ "$TW_CONF_N" -gt 0 ]; then
+		o "tweaks.stock              : CHYBI -> apply-boot nic nenasadi!"
+		TWST_ERR=$((TWST_ERR + 1))
+	else
+		o "tweaks.stock              : neexistuje (jeste nic nenastaveno, OK)"
+	fi
+
+	# kazde nastavene id musi byt v registru a mit zachyceny stock
+	for _twst_id in $TW_CONF_IDS; do
+		if ! tw_find "$_twst_id"; then
+			o "tweaks.conf: $_twst_id NENI v registru"
+			TWST_ERR=$((TWST_ERR + 1))
+			continue
+		fi
+		tw_stock_get "$_twst_id"
+		if [ "$TW_SSET" != "1" ]; then
+			o "tweaks.conf: $_twst_id nema zachyceny stock"
+			TWST_ERR=$((TWST_ERR + 1))
+		fi
+		tw_conf_get "$_twst_id"
+		if ! tw_validate "$TW_TYP" "$TW_CVAL"; then
+			o "tweaks.conf: $_twst_id=$TW_CVAL je neplatne ($TW_ERR)"
+			TWST_ERR=$((TWST_ERR + 1))
+		fi
+	done
+
+	# --- kontrola JSON ---
+	if cmd_tweak_json >/dev/null 2>&1; then
+		o "tweak json                : vygenerovan bez chyby"
+	else
+		o "tweak json                : SELHAL"
+		TWST_ERR=$((TWST_ERR + 1))
+	fi
+
+	o ""
+	o "Chyb: $TWST_ERR   Varovani: $TWST_WARN"
+	oflush
+	log INFO "tweak selftest: chyb=$TWST_ERR varovani=$TWST_WARN polozek=$TWST_N"
+	[ "$TWST_ERR" -gt 0 ] && return 2
+	return 0
+}
+
+# ---------------------------------------------------------------------------
+# dispatcher - vola se z main() v bin/pxtune
+# ---------------------------------------------------------------------------
+tweak_usage() {
+	cat <<EOF
+pxtune tweak - jednotlive kernelove/systemove tweaky
+
+  pxtune tweak list [kat]       seznam (kat: $TW_CATS)
+  pxtune tweak categories       kategorie a pocty
+  pxtune tweak info <id>        detail vcetne popisu, stocku a aktualni hodnoty
+  pxtune tweak get <id>         aktualni hodnota (jeden radek, pro skripty)
+  pxtune tweak set <id> <hod>   nastavit (pri prvnim doteku zachyti stock)
+  pxtune tweak reset <id>       vratit na stock a odebrat z tweaks.conf
+  pxtune tweak reset-all        vratit vse na stock
+  pxtune tweak json [--live]    registr + stav pro WebUI (--live docte zarizeni)
+  pxtune tweak apply-boot       nasadit polozky s priznakem 'boot' (vola service.sh)
+  pxtune tweak selftest         overi registr, cile a konzistenci stavu
+
+Stav:  $TWEAKS_CONF
+Stock: $TWEAKS_STOCK
+EOF
+}
+
+cmd_tweak() {
+	_twd="$1"
+	[ "$#" -ge 1 ] && shift
+	case "$_twd" in
+		list)              cmd_tweak_list "$1" ;;
+		categories|cats)   cmd_tweak_categories ;;
+		info|show)         cmd_tweak_info "$1" ;;
+		get)               cmd_tweak_get "$1" ;;
+		set)               cmd_tweak_set "$@" ;;
+		reset)             cmd_tweak_reset "$1" ;;
+		reset-all)         cmd_tweak_reset_all ;;
+		json)              cmd_tweak_json "$1" ;;
+		apply-boot)        tweak_apply_boot ;;
+		selftest)          cmd_tweak_selftest ;;
+		-h|--help|help)    tweak_usage ;;
+		"")                tweak_usage; exit 1 ;;
+		*)                 warn "pxtune: neznámý podpříkaz 'tweak $_twd'"; tweak_usage >&2; exit 1 ;;
+	esac
+}

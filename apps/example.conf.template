@@ -1,0 +1,209 @@
+# =============================================================================
+# pixel_tune - sablona per-app pravidla
+#
+# Zkopiruj na /data/adb/pixel_tune/apps/<package>.conf a uprav,
+# NEBO (doporuceno) pouzij CLI, ktere hodnoty rovnou validuje:
+#
+#   pxtune app set com.nianticlabs.pokemongo \
+#       APP_DESC="Pokemon GO" APP_PROFILE=game GAME_MODE=2 GAME_FPS=60
+#
+# JEDEN SOUBOR NA BALICEK. Nazev souboru MUSI byt <package>.conf - vyhledani
+# pravidla je pak `[ -f ]`, tedy NULA forku na kazdou udalost popredi.
+# (Namereno na tomhle zarizeni: fork ~7,7 ms, builtin read 0,44 ms.)
+#
+# Format: KEY=VALUE, jedna dvojice na radek. Uvozovky volitelne.
+# PRAZDNA HODNOTA NEBO CHYBEJICI KLIC = NESAHAT NA TO.
+# Soubor se NESOURCUJE - cte ho vlastni parser v bin/pxtune-perapp, takze
+# poskozeny nebo podvrzeny soubor nemuze nic spustit.
+#
+# -----------------------------------------------------------------------------
+# TRI VRSTVY, KAZDA S JINYMI VLASTNOSTMI
+# -----------------------------------------------------------------------------
+#
+#  vrstva 1  Android Game Mode (cmd game)     SKUTECNE per-app   navrat netreba,
+#                                                                drzi si to system
+#  vrstva 2  pxtune profil (uclamp/GPU/vm)    globalni           navrat ZDARMA -
+#                                                                profile_apply() vola
+#                                                                restore_stock_values()
+#  vrstva 3  refresh rate, rozliseni          globalni           MUSI SE VRATIT
+#                                                                EXPLICITNE
+#
+# Vrstva 3 je zamerne mala prave proto, ze jen ona potrebuje navrat.
+#
+# -----------------------------------------------------------------------------
+# PORADI PRIORIT (natvrdo v kodu, NEJDE prepsat konfiguraci)
+# -----------------------------------------------------------------------------
+#
+#   rucni manual_override  >  teplotni/bateriovy strop  >  per-app pravidlo
+#                                                       >  adaptivni automat
+# =============================================================================
+
+
+# --- identita ----------------------------------------------------------------
+
+# Nazev balicku. Musi se shodovat s nazvem souboru.
+APP_PKG="com.nianticlabs.pokemongo"
+
+# Popis pro `pxtune app list` a WebUI. Jen text, na nic se nepouziva.
+APP_DESC="Pokemon GO - hra na venku, telefon casto na slunci"
+
+# 1 = pravidlo je v provozu, 0 = lezi tu, ale ignoruje se.
+# Vypnuti pravidla u prave bezici aplikace okamzite sundá vrstvu 3.
+APP_ENABLED="1"
+
+
+# =============================================================================
+# VRSTVA 1 - Android Game Mode
+#
+# Jedina vrstva, ktera je SKUTECNE per-app: nastaveni si pamatuje sam
+# GameManager a uplatnuje ho jen na tenhle balicek. Nic se nemusi vracet.
+#
+# Zapisuje se JEN pri `pxtune app set` a `pxtune app sync` - NIKDY z demona.
+# `cmd` je binder a demon ma zasadu ZADNY BINDER.
+#
+# NEOVERENO NA TOMHLE ZARIZENI (viz overovaci prikazy v dokumentaci):
+#   - bere GameManager Pokemon GO jako hru? Kdyz ne, cela vrstva 1 pro tuhle
+#     aplikaci padá a zbyvaji vrstvy 2 a 3.
+#   - prezije `--fps` / `--downscale` reboot?  Kdyz ne, pouzij GAME_APPLY=enter.
+# =============================================================================
+
+# 1|standard  2|performance  3|battery  4|custom
+GAME_MODE="2"
+
+# Strop snimkove frekvence. 0 = bez omezeni.
+# U PoGO ma smysl 30 nebo 60 - hra sama nabizi max 60.
+GAME_FPS="60"
+
+# Procenta renderu: 0.3 az 0.9 (podil nativniho rozliseni), nebo `disable`.
+# TOHLE je bezpecna cesta ke "snizeni rozliseni" - je per-app, dela to
+# SurfaceFlinger a NIC se nemusi vracet. Na rozdil od APP_RES nize.
+GAME_DOWNSCALE="0.7"
+
+# once  = vrstva 1 se zapise jen pri `app set` / `app sync` (VYCHOZI)
+# enter = navic se znovu nasadi pri kazdem vstupu do aplikace, nejvyse ale
+#         jednou za 5 minut. Pouzij POUZE kdyz se overi, ze `cmd game set`
+#         nepreziva reboot.
+GAME_APPLY="once"
+
+
+# =============================================================================
+# VRSTVA 2 - pxtune profil
+#
+# Profil je GLOBALNI, ne per-app. Navrat ale nic nestoji: profile_apply()
+# vola restore_stock_values() jako prvni krok, takze pri prepnuti na jakykoli
+# jiny profil se vsechno vrati na hodnoty z backup/stock.conf.
+#
+# Nasazuje ho demon (target_profile krok 3b), ne `app enter`. Kdyz demon
+# nebezi (pxtune auto off), nasadi ho `app enter` sam.
+# =============================================================================
+
+# Jmeno profilu z /data/adb/pixel_tune/profiles/<name>.conf.
+# Prazdne = nechat volbu na adaptivnim automatu.
+APP_PROFILE="game"
+
+# APP_OVERLAY_<klic profilu> prebiji jednotlivy klic zvoleneho profilu
+# jen po dobu, co je tahle aplikace v popredi. Povolene klice jsou presne
+# klice kontraktu profilu ze SPEC.md:
+#
+#   UCLAMP_TOPAPP_MIN  UCLAMP_TOPAPP_MAX  UCLAMP_FG_MIN   UCLAMP_FG_MAX
+#   UCLAMP_BG_MIN      UCLAMP_BG_MAX      UCLAMP_SYSBG_MIN UCLAMP_SYSBG_MAX
+#   GPU_MAX_FREQ       GPU_MIN_FREQ       GPU_POWER_POLICY
+#   THERMAL_PROFILE_CPU_MID  THERMAL_PROFILE_CPU_HIGH
+#   VM_SWAPPINESS  VM_DIRTY_RATIO  VM_DIRTY_BG_RATIO  VM_VFS_CACHE_PRESSURE
+#   IO_READAHEAD_KB  CHARGE_STOP_LEVEL
+#
+# Priklad: PoGO je GPU-lehke, ale bezi hodiny v kuse na slunci. Stropnout GPU
+# na 723 MHz (z 890) stoji par snimku a hodne tepla.
+# GPU frekvence MUSI byt ze seznamu ve SPEC.md:
+#   150000 302000 337000 376000 419000 467000 521000 580000 649000
+#   723000 807000 850000 890000
+APP_OVERLAY_GPU_MAX_FREQ="723000"
+
+# uclamp je hlavni paka (0-100 nebo "max"). thermal HAL ji neprepisuje.
+#APP_OVERLAY_UCLAMP_TOPAPP_MIN="30"
+#APP_OVERLAY_UCLAMP_BG_MAX="30"
+
+
+# =============================================================================
+# VRSTVA 3 - refresh rate a rozliseni
+#
+# GLOBALNI a jako jedina se MUSI EXPLICITNE VRATIT. Stav navratu je
+# v /data/adb/pixel_tune/appmode.active a zapisuje se PRED aplikaci.
+# `pxtune app leave` je idempotentni a vola ho SEST nezavislych cest
+# (normalni odchod, zhasnuti obrazovky, konec demona, start po padu,
+#  reboot pres service.sh, `pxtune revert`).
+# =============================================================================
+
+# ---- refresh rate -----------------------------------------------------------
+#
+# VYPNUTO V KODU, dokud se neoveri jmena klicu.
+# NEVIM, jak se klice refresh rate na Androidu 16 doopravdy jmenuji.
+# bin/pxtune-perapp ma REFRESH_VERIFIED=0 a dokud tam nekdo nezapise 1,
+# se tyhle dva klice jen zaloguji a NEAPLIKUJI.
+#
+# Povolene hodnoty: 60 90 120  (SPEC: panel je adaptivni 60-120 Hz, mode 2 = 120)
+# SPEC, tvrde omezeni c. 4: refresh rate se GLOBALNE nesnizuje. Snizeni tady je
+# per-app a docasne - proto je pripustne, ale jen s funkcnim navratem.
+#
+# U PoGO ma smysl prave opak toho, co u benchmarku: hra bezi hodiny a 120 Hz
+# stoji vic energie nez kolik prinese. 60/60 = pevnych 60 Hz po dobu hry.
+APP_REFRESH_MIN="60"
+APP_REFRESH_PEAK="60"
+
+# ---- rozliseni --------------------------------------------------------------
+#
+# !!! ZMENA ROZLISENI JE ZAKAZANA, DOKUD JI VYSLOVNE NEPOVOLIS !!!
+#
+# APP_RES_ENABLE ma VYCHOZI HODNOTU 0 PRIMO V KODU (bin/pxtune-perapp,
+# APP_RES_ENABLE_DEFAULT). Chybejici klic = 0, ne 1. Kdyz je 0, APP_RES se
+# ignoruje a jednou za relaci se to zaloguje jako WARN.
+#
+# Kdyz to zapnes, zmena jde POVINNE pres `pxtune res <preset>`, ktery nasadi
+# existujici pojistku: res_pending + res_arm_watchdog() = navrat na nativni
+# za 60 s, kdyz neprijde `pxtune res confirm`.
+#
+# NEZ TO ZAPNES, ZVAZ GAME_DOWNSCALE VYSE. Ten dela skoro totez, je skutecne
+# per-app, dela ho SurfaceFlinger a NIC SE NEMUSI VRACET.
+#
+# Presety (musi souhlasit s RES_PRESETS v bin/pxtune):
+#   native  900x2000  810x1800  720x1600
+APP_RES=""
+APP_RES_ENABLE="0"
+
+
+# =============================================================================
+# ANTI-FLAPPING - ZAMERNE ASYMETRICKY
+# =============================================================================
+
+# VSTUP JE OPOZDENY.
+# Po udalosti popredi se do FIFO demona naplanuje `@APPARM <pkg>` az za
+# APP_MIN_FG_SEC sekund a pri zpracovani se OVERI, ze je balicek porad
+# v popredi. Start aplikace udela 2-5 udalosti behem ~2 s (splash -> hlavni
+# aktivita), rychle proletnuti aplikacemi tedy nespusti VUBEC NIC.
+APP_MIN_FG_SEC="8"
+
+# ODCHOD JE LINY.
+# Po odchodu se naplanuje `@APPLEAVE` az za APP_STICKY_SEC sekund. Navrat do
+# tehoz balicku driv = udalost se zahodi. Alt-tab do zprav a zpatky tak
+# nestoji ANI JEDNO binderove volani.
+# 0 = zadna lenost (odchod hned). Maximum 3600.
+APP_STICKY_SEC="25"
+
+
+# =============================================================================
+# TEPLOTA A PRIORITA
+# =============================================================================
+
+# 1 = tahle aplikace smi ignorovat TEPLOTNI UROVEN 1 (skin >= 41,0 C).
+#
+# NIKDY NE UROVEN >= 2. To je natvrdo v kodu a zadna konfigurace to nezmeni.
+# Bez toho by sis v PoGO uvaril telefon: hra bezi hodiny, casto na primem
+# slunci, a namereny strop vlastniho ohrevu pri plne zatezi vsech 9 jader
+# je 40,5 C - vsechno nad tim uz je vnejsi teplo, se kterym zatez nic nezmuze.
+APP_THERMAL_CAP="1"
+
+# 0-100, vychozi 50.
+# Kdyz vrstvu 3 prave drzi jiny balicek a jeho sticky okno jeste bezi,
+# vytlaci ho jen pravidlo se STEJNOU NEBO VYSSI prioritou. Diky tomu
+# notifikace nebo rychla odpoved ve zpravach nesundá nastaveni bezici hry.
+APP_PRIORITY="90"

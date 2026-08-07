@@ -1,0 +1,4 @@
+# stavové/ladicí artefakty, sem nepatří
+*.log
+*.tmp
+.thermal_ids
