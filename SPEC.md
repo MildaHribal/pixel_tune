@@ -57,6 +57,31 @@ jako dokumentovanou výjimku — deployment neměníme.** Žádný _další_ ove
 
 ## OVĚŘENÁ HARDWAROVÁ FAKTA
 
+### Které páky přežijí používání telefonu (změřeno 2026-08-08)
+
+Nejdůležitější tabulka pro návrh profilů. Metoda: nasazen `powersave`, přečteny
+všechny uzly, spuštěny tři aplikace za sebou (Nastavení, Chrome, Hodiny), po
+5 s přečteny znovu. Kontrola, že LAUNCH hint proběhl: `dvfs_headroom` se změnil.
+
+| Uzel | Nasazeno | Po startu aplikací | Závěr |
+|---|---|---|---|
+| `policy4/sched_pixel/limit_frequency` | 1418000 | 1418000 | **DRŽÍ** |
+| `policy8/sched_pixel/limit_frequency` | 1557000 | 1557000 | **DRŽÍ** |
+| `mali0/device/scaling_max_freq` | 649000 | 649000 | **DRŽÍ** |
+| `devfreq_mif/interactive/target_load` | 40 80 | 40 80 | **DRŽÍ** |
+| `lru_gen/min_ttl_ms` | 1000 | 1000 | **DRŽÍ** |
+| `vendor_sched/groups/bg/uclamp_max` | 130 | 130 | **DRŽÍ** |
+| `cpuctl/top-app/cpu.uclamp.max` | 60.00 | 60.00 | **DRŽÍ** |
+| `vendor_sched/dvfs_headroom` | 1024 | **1100** | **PŘEPSÁNO HALem** |
+
+**Důsledek pro profily:** jediná páka, kterou power HAL bere zpět, je
+`dvfs_headroom`. Do profilu patří jen jako bonus pro klidový stav (a v `night`,
+kde LAUNCH hinty nechodí vůbec) — nikdy jako nosná páka. Všechno ostatní včetně
+`limit_frequency` drží i za plného používání.
+
+*(Netestováno: CPU `scaling_max_freq` — modul ho nezapisuje, takže o jeho
+chování za LAUNCH tahle měření nic neříkají.)*
+
 ### CPU clustery
 
 | Policy | Cluster | CPU | Frekvence (vzestupně, kHz) |
@@ -88,7 +113,17 @@ Vedle read-only obchvatu přes uclamp je tohle **první přímá páka na takt.*
 
 Ověřeno přímým zápisem (policy8 testováno naživo). Cesta:
 `/sys/devices/system/cpu/cpufreq/policyN/sched_pixel/limit_frequency`.
-**Také vlastněno power HALem** (zvedá při LAUNCH) ⇒ do profilu jen **s flagem reapply.**
+
+**OPRAVA 2026-08-08 — `limit_frequency` LAUNCH hint PŘEŽIJE.** Dřívější tvrzení
+„také vlastněno power HALem, zvedá při LAUNCH ⇒ jen s flagem reapply" bylo
+**nesprávné** a je tímto zrušeno. Změřeno naživo: nasazen profil `powersave`
+(policy4=1418000, policy8=1557000), pak spuštěny tři aplikace za sebou
+(Nastavení, Chrome, Hodiny) a hodnoty přečteny znovu — **oba stropy držely
+beze změny.** Že LAUNCH hint v tom okně skutečně proběhl, dokazuje `dvfs_headroom`
+ve stejném vzorku: 1024 → 1100. Kontrolovaný důkaz, ne absence události.
+
+`limit_frequency` je tedy **jediná tvrdá, spolehlivá páka na takt**, kterou modul
+má — drží i za plného používání telefonu, ne jen v klidu.
 
 ### Cooling devices (zapisovatelné 0644, ALE vlastní je thermal HAL)
 

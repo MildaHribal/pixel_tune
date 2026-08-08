@@ -232,9 +232,13 @@ GPU_DVFS_PERIOD MEM_LRU_MIN_TTL THERMAL_CDEV_BYPASS"
 #   enum1020 - 10 nebo 20 (mali dvfs_period)
 # THERMAL_CDEV_BYPASS neni v tabulce - pise se na TRI uzly, resi se zvlast.
 #
-# POZOR na vlastnictvi: nody vsched.*, sched_pixel/*, scaling_max_freq a devfreq
-# prepisuje power HAL pri hintu LAUNCH. Profil je nasadi, ale proti LAUNCH se
-# ubranit nelze (a nema smysl). Proto jsou i v registru s flagem reapply.
+# VLASTNICTVI - OPRAVENO 2026-08-08 podle mereni (viz SPEC "Ktere paky prezijí
+# pouzivani telefonu"). Drivejsi tvrzeni "sched_pixel/*, scaling_max_freq a
+# devfreq prepisuje power HAL pri LAUNCH" NEPLATI. Zmereno: po spusteni tri
+# aplikaci drzely limit_frequency, mali scaling_max_freq, mif target_load,
+# min_ttl_ms i uclamp beze zmeny. JEDINY uzel, ktery HAL bere zpet, je
+# dvfs_headroom (1024 -> 1100). Flagy reapply v registru jsou tedy u zbytku
+# jen opatrnost navic, ne nutnost.
 V2_TABLE="VS_DVFS_HEADROOM:/proc/vendor_sched/dvfs_headroom:int
 VS_BG_UCLAMP_MAX:/proc/vendor_sched/groups/bg/uclamp_max:int
 VS_TA_UCLAMP_MIN:/proc/vendor_sched/groups/ta/uclamp_min:int
