@@ -220,7 +220,7 @@ SCHED_LIMIT_FREQ_LITTLE SCHED_LIMIT_FREQ_MID SCHED_LIMIT_FREQ_BIG
 SCHED_DOWN_RATE_MID SCHED_DOWN_RATE_BIG
 DEVFREQ_MIF_TARGET_LOAD DEVFREQ_MIF_MIN DEVFREQ_DSU_MIN
 CPUPM_CL1_RESIDENCY CPUPM_CL2_RESIDENCY
-GPU_DVFS_PERIOD THERMAL_CDEV_BYPASS"
+GPU_DVFS_PERIOD MEM_LRU_MIN_TTL THERMAL_CDEV_BYPASS"
 
 # --- KONTRAKT v2: mapa klic -> uzel -> druh -------------------------------
 # Tabulka pro set_v2()/snapshot/revert. Format tokenu: KLIC:CESTA:DRUH,
@@ -250,7 +250,8 @@ DEVFREQ_MIF_MIN:/sys/devices/platform/17000010.devfreq_mif/devfreq/17000010.devf
 DEVFREQ_DSU_MIN:/sys/devices/platform/17000090.devfreq_dsu/devfreq/17000090.devfreq_dsu/min_freq:int
 CPUPM_CL1_RESIDENCY:/sys/devices/platform/cpupm/cpupm/cpd_cl1_target_residency:int
 CPUPM_CL2_RESIDENCY:/sys/devices/platform/cpupm/cpupm/cpd_cl2_target_residency:int
-GPU_DVFS_PERIOD:$MALI/dvfs_period:enum1020"
+GPU_DVFS_PERIOD:$MALI/dvfs_period:enum1020
+MEM_LRU_MIN_TTL:/sys/kernel/mm/lru_gen/min_ttl_ms:int"
 
 # Namerene stock hodnoty v2 uzlu (probe 2026-08-07, akita:16/CP1A.260505.005).
 # Slouzi jako fallback pri revertu, kdyz stock.conf tyhle klice jeste nema
@@ -271,6 +272,7 @@ DEF_V2_DEVFREQ_DSU_MIN="324000"
 DEF_V2_CPUPM_CL1_RESIDENCY="10000"
 DEF_V2_CPUPM_CL2_RESIDENCY="10000"
 DEF_V2_GPU_DVFS_PERIOD="20"
+DEF_V2_MEM_LRU_MIN_TTL="0"
 
 # Tri CPU cooling devices pro THERMAL_CDEV_BYPASS (user_vote_bypass). Stock 0.
 CDEV_BYPASS_NODES="/dev/thermal/cdev-by-name/thermal-cpufreq-0/user_vote_bypass

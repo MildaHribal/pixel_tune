@@ -394,6 +394,11 @@ CPUPM_CL2_RESIDENCY=""     # …/cpupm/cpupm/cpd_cl2_target_residency        sto
 # --- GPU ---
 GPU_DVFS_PERIOD=""         # /sys/devices/platform/…mali/dvfs_period       stock 20     (10 = svižnější, 20 = úspornější)
 
+# --- paměť ---
+MEM_LRU_MIN_TTL=""         # /sys/kernel/mm/lru_gen/min_ttl_ms             stock 0      (ms; ochrana pracovní množiny před odsunem do zramu, rw ověřeno probem)
+                           #   POZOR na duplicitu s tweakem `mem.lru_gen_min_ttl` v registry.def — nastavovat
+                           #   jen jedno z toho, jinak si profil a tweak hodnotu přepisují. Vlastníkem je profil.
+
 # --- thermal, TVRDĚ HLÍDANÉ ---
 THERMAL_CDEV_BYPASS=""     # user_vote_bypass na 3 CPU cdev                stock 0      (riziko 3 — runtime vypínač skin-throttlingu; nikdy default, jen s pojistkou)
                            #   /dev/thermal/cdev-by-name/thermal-cpufreq-{0,1,2}/user_vote_bypass
