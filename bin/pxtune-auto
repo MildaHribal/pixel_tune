@@ -102,6 +102,7 @@ ALIVEF="$STATE/pxtune-auto.alive"    # mtime = posledni zpracovana udalost (diag
 APPSTATS="$STATE/appstats"
 OVERRIDES="$STATE/appstats.override"
 MANUAL="$STATE/manual_override"
+MBASE="$STATE/manual_base"           # rucni zaklad drzeny po dobu per-app epizody nad manual_override (viz apply_profile)
 ACTIVE="$STATE/active"
 AUTOF="$STATE/auto"                  # on|off, chybi = on (kontrakt sdileny s pxtune)
 CONF="$STATE/auto.conf"
@@ -1745,10 +1746,63 @@ apply_profile() {
         return 0
     fi
 
-    if [ -e "$MANUAL" ]; then
-        dbg "manual_override existuje, neprepinam (chtel jsem $_t, duvod: $_why)"
-        PENDING=""
-        return 0
+    # manual_override = uzivatel si rucne pripnul profil; automat ani teplota
+    # jej nesmi prepsat. JEDINA VYJIMKA: per-app pravidlo pro balicek prave
+    # v popredi. To si uzivatel take vyslovne nastavil a je DOCASNE (po odchodu
+    # z aplikace se vraci), takze PREBIJE rucni pin. Rucni zaklad ulozime do
+    # MBASE a po odchodu jej vynutime zpatky; soubor manual_override zustava
+    # nedotcen celou dobu, takze se po hre vratime presne k tomu, co bylo.
+    if [ ! -e "$MANUAL" ]; then
+        # Bez override nema MBASE smysl (napr. uzivatel mezitim dal 'profile auto').
+        [ -e "$MBASE" ] && rm -f "$MBASE" 2>/dev/null
+    else
+        _perapp=0
+        if [ "$APP_RULES" = "1" ] && [ -n "$APPMODE_PKG" ] && [ "$APPMODE_PKG" = "$CUR_PKG" ] &&
+           [ "$AR_OK" = "1" ] && [ -n "$AR_APP_PROFILE" ] && [ "$_t" = "$AR_APP_PROFILE" ]; then
+            _perapp=1
+        fi
+        if [ "$_perapp" = "1" ]; then
+            # Per-app profil pres override: zapamatuj si rucni zaklad (jen jednou,
+            # dokud jsme jeste nezacali prepisovat) a propadni k jeho nasazeni.
+            if [ ! -e "$MBASE" ]; then
+                _mb=""
+                [ -f "$ACTIVE" ] && read -r _mb < "$ACTIVE" 2>/dev/null
+                case "$_mb" in
+                    ''|*[!A-Za-z0-9._-]*) _mb="" ;;
+                esac
+                if [ -n "$_mb" ] && [ "$_mb" != "$_t" ]; then
+                    print -r -- "$_mb" > "$MBASE" 2>/dev/null
+                    dbg "per-app pres override: rucni zaklad '$_mb' ulozen, obnovim po odchodu"
+                fi
+            fi
+        elif [ -e "$MBASE" ]; then
+            # Odchod z per-app epizody: cil urceny automatem ignoruj a vynut
+            # navrat na ulozeny rucni zaklad. MBASE smazeme az bude zaklad
+            # skutecne aktivni (prezije tak anti-flap odklad).
+            _mb=""
+            read -r _mb < "$MBASE" 2>/dev/null
+            case "$_mb" in
+                ''|*[!A-Za-z0-9._-]*) rm -f "$MBASE" 2>/dev/null; PENDING=""; return 0 ;;
+            esac
+            if [ ! -f "$PROFDIR/$_mb.conf" ]; then
+                rm -f "$MBASE" 2>/dev/null
+                PENDING=""
+                return 0
+            fi
+            _act=""
+            [ -f "$ACTIVE" ] && read -r _act < "$ACTIVE" 2>/dev/null && [ -n "$_act" ] && APPLIED=$_act
+            if [ "$_mb" = "$APPLIED" ]; then
+                rm -f "$MBASE" 2>/dev/null   # navrat na rucni zaklad hotovy
+                PENDING=""
+                return 0
+            fi
+            _t="$_mb"
+            dbg "per-app odchod: vynucuji navrat na rucni zaklad '$_mb' (override zustava)"
+        else
+            dbg "manual_override existuje, neprepinam (chtel jsem $_t, duvod: $_why)"
+            PENDING=""
+            return 0
+        fi
     fi
 
     # Resync proti skutecnosti - profil mohl prepnout nekdo zvenci (WebUI, CLI).

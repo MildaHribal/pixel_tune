@@ -1205,6 +1205,8 @@ profile_auto() {
 		rm -f "$OVERRIDE_FILE" 2>/dev/null
 		log INFO "manual_override zrusen, rizeni profilu vraceno automatu"
 	fi
+	# Rucni zaklad drzeny demonem behem per-app epizody uz nema smysl bez override.
+	rm -f "$STATE_DIR/manual_base" 2>/dev/null
 	# Demon zjisti zmenu az pri nejblizsi udalosti (prepnuti aplikace).
 	# SIGHUP mu rekne, at prehodnoti stav hned - jinak by se spravny profil
 	# nasadil treba az za nekolik minut.
@@ -1559,6 +1561,9 @@ cmd_revert() {
 	# zpracovat jako "nic neaplikuj".
 	{ : > "$ACTIVE_FILE"; } 2>/dev/null
 	: > "$OVERRIDE_FILE" 2>/dev/null
+	# Rucni zaklad per-app epizody je soucast "vseho na stock" - jinak by ho
+	# demon po revertu omylem obnovil misto cerstve pripnuteho stavu.
+	rm -f "$STATE_DIR/manual_base" 2>/dev/null
 
 	log INFO "revert dokoncen (zapisu ok=$WR_OK chyb=$WR_FAIL)"
 	msg "Revert dokoncen. Zapisu OK: $WR_OK, chyb: $WR_FAIL."
@@ -2023,7 +2028,7 @@ cmd_game() {
 	if [ -z "$_pkg" ]; then
 		warn "pxtune: pouziti: pxtune game <package> <1|2|3|4|standard|performance|battery|custom>"
 		warn "                 pxtune game <package>            # vypis rezimu a konfigu"
-		warn "                 pxtune game <package> <mode> [--fps N] [--downscale 0.3..0.9|disable]"
+		warn "                 pxtune game <package> <mode> [--fps N] [--downscale 0.5..0.9|disable]"
 		exit 1
 	fi
 	if ! command -v cmd >/dev/null 2>&1; then
@@ -2064,8 +2069,8 @@ cmd_game() {
 				shift
 				_ds="$1"
 				case "$_ds" in
-					disable|0.[3-9]|0.[3-9]0) ;;
-					*) warn "pxtune: --downscale chce 0.3..0.9 nebo 'disable'"; exit 1 ;;
+					disable|0.[5-9]|0.[5-9]0) ;;
+					*) warn "pxtune: --downscale chce 0.5..0.9 nebo 'disable' (pod 0.5 se rozbiji dotyk u her)"; exit 1 ;;
 				esac
 				;;
 			*)

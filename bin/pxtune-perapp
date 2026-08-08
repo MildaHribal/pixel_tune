@@ -430,7 +430,10 @@ validate_key() {
 				VERR="ocekavano cele cislo"
 			fi ;;
 		GAME_DOWNSCALE)
-			case "$_vv" in disable|0.[3-9]|0.[3-9]0) ;; *) VERR="0.3..0.9 nebo 'disable'" ;; esac ;;
+			# Spodni mez 0.5: pod ni GameManager u Unity her (PoGO) rozbiji
+			# mapovani/plynulost dotyku (zaseknuty vstup) i citelnost dialogu.
+			# 0.3/0.35/0.4/0.45 se proto zamerne nepovoluji.
+			case "$_vv" in disable|0.[5-9]|0.[5-9]0) ;; *) VERR="0.5..0.9 nebo 'disable' (pod 0.5 se rozbiji dotyk)" ;; esac ;;
 		GAME_APPLY)
 			case "$_vv" in once|enter) ;; *) VERR="once|enter" ;; esac ;;
 		APP_PROFILE)
