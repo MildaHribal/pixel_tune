@@ -416,6 +416,7 @@ BATT_TEMP_DC=-1000
 CUR_PKG=""
 CUR_CLASS="$CLASS_DEFAULT"
 APPLIED=""
+APPLIED_OVL=""         # balicek, jehoz APP_OVERLAY_* je PRAVE zapsany v uzlech
 PENDING=""
 LAST_SWITCH=0
 
@@ -1656,15 +1657,24 @@ auto_enabled() {
 # pxtune neumi, ohlasi chybu argumentu (exit 1) JESTE PREDTIM, nez cokoli
 # aplikuje, takze je sonda bezpecna a provede se nejvyse jednou za zivot
 # procesu. Bez overlay se profil nasadi normalne, jen bez per-app doladeni.
+# ovl_want -> nastavi OVL_WANT na balicek, jehoz overlay MA byt prave ted
+# nasazeny (prazdne = zadny). Jen builtiny, zadny fork - vola se z apply_profile
+# pri kazdem vyhodnoceni. Podminka je zamerne na JEDNOM miste, protoze na ni
+# stoji jak rozhodnuti "prepnout", tak samotne volani CLI.
+ovl_want() {
+    OVL_WANT=""
+    if [ "$APP_RULES" = "1" ] && [ "$OVERLAY_MODE" = "1" ] &&
+       [ -n "$APPMODE_PKG" ] && [ "$APPMODE_PKG" = "$CUR_PKG" ] && [ "$AR_OK" = "1" ]; then
+        OVL_WANT=$APPMODE_PKG
+    fi
+}
+
 apply_via_cli() {
     _t=$1
     # Overlay se posila jen kdyz pravidlo PROSLO anti-flappingem (APPMODE_PKG)
     # a je to porad ta aplikace v popredi.
-    _ovl=""
-    if [ "$APP_RULES" = "1" ] && [ "$OVERLAY_MODE" = "1" ] &&
-       [ -n "$APPMODE_PKG" ] && [ "$APPMODE_PKG" = "$CUR_PKG" ] && [ "$AR_OK" = "1" ]; then
-        _ovl=$APPMODE_PKG
-    fi
+    ovl_want
+    _ovl=$OVL_WANT
 
     _rst=""
     [ "$AUTO_RESET" = "1" ] && [ "$RESET_MODE" = "1" ] && _rst="--reset"
@@ -1715,6 +1725,9 @@ apply_via_cli() {
             CLI_RC=$?
         fi
     fi
+    # Ktery overlay SKUTECNE odesel do CLI (po pripadne degradaci vyse).
+    # Cte to apply_profile a uklada do APPLIED_OVL.
+    CLI_OVL=$_ovl
     return 0
 }
 
@@ -1809,25 +1822,50 @@ apply_profile() {
     if [ -f "$ACTIVE" ]; then
         read -r _act < "$ACTIVE" 2>/dev/null && [ -n "$_act" ] && APPLIED=$_act
     fi
-    if [ "$_t" = "$APPLIED" ]; then
+    # Stejny NAZEV profilu jeste neznamena stejny VYSLEDEK: per-app overlay
+    # (APP_OVERLAY_*) prepisuje klice profilu, takze "powersave + overlay
+    # Instagramu" a "holy powersave" jsou dva ruzne stavy uzlu.
+    #
+    # OPRAVA 2026-08-08 (namereno naziva): drivejsi test jen na nazev delal
+    # obousmernou chybu. Pri ODCHODU z aplikace zustal overlay viset navzdy
+    # (Instagram: top-app uclamp.max 55 misto 60 jeste minuty po odchodu,
+    # dokud neco jineho nezmenilo profil). Pri VSTUPU se overlay naopak
+    # NENASADIL vubec, kdyz uz shodou okolnosti bezel profil, ktery pravidlo
+    # chce. Porovnavame proto dvojici (profil, overlay).
+    ovl_want
+    if [ "$_t" = "$APPLIED" ] && [ "$OVL_WANT" = "$APPLIED_OVL" ]; then
         PENDING=""
         return 0
     fi
 
+    # Zmena SAMOTNEHO overlaye pri NEZMENENEM profilu neni prepnuti profilu -
+    # je to jen preparametrizovani toho, co uz bezi. Nesmi tedy projit
+    # anti-flappingem (MIN_SWITCH_SEC=30 s), jinak se pri vstupu do aplikace
+    # overlay odlozi az za hranici sticky a nenasadi se VUBEC (namereno).
+    # Zneuziti nehrozi: per-app cesta ma vlastni brzdy - APP_MIN_FG_SEC na
+    # vstupu a APP_STICKY_SEC na odchodu. Ze stejneho duvodu se to nepocita
+    # do SW_CNT ani neposouva LAST_SWITCH.
     if [ ! -f "$PROFDIR/$_t.conf" ]; then
         log ERROR "profil '$_t' neexistuje v $PROFDIR - pouzivam '$PROF_SAFE'"
         _t=$PROF_SAFE
         [ -f "$PROFDIR/$_t.conf" ] || { PENDING=""; return 0; }
-        [ "$_t" = "$APPLIED" ] && { PENDING=""; return 0; }
+        [ "$_t" = "$APPLIED" ] && [ "$OVL_WANT" = "$APPLIED_OVL" ] && { PENDING=""; return 0; }
     fi
 
-    if [ "$_bp" != "1" ] && [ "$((NOW - LAST_SWITCH))" -lt "$MIN_SWITCH_SEC" ]; then
+    # POCITA SE AZ TADY, po pripadnem prepadu na PROF_SAFE - jinak by se
+    # rozhodovalo podle profilu, ktery uz neplati.
+    _ovlonly=0
+    if [ "$_t" = "$APPLIED" ]; then
+        _ovlonly=1
+    fi
+
+    if [ "$_bp" != "1" ] && [ "$_ovlonly" != "1" ] && [ "$((NOW - LAST_SWITCH))" -lt "$MIN_SWITCH_SEC" ]; then
         PENDING=$_t
         dbg "anti-flap: $_t odlozen o $((MIN_SWITCH_SEC - (NOW - LAST_SWITCH))) s ($_why)"
         return 0
     fi
 
-    if ! switch_allowed "$_bp"; then
+    if [ "$_ovlonly" != "1" ] && ! switch_allowed "$_bp"; then
         PENDING=$_t
         return 0
     fi
@@ -1851,11 +1889,16 @@ apply_profile() {
     if [ "$CLI_RC" -eq 0 ]; then
         prop_guard "$_t"
         APPLIED=$_t
-        LAST_SWITCH=$NOW
+        APPLIED_OVL=$CLI_OVL
         PENDING=""
-        SW_CNT=$((SW_CNT + 1))
         PXTUNE_FAIL_AT=0
-        log INFO "profil -> $_t ($_why)"
+        if [ "$_ovlonly" = "1" ]; then
+            log INFO "profil $_t preparametrizovan (overlay '${CLI_OVL:-zadny}', $_why)"
+        else
+            LAST_SWITCH=$NOW
+            SW_CNT=$((SW_CNT + 1))
+            log INFO "profil -> $_t ($_why)"
+        fi
     else
         # pxtune vraci 2 i kdyz jen CAST zapisu selhala - profil pritom uz
         # nalozil a zapsal do 'active'. Nesmime tedy stav slepe zahodit
@@ -1865,6 +1908,7 @@ apply_profile() {
         fi
         if [ "$APPLIED" = "$_t" ]; then
             prop_guard "$_t"
+            APPLIED_OVL=$CLI_OVL
             LAST_SWITCH=$NOW
             PENDING=""
             SW_CNT=$((SW_CNT + 1))
