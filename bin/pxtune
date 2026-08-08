@@ -3034,6 +3034,15 @@ main() {
 		auto)              cmd_auto "$@" ;;
 		# per-app profily a tweaky jsou v samostatnych skriptech.
 		# exec, ne volani: setri jeden fork a chybovy kod probublá primo.
+		metrics)
+			_pm="$(dirname "$0")/pxtune-metrics"
+			[ -x "$_pm" ] || _pm=/data/adb/modules/pixel_tune/bin/pxtune-metrics
+			if [ -x "$_pm" ]; then
+				exec "$_pm" "$@"
+			fi
+			warn "pxtune: bin/pxtune-metrics nenalezen"
+			exit 2
+			;;
 		app)
 			_pa="$(dirname "$0")/pxtune-perapp"
 			[ -x "$_pa" ] || _pa=/data/adb/modules/pixel_tune/bin/pxtune-perapp

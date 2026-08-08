@@ -83,6 +83,22 @@ fi
 rm -f "$PIDFILE" "$STATE/pxtune-auto.fifo" 2>/dev/null
 rm -rf "$STATE/pxtune-auto.lock" 2>/dev/null
 
+# Vzorkovač metrik — běží jen když si ho uživatel zapnul, ale kdyby běžel,
+# nesmí modul přežít. Nasbíraná data ZŮSTÁVAJÍ (jsou to jeho měření, ne náš
+# stav) — spolu se zbytkem $STATE si je uživatel smaže sám, viz konec skriptu.
+METRICSD="$MODDIR/bin/pxtune-metrics"
+if [ -x "$METRICSD" ]; then
+	"$METRICSD" stop >/dev/null 2>&1
+	log INFO "uninstall: zavolán 'pxtune-metrics stop'"
+else
+	MPID=$(cat "$STATE/pxtune-metrics.pid" 2>/dev/null | tr -dc '0-9')
+	if [ -n "$MPID" ] && [ -d "/proc/$MPID" ]; then
+		kill -TERM "$MPID" 2>/dev/null
+		log WARN "uninstall: pxtune-metrics (pid $MPID) ještě běžel, poslán SIGTERM"
+	fi
+fi
+rm -f "$STATE/pxtune-metrics.pid" "$STATE/metrics.on" 2>/dev/null
+
 # DISABLE položíme hned: kdyby uninstall běžel v kontextu B, post-fs-data.sh
 # ani service.sh se v tomhle bootu už nesmí chytit.
 wr "$STATE/DISABLE" "uninstall in progress"

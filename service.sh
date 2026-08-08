@@ -384,6 +384,30 @@ off | OFF | 0 | false)
 esac
 
 # ---------------------------------------------------------------------------
+# 6b) Vzorkovač metrik (baterie / příkon / teploty).
+#
+# Spouští se JEN když si ho uživatel zapnul (`pxtune metrics start` založí
+# $STATE/metrics.on). Bez toho se nespustí vůbec — je to diagnostický nástroj,
+# ne součást běžného provozu, a nemá smysl, aby něco vzorkoval každému pořád.
+#
+# Selhání je NEFATÁLNÍ a záměrně se jen zaloguje: sběr dat nesmí ohrozit boot.
+# ---------------------------------------------------------------------------
+METRICSD="$BIN/pxtune-metrics"
+if [ -f "$STATE/metrics.on" ]; then
+	if [ ! -x "$METRICSD" ]; then
+		log WARN "service: metrics.on existuje, ale $METRICSD není spustitelný — vzorkovač nespuštěn"
+	else
+		"$METRICSD" start >/dev/null 2>&1
+		MET_PID=$(cat "$STATE/pxtune-metrics.pid" 2>/dev/null | tr -dc '0-9')
+		if [ -n "$MET_PID" ] && [ -d "/proc/$MET_PID" ]; then
+			log INFO "service: pxtune-metrics běží (pid $MET_PID)"
+		else
+			log WARN "service: vzorkovač metrik se nepodařilo spustit"
+		fi
+	fi
+fi
+
+# ---------------------------------------------------------------------------
 # 7) Boot doběhl v pořádku -> vynulovat počítadlo.
 #
 # Nuluje se ZÁMĚRNĚ i tehdy, když některý krok výše selhal. Počítadlo hlídá

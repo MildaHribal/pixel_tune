@@ -473,6 +473,43 @@ pxtune selftest               # ověří že všechny cesty existují a jsou zap
 - `--json` výstup musí být validní JSON (WebUI ho parsuje).
 - Exit kód 0 = OK, 1 = chyba argumentů, 2 = chyba běhu.
 
+## KONTRAKT: vzorkovač metrik (`pxtune metrics`)
+
+Diagnostický sběr dat, ze kterých jde **zpětně spočítat efekt profilů**. Profily
+byly navržené z naměřených HW faktů, ale jejich dopad na spotřebu a teplotu
+změřený není — tohle je nástroj, který to má doložit.
+
+- **Vypnutý, dokud ho někdo nezapne.** `pxtune metrics start` založí
+  `$STATE/metrics.on`; jen podle existence toho souboru ho pouští `service.sh`
+  po bootu. Bez něj se nespustí vůbec.
+- **Data:** `$STATE/metrics/m-RRRRMMDD.csv`, jeden řádek na vzorek, hlavička
+  v prvním řádku. Drží se `KEEP_DAYS` dní (výchozí 7), soubor za den je ~210 kB
+  při výchozím intervalu.
+- **Nastavení:** `$STATE/metrics.conf`, klíče `INTERVAL_SEC` (5–3600, výchozí 60)
+  a `KEEP_DAYS`. Čte se přes whitelist, **nesourcuje se**. Změna intervalu
+  platí od dalšího vzorku, restart není potřeba.
+- **Cena vzorku:** ~20 čtení ze sysfs přes builtin `read` + jeden `date`
+  a jeden `sleep`. Žádné `dumpsys`, žádný binder.
+- **Selhání sběru nesmí ohrozit boot** — v `service.sh` je to nefatální větev.
+
+Sloupce: `ts_epoch, cas, profil, podsviceni, stav, baterie_pct, proud_ua,
+napeti_uv, prikon_mw, charge_counter_uah, baterie_dc, skin_mc, big_mc, mid_mc,
+little_mc, g3d_mc, cd_cpu0, cd_cpu1, cd_cpu2, cd_gpu, f_little, f_big, f_prime,
+f_gpu, perapp`.
+
+**ZNAMÉNKO PROUDU — neuzavřeno.** Ověřeno je jen, že při nabíjení je
+`current_now` **kladný** (+1,3 A). Že je při vybíjení záporný, je běžná konvence
+Androidu, ale na tomhle kusu to zatím nikdo neviděl: nabíjení nejde přes adb
+vypnout (uzel `charge_disable` zařízení nemá a `charge_stop_level` pod aktuální
+stav baterie vybíjení nevynutí — ověřeno, při stropu 70 % a stavu 77 % telefon
+dál nabíjel). Proto `pxtune metrics summary` počítá úbytek z `charge_counter`,
+který klesá monotónně bez ohledu na znaménko, a režim rozlišuje podle pole
+`stav`, ne podle znaménka proudu.
+
+**`perapp` se bere z `appmode.active`, ne z `appmode.gamestamp`** — gamestamp je
+rate-limit pro `GAME_APPLY=enter` a zůstává v něm poslední hra i dlouho po
+odchodu z ní (bez toho se do CSV lepil `pogo`, i když žádné pravidlo neběželo).
+
 ## KONTRAKT: log
 
 `/data/adb/pixel_tune/pxtune.log`, formát `[YYYY-MM-DD HH:MM:SS] [úroveň] zpráva`.
