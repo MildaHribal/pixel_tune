@@ -203,10 +203,20 @@ do_start() {
 	fi
 	# Osirele instance po padu/zabiti - stejny problem i reseni jako u
 	# pxtune-auto: hledat podle prikazove radky, ne podle pidfile.
+	# VYKON: naivni verze forkovala `tr` na KAZDY proces v /proc (~1000 forku).
+	# Na bootu to trvalo 33 s a service.sh o tu dobu zdrzelo. Predfiltr pres
+	# /proc/PID/comm je builtin `read` (bez forku) a projde jich jen par -
+	# demon bezi jako `sh`, takze cokoli jineho muzeme zahodit rovnou.
 	_self=$$
 	for _p in /proc/[0-9]*; do
 		_pp="${_p##*/}"
 		[ "$_pp" = "$_self" ] && continue
+		_cm=""
+		IFS= read -r _cm < "$_p/comm" 2>/dev/null || continue
+		case "$_cm" in
+			sh|mksh|busybox) ;;
+			*) continue ;;
+		esac
 		# Zavorka je nutna: kdyz proces zmizi mezi globem a ctenim, selze uz
 		# SAMA REDIREKCE a hlasku vypisuje shell, ne `tr` - `2>/dev/null` az
 		# za prikazem by ji tedy nechytilo.
