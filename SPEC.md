@@ -82,6 +82,31 @@ kde LAUNCH hinty nechodí vůbec) — nikdy jako nosná páka. Všechno ostatní
 *(Netestováno: CPU `scaling_max_freq` — modul ho nezapisuje, takže o jeho
 chování za LAUNCH tahle měření nic neříkají.)*
 
+> **REVIZE 2026-08-12 — tabulka i závěr výše platí jen pro spouštění aplikací.**
+> Metoda z 08-08 startovala aplikace při **už rozsvícené** obrazovce, a proto
+> minula skutečný spouštěč. Snapshot všech 24 uzlů před a po
+> `input keyevent KEYCODE_SLEEP` + `KEYCODE_WAKEUP` (bez jediného dotyku
+> aplikace) ukázal, že **probuzení displeje** vrací na stock tři uzly:
+>
+> | Uzel | Nasazeno | Po probuzení displeje | Závěr |
+> |---|---|---|---|
+> | `vendor_sched/dvfs_headroom` | 1024 | **1100** | PŘEPSÁNO HALem |
+> | `policy4/sched_pixel/limit_frequency` | 1418000 | **1836000** | PŘEPSÁNO HALem |
+> | `policy8/sched_pixel/limit_frequency` | 1557000 | **2363000** | PŘEPSÁNO HALem |
+>
+> Ostatní řádky původní tabulky (uclamp, mali `scaling_max_freq`, mif
+> `target_load`, `min_ttl_ms`, cpupm residency, `down_rate_limit_us`) platí dál —
+> ty drží i přes cyklus obrazovky.
+>
+> Časování zápisu HALu (vzorkováno po ~150 ms od `KEYCODE_WAKEUP`):
+> `1418000 → 1328000 → 1836000` a pak ustáleno, celé do **~600 ms**. Okamžitý
+> reapply ten závod někdy prohraje, proto démon volá `pxtune reapply` dvakrát:
+> hned a ještě jednou za `REAPPLY_DELAY_SEC` (3 s).
+>
+> **Dopad:** do 2026-08-12 byly oba taktové stropy profilu `powersave` — podle
+> vlastního komentáře profilu „nejúčinnější jednotlivá hodnota" — mrtvé už od
+> prvního odemknutí telefonu.
+
 ### CPU clustery
 
 | Policy | Cluster | CPU | Frekvence (vzestupně, kHz) |
@@ -124,6 +149,15 @@ ve stejném vzorku: 1024 → 1100. Kontrolovaný důkaz, ne absence události.
 
 `limit_frequency` je tedy **jediná tvrdá, spolehlivá páka na takt**, kterou modul
 má — drží i za plného používání telefonu, ne jen v klidu.
+
+**OPRAVA 2026-08-12 — předchozí odstavec platí jen napůl.** Zápis skutečně drží
+libovolně dlouho, dokud se nesáhne na displej; spouštěč ale není start aplikace,
+nýbrž **probuzení displeje**, a to test z 08-08 nezkoušel (aplikace startoval při
+rozsvícené obrazovce). Změřeno čistým cyklem `KEYCODE_SLEEP` + `KEYCODE_WAKEUP`
+bez dotyku aplikace: policy4 `1418000 → 1836000`, policy8 `1557000 → 2363000`.
+Podrobnosti a časování v revizní poznámce u tabulky „Které páky přežijí používání
+telefonu". `limit_frequency` proto **patří mezi klíče s reapply** (`V2_VOLATILE`
+v `bin/pxtune`) — je to spolehlivá páka, ale ne „nastav a zapomeň".
 
 ### Cooling devices (zapisovatelné 0644, ALE vlastní je thermal HAL)
 

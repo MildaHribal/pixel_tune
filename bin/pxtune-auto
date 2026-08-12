@@ -1669,6 +1669,48 @@ ovl_want() {
     fi
 }
 
+# reapply_volatile - vrat uzly, ktere si vzal power HAL pri probuzeni displeje.
+#
+# Neni to prepnuti profilu: nemeni se 'active', manual_override ani APPLIED,
+# takze to smi bezet i kdyz je profil rucne pripnuty. Kdyby CLI `reapply`
+# neumelo (starsi modul), rezim se jednou zalogovanym varovanim vypne, aby se
+# to nezkousulo pri kazdem odemknuti.
+REAPPLY_MODE=1
+
+# Po probuzeni displeje pise power HAL do limit_frequency jeste ~600 ms po tom,
+# co demon dostane udalost o rozsviceni (zmereno vzorkovanim po ~150 ms:
+# 1418000 -> 1328000 -> 1836000 -> ustaleno). Okamzity reapply proto ten zavod
+# nekdy prohraje. Resenim je opakovat ho jeste jednou s odstupem; 3 s je
+# s velkou rezervou za koncem zapisu HAL a porad drive, nez si toho uzivatel
+# stihne vsimnout.
+REAPPLY_DELAY_SEC=3
+
+reapply_sched() {
+    (
+        trap - TERM INT HUP USR1
+        sleep "$REAPPLY_DELAY_SEC"
+        echo "@REAPPLY" >&3 2>/dev/null
+    ) &
+}
+
+reapply_volatile() {
+    [ "$REAPPLY_MODE" = "1" ] || return 0
+    [ -x "$PXTUNE" ] || return 0
+    if [ -n "$APPLIED_OVL" ]; then
+        CLI_OUT=$("$PXTUNE" reapply --overlay "$APPLIED_OVL" 2>&1)
+    else
+        CLI_OUT=$("$PXTUNE" reapply 2>&1)
+    fi
+    CLI_RC=$?
+    if [ "$CLI_RC" -eq 1 ]; then
+        REAPPLY_MODE=0
+        log WARN "pxtune jeste neumi 'reapply' - tekave uzly (dvfs_headroom, limit_frequency) zustanou po probuzeni displeje na stocku"
+        return 0
+    fi
+    dbg "reapply po rozsviceni: rc=$CLI_RC ${CLI_OUT}"
+    return 0
+}
+
 apply_via_cli() {
     _t=$1
     # Overlay se posila jen kdyz pravidlo PROSLO anti-flappingem (APPMODE_PKG)
@@ -1812,9 +1854,29 @@ apply_profile() {
             _t="$_mb"
             dbg "per-app odchod: vynucuji navrat na rucni zaklad '$_mb' (override zustava)"
         else
-            dbg "manual_override existuje, neprepinam (chtel jsem $_t, duvod: $_why)"
-            PENDING=""
-            return 0
+            # OPRAVA 2026-08-12. MBASE se zaklada jen kdyz se per-app profil
+            # JMENUJE jinak nez rucni zaklad. Jenze pravidla pro PoGO i
+            # Instagram maji APP_PROFILE="powersave" a rucne pripnuty byl taky
+            # powersave - stejny nazev, MBASE se nezalozil, a odchod z aplikace
+            # tedy spadl sem a overlay se NIKDY nesundal. Namereno: po odchodu
+            # z PoGO drzel jeho GPU strop 723000 a uclamp Instagramu 55 misto 60
+            # jeste 16 minut, dokud profilem nehnulo neco jineho.
+            #
+            # Zmena SAMOTNEHO overlaye na UZ AKTIVNIM profilu pritom neni
+            # prepnuti profilu - rucni pin zustava presne ten, co byl - takze
+            # ji override branit nema proc. Cokoli, co by menilo NAZEV profilu,
+            # padá dal do puvodni vetve a zustava zakazane.
+            ovl_want
+            _act=""
+            if [ -f "$ACTIVE" ]; then
+                read -r _act < "$ACTIVE" 2>/dev/null && [ -n "$_act" ] && APPLIED=$_act
+            fi
+            if [ "$_t" != "$APPLIED" ] || [ "$OVL_WANT" = "$APPLIED_OVL" ]; then
+                dbg "manual_override existuje, neprepinam (chtel jsem $_t, duvod: $_why)"
+                PENDING=""
+                return 0
+            fi
+            dbg "override: menim jen overlay ('${APPLIED_OVL:-zadny}' -> '${OVL_WANT:-zadny}') na aktivnim profilu $_t, propoustim ($_why)"
         fi
     fi
 
@@ -2077,6 +2139,18 @@ on_screen() {
         sense
         therm_eval
         log INFO "obrazovka sviti (popredi ${CUR_PKG:-?}/$CUR_CLASS, skin ${SKIN_MC}mC, uroven $THERM_LEVEL)"
+        # Power HAL pri kazdem probuzeni displeje vraci na stock dvfs_headroom
+        # a OBA sched_pixel limit_frequency (zmereno 2026-08-12 snapshotem 24
+        # uzlu pres cyklus SLEEP/WAKEUP). Bez tohohle byly taktove stropy
+        # profilu mrtve od prvniho odemknuti telefonu. `reapply` zapisuje jen
+        # tyhle tekave uzly - zadny revert, nejvys 4 zapisy.
+        #
+        # Dvakrat schvalne: hned (casto staci a je to bez odkladu) a jeste
+        # jednou za REAPPLY_DELAY_SEC, protoze HAL dopisuje jeste po tom, co
+        # nam prisla udalost o rozsviceni. Volani je idempotentni - kdyz uz
+        # sedi, druhy beh nezapise nic.
+        reapply_volatile
+        reapply_sched
         # Vrstva 3 byla pri zhasnuti sundana. Kdyz se uzivatel vraci do tehoz
         # balicku, musi se znovu NAPLANOVAT (ne nasadit hned) - jinak by
         # probliknuti obrazovky obeslo cely anti-flapping.
@@ -2142,6 +2216,16 @@ handle_line() {
             ;;
         '@UP')
             dbg "logcat bezi"
+            return 0
+            ;;
+        '@REAPPLY')
+            # Opozdeny druhy pokus po rozsviceni (viz reapply_sched).
+            # Generace se nehlida zamerne: reapply je idempotentni, takze
+            # duplicitni ani opozdena udalost nemuze nic pokazit. Jedina
+            # podminka je, ze obrazovka porad sviti - pri zhasle uz je stejne
+            # nasazeny night a HAL do toho nemluvi.
+            [ "$SCREEN" = "1" ] || return 0
+            reapply_volatile
             return 0
             ;;
         '@APPARM '*)

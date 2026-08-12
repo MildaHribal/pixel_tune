@@ -33,7 +33,12 @@ LOG_MAX=524288
 
 # Adaptivni demon (bin/pxtune-auto). Cesta se odvozuje od umisteni tohoto
 # skriptu, aby to fungovalo i kdyz je modul jinde nez v /data/adb/modules.
+# Fallback je nutny: v PATH je pxtune jako symlink /data/adb/ksu/bin/pxtune,
+# takze `dirname "$0"` vrati ksu/bin, kde pxtune-auto neni. Bez fallbacku
+# `pxtune auto on|off` demona nespustil ani nezastavil a jen tise ohlasil
+# uspech (namereno 2026-08-11). Stejny vzor jako u PERAPP niz.
 AUTOD="$(dirname "$0")/pxtune-auto"
+[ -x "$AUTOD" ] || AUTOD="/data/adb/modules/pixel_tune/bin/pxtune-auto"
 AUTOD_PID="$STATE_DIR/pxtune-auto.pid"
 
 # Per-app profily (bin/pxtune-perapp). Stejne odvozeni cesty jako u AUTOD.
@@ -232,13 +237,25 @@ GPU_DVFS_PERIOD MEM_LRU_MIN_TTL THERMAL_CDEV_BYPASS"
 #   enum1020 - 10 nebo 20 (mali dvfs_period)
 # THERMAL_CDEV_BYPASS neni v tabulce - pise se na TRI uzly, resi se zvlast.
 #
-# VLASTNICTVI - OPRAVENO 2026-08-08 podle mereni (viz SPEC "Ktere paky prezijí
-# pouzivani telefonu"). Drivejsi tvrzeni "sched_pixel/*, scaling_max_freq a
-# devfreq prepisuje power HAL pri LAUNCH" NEPLATI. Zmereno: po spusteni tri
-# aplikaci drzely limit_frequency, mali scaling_max_freq, mif target_load,
-# min_ttl_ms i uclamp beze zmeny. JEDINY uzel, ktery HAL bere zpet, je
-# dvfs_headroom (1024 -> 1100). Flagy reapply v registru jsou tedy u zbytku
-# jen opatrnost navic, ne nutnost.
+# VLASTNICTVI - PREMERENO 2026-08-12, revize zaveru z 2026-08-08.
+#
+# Test z 08-08 spoustel aplikace pri UZ ROZSVICENE obrazovce a z toho vyvodil,
+# ze limit_frequency drzi. To plati - jenze spoustecem neni start aplikace,
+# ale PROBUZENI DISPLEJE. Snapshot vsech 24 uzlu pred a po
+# `input keyevent KEYCODE_SLEEP` + `KEYCODE_WAKEUP` (bez jedineho dotyku
+# aplikace) ukazal, ze power HAL vraci na stock prave tyhle tri:
+#
+#   /proc/vendor_sched/dvfs_headroom                  1024    -> 1100
+#   policy4/sched_pixel/limit_frequency               1418000 -> 1836000
+#   policy8/sched_pixel/limit_frequency               1557000 -> 2363000
+#
+# Vsechno ostatni (uclamp, mali scaling_max_freq, mif target_load, min_ttl_ms,
+# cpupm residency, down_rate_limit_us) drzi.
+#
+# DOPAD: dokud se tohle nedoreseovalo, byly OBA taktove stropy powersave -
+# podle vlastniho komentare profilu "nejucinnejsi jednotliva hodnota" - mrtve
+# uz od prvniho odemknuti telefonu. Proto V2_VOLATILE + `pxtune reapply`, ktery
+# demon vola na kazde rozsviceni obrazovky.
 V2_TABLE="VS_DVFS_HEADROOM:/proc/vendor_sched/dvfs_headroom:int
 VS_BG_UCLAMP_MAX:/proc/vendor_sched/groups/bg/uclamp_max:int
 VS_TA_UCLAMP_MIN:/proc/vendor_sched/groups/ta/uclamp_min:int
@@ -256,6 +273,11 @@ CPUPM_CL1_RESIDENCY:/sys/devices/platform/cpupm/cpupm/cpd_cl1_target_residency:i
 CPUPM_CL2_RESIDENCY:/sys/devices/platform/cpupm/cpupm/cpd_cl2_target_residency:int
 GPU_DVFS_PERIOD:$MALI/dvfs_period:enum1020
 MEM_LRU_MIN_TTL:/sys/kernel/mm/lru_gen/min_ttl_ms:int"
+
+# Podmnozina V2_TABLE, kterou si power HAL bere zpatky pri kazdem probuzeni
+# displeje (mereni viz komentar vyse). Prepisuje je `pxtune reapply` - levna
+# cesta bez revertu a bez zbytku profilu, aby se dala volat casto.
+V2_VOLATILE="VS_DVFS_HEADROOM SCHED_LIMIT_FREQ_LITTLE SCHED_LIMIT_FREQ_MID SCHED_LIMIT_FREQ_BIG"
 
 # Namerene stock hodnoty v2 uzlu (probe 2026-08-07, akita:16/CP1A.260505.005).
 # Slouzi jako fallback pri revertu, kdyz stock.conf tyhle klice jeste nema
@@ -455,6 +477,11 @@ vfail() {
 # Overi existenci, overi zapisovatelnost, zaloguje "stara -> nova".
 # Pri chybe zaloguje a POKRACUJE (nikdy neshodi skript).
 # ---------------------------------------------------------------------------
+WR_QUIET=0
+# WR_CHANGED pocita jen SKUTECNE provedene zapisy (WR_OK pocita i preskocene,
+# kde uz spravna hodnota byla). `reapply` podle nej pozna, jestli mel co vracet.
+WR_CHANGED=0
+
 wr() {
 	_wp="$1"
 	_wv="$2"
@@ -497,8 +524,12 @@ wr() {
 	# Cely blok proto obalujeme.
 	if { print -r -- "$_wv" > "$_wp"; } 2>/dev/null; then
 		rdv "$_wp" "?"
-		log INFO "wr: $_wp: '$_wold' -> '$_wv' (ctenim: '$V')"
+		# WR_QUIET=1: volajici loguje sam jednim souhrnem. Pouziva to `reapply`,
+		# ktery bezi po kazdem rozsviceni obrazovky - po radku na zapis by log
+		# rotoval nekolikrat denne a prebil vsechno ostatni.
+		[ "$WR_QUIET" = "1" ] || log INFO "wr: $_wp: '$_wold' -> '$_wv' (ctenim: '$V')"
 		WR_OK=$((WR_OK + 1))
+		WR_CHANGED=$((WR_CHANGED + 1))
 		return 0
 	fi
 
@@ -1107,6 +1138,31 @@ set_v2() {
 	return 0
 }
 
+# set_v2_volatile - zapise POUZE klice z V2_VOLATILE, tedy ty, ktere si power
+# HAL bere zpatky pri probuzeni displeje. Zbytek profilu se nedotyka: uclamp,
+# GPU strop a spol. drzi samy a prepisovat je znovu by bylo jen forkovani navic.
+# Ocekava uz nactene PF_* (viz profile_apply).
+set_v2_volatile() {
+	_e=""
+	for _vk in $V2_VOLATILE; do
+		eval "_vv=\$PF_$_vk"
+		[ -n "$_vv" ] || continue
+		for _e in $V2_TABLE; do
+			[ "${_e%%:*}" = "$_vk" ] || continue
+			_vrest="${_e#*:}"
+			_vp="${_vrest%:*}"
+			_vkind="${_vrest##*:}"
+			if v2_valid "$_vkind" "$_vv"; then
+				wr "$_vp" "$_vv"
+			else
+				vfail "neplatna hodnota '$_vv' pro $_vk (druh $_vkind)"
+			fi
+			break
+		done
+	done
+	return 0
+}
+
 # set_vm_one <klic> <cesta> <hodnota>
 set_vm_one() {
 	[ -n "$3" ] || return 0
@@ -1169,6 +1225,46 @@ cmd_profile() {
 			profile_apply "$_pname" "$_pauto" "$_poverlay"
 			;;
 	esac
+}
+
+# ---------------------------------------------------------------------------
+# reapply - vrat zpet jen ty uzly, ktere si vzal power HAL
+# ---------------------------------------------------------------------------
+# Vola to demon po kazdem rozsviceni obrazovky. Merenim doloneny duvod je
+# u V2_VOLATILE: probuzeni displeje vrati dvfs_headroom a OBA sched_pixel
+# limit_frequency na stock, cimz z powersave zmizi jeho dve nejucinnejsi paky.
+#
+# Proc samostatny prikaz a ne `profile <aktivni>`: to by znamenalo cely revert
+# na stock a znovuzapis ~40 uzlu pri kazdem odemknuti telefonu. Tady jsou to
+# nejvys 4 zapisy a zadny revert, takze se to da volat casto a levne.
+cmd_reapply() {
+	_roverlay=""
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--overlay)
+				shift
+				_roverlay="$1"
+				case "$_roverlay" in
+					''|.*|*/*|*[!A-Za-z0-9._]*)
+						warn "pxtune: --overlay chce jmeno balicku, ne '$_roverlay'"
+						exit 1
+						;;
+				esac
+				;;
+			*) warn "pxtune: neznamy parametr '$1' (podporovano: --overlay <pkg>)"; exit 1 ;;
+		esac
+		shift
+	done
+
+	rdv "$ACTIVE_FILE" ""
+	_ract="$V"
+	case "$_ract" in
+		''|.*|*/*|*[!A-Za-z0-9._-]*)
+			warn "pxtune: neznam aktivni profil ($ACTIVE_FILE), nemam co vracet"
+			exit 2
+			;;
+	esac
+	profile_apply "$_ract" 1 "$_roverlay" 1
 }
 
 profile_list() {
@@ -1253,6 +1349,11 @@ profile_apply() {
 	_name="$1"
 	_auto="$2"
 	_overlay="$3"
+	# _volonly=1: rezim `pxtune reapply`. Profil se nacte uplne stejne (vcetne
+	# overlaye), ale zapisou se jen klice z V2_VOLATILE. Zadny revert, zadny
+	# zapis do 'active', zadne sahani na manual_override - stav profilu se
+	# nemeni, jen se vynuti zpatky to, co mezitim prepsal power HAL.
+	_volonly="$4"
 	case "$_name" in
 		*/*|.*|"") die 1 "neplatne jmeno profilu: '$_name'" ;;
 	esac
@@ -1264,7 +1365,9 @@ profile_apply() {
 		exit 1
 	fi
 
-	if [ "$_auto" = "1" ]; then
+	if [ "$_volonly" = "1" ]; then
+		WR_QUIET=1
+	elif [ "$_auto" = "1" ]; then
 		log INFO "=== aplikuji profil '$_name' (automat, manual_override se nemeni) ==="
 	else
 		log INFO "=== aplikuji profil '$_name' (rucne) ==="
@@ -1276,7 +1379,7 @@ profile_apply() {
 	# Nejdriv vse zpet na stock, aby profil nezdedil hodnoty po tom predchozim.
 	# Bez toho by prazdne klice ("nesahat") znamenaly, ze se predchozi profil
 	# jen castecne prekryje - viz komentar u restore_stock_values().
-	restore_stock_values
+	[ "$_volonly" = "1" ] || restore_stock_values
 
 	# Profil nacteme JEDNOU do promennych PF_* (bez forku). Nejdriv je vsechny
 	# vynulujeme, aby po predchozim profilu nezustala viset stara hodnota.
@@ -1346,11 +1449,28 @@ profile_apply() {
 			eval "PF_$_ok=\$_ov"
 			eval "PFSET_$_ok=1"
 			_ovn=$((_ovn + 1))
-			log INFO "overlay $_overlay: $_ok='$_ov' prebiji profil '$_name'"
+			[ "$_volonly" = "1" ] || log INFO "overlay $_overlay: $_ok='$_ov' prebiji profil '$_name'"
 		done < "$APPDIR/$_overlay.conf"
-		[ "$_ovn" -eq 0 ] && log INFO "overlay $_overlay: zadny APP_OVERLAY_* klic"
+		[ "$_ovn" -eq 0 ] && [ "$_volonly" != "1" ] && log INFO "overlay $_overlay: zadny APP_OVERLAY_* klic"
 	elif [ -n "$_overlay" ]; then
 		log WARN "overlay: pravidlo pro '$_overlay' neexistuje ($APPDIR/$_overlay.conf), profil '$_name' se aplikuje beze zmeny"
+	fi
+
+	# Rezim reapply konci tady: profil i overlay jsou nactene, zapisi se jen
+	# uzly, ktere si mezitim vzal HAL zpatky.
+	if [ "$_volonly" = "1" ]; then
+		WR_CHANGED=0
+		set_v2_volatile
+		WR_QUIET=0
+		if [ "$WR_CHANGED" -gt 0 ]; then
+			log INFO "reapply: $WR_CHANGED z ${WR_OK} tekavych uzlu profilu '$_name'${_overlay:+ (overlay $_overlay)} vraceno zpet (prepsal je power HAL)"
+			msg "reapply: vraceno $WR_CHANGED tekavych uzlu profilu '$_name'."
+		else
+			msg "reapply: nic vracet netreba, vsech $WR_OK tekavych uzlu profilu '$_name' sedi."
+		fi
+		[ "$WR_FAIL" -gt 0 ] && return 2
+		[ "$VAL_FAIL" -gt 0 ] && return 2
+		return 0
 	fi
 
 	set_uclamp top-app            min "$PF_UCLAMP_TOPAPP_MIN"
@@ -2935,6 +3055,8 @@ pxtune $PXTUNE_VERSION - kernel manager pro Pixel 8a (Tensor G3)
   pxtune profile <name>         prepnout profil (nastavi manual_override)
   pxtune profile <name> --auto  prepnout profil bez dotyku na manual_override (pro demona)
   pxtune profile auto           zrusit manual_override, vratit rizeni automatu
+  pxtune reapply [--overlay P]  vratit uzly, ktere prepsal power HAL (dvfs_headroom,
+                                sched_pixel limit_frequency); vola demon po rozsviceni
   pxtune revert                 vratit VSE na stock z backup/stock.conf
   pxtune res <preset|confirm|reset|list>
                                 presety: $(res_preset_names)
@@ -3023,6 +3145,7 @@ main() {
 	case "$_cmd" in
 		status)            cmd_status "$@" ;;
 		profile)           cmd_profile "$@" ;;
+		reapply)           cmd_reapply "$@" ;;
 		revert)            cmd_revert ;;
 		res)               cmd_res "$@" ;;
 		dpi)               cmd_dpi "$@" ;;
