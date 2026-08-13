@@ -1,21 +1,21 @@
 #!/system/bin/sh
 #
-# pxtune - CLI jadro kernel manageru pixel_tune
+# pxtune - the CLI core of the pixel_tune kernel manager
 # Google Pixel 8a "akita" / Tensor G3 "zuma" / Android 16 / KernelSU-Next
 #
-# POSIX sh (toybox/mksh). ZADNE bashismy.
-# Exit kody: 0 = OK, 1 = chyba argumentu, 2 = chyba behu.
+# POSIX sh (toybox/mksh). NO bashisms.
+# Exit codes: 0 = OK, 1 = argument error, 2 = runtime error.
 #
-# Vsechny cesty a hodnoty pochazi ze SPEC.md. Nic tady neni odhadnute.
+# All paths and values come from SPEC.md. Nothing here is guessed.
 #
-# DULEZITE: "status --json" cte VYHRADNE sysfs. Zadny dumpsys, zadne cmd,
-# zadne settings - tedy zadny binder. WebUI ho vola pres ksu.exec (root shell)
-# kazdych 5 s a dumpsys pod su na tomhle zarizeni visi na binderu.
+# IMPORTANT: "status --json" reads sysfs EXCLUSIVELY. No dumpsys, no cmd, no
+# settings - i.e. no binder. The WebUI calls it via ksu.exec (a root shell)
+# every 5 s, and dumpsys under su hangs on binder on this device.
 
 PXTUNE_VERSION="1.3.0"
 
 # ---------------------------------------------------------------------------
-# Cesty
+# Paths
 # ---------------------------------------------------------------------------
 STATE_DIR="/data/adb/pixel_tune"
 PROFILE_DIR="$STATE_DIR/profiles"
@@ -31,20 +31,19 @@ DISPSTATE_FILE="$STATE_DIR/display_state"
 LOG_FILE="$STATE_DIR/pxtune.log"
 LOG_MAX=524288
 
-# Adaptivni demon (bin/pxtune-auto). Cesta se odvozuje od umisteni tohoto
-# skriptu, aby to fungovalo i kdyz je modul jinde nez v /data/adb/modules.
-# Fallback je nutny: v PATH je pxtune jako symlink /data/adb/ksu/bin/pxtune,
-# takze `dirname "$0"` vrati ksu/bin, kde pxtune-auto neni. Bez fallbacku
-# `pxtune auto on|off` demona nespustil ani nezastavil a jen tise ohlasil
-# uspech (namereno 2026-08-11). Stejny vzor jako u PERAPP niz.
-AUTOD="$(dirname "$0")/pxtune-auto"
-[ -x "$AUTOD" ] || AUTOD="/data/adb/modules/pixel_tune/bin/pxtune-auto"
+# The adaptive daemon (bin/pxtune-auto). The path is derived from the location
+# of this script so it works even when the module is somewhere other than
+# /data/adb/modules. The fallback is necessary: in PATH, pxtune is a symlink
+# /data/adb/ksu/bin/pxtune, so `dirname "$0"` returns ksu/bin, where
+# pxtune-auto is not. Without the fallback, `pxtune auto on|off` neither started
+# nor stopped the daemon and merely reported success silently (measured
+# 2026-08-11). The same pattern as for PERAPP below.
 AUTOD_PID="$STATE_DIR/pxtune-auto.pid"
 
-# Per-app profily (bin/pxtune-perapp). Stejne odvozeni cesty jako u AUTOD.
-# Proc je to samostatny soubor a ne dalsi funkce tady: "status --json" vola
-# WebUI kazdych 5 s pres synchronni most, takze kazdy radek navic v tomhle
-# skriptu stoji cas i tehdy, kdyz se per-app profily vubec nepouzivaji.
+# Per-app profiles (bin/pxtune-perapp). The path is derived the same way as for
+# AUTOD. Why it is a separate file rather than another function here: the WebUI
+# calls "status --json" every 5 s over a synchronous bridge, so every extra line
+# in this script costs time even when per-app profiles are not used at all.
 PERAPP="$(dirname "$0")/pxtune-perapp"
 [ -x "$PERAPP" ] || PERAPP="/data/adb/modules/pixel_tune/bin/pxtune-perapp"
 APPDIR="$STATE_DIR/apps"
@@ -58,33 +57,34 @@ ZRAM="/sys/block/zram0"
 THERMAL="/sys/class/thermal"
 CPUFREQ="/sys/devices/system/cpu/cpufreq"
 
-# absolutni cesta k sobe samemu (kvuli res watchdogu na pozadi)
+# the absolute path to ourselves (for the background res watchdog)
 case "$0" in
 	/*) SELF="$0" ;;
 	*)  SELF="$PWD/$0" ;;
 esac
 
 # ---------------------------------------------------------------------------
-# Overena HW data (SPEC.md -> "OVERENA HARDWAROVA FAKTA")
-# Frekvence CPU vzestupne, kHz.
+# Verified HW data (SPEC.md -> "VERIFIED HARDWARE FACTS")
+# CPU frequencies ascending, kHz.
 # ---------------------------------------------------------------------------
 FREQ_P0="324000 610000 820000 955000 1098000 1197000 1328000 1425000 1548000 1704000"
 FREQ_P4="402000 578000 697000 712000 910000 1065000 1221000 1328000 1418000 1572000 1836000 1945000 2130000 2245000 2367000"
 FREQ_P8="500000 880000 1164000 1298000 1557000 1745000 1885000 2049000 2147000 2294000 2363000 2556000 2687000 2850000 2914000"
 
-# GPU frekvence - SPEC je uvadi sestupne; vzestupna varianta je pro prepocet cdev.
+# GPU frequencies - the SPEC lists them descending; the ascending variant is for the cdev conversion.
 GPU_FREQS_ASC="150000 302000 337000 376000 419000 467000 521000 580000 649000 723000 807000 850000 890000"
 
-# --- Vazba cooling device -> policy a thermal zony -------------------------
+# --- Cooling device -> policy and thermal zone bindings --------------------
 #
-# POZOR: ciselne indexy cooling_deviceN a thermal_zoneN NEJSOU stabilni pres
-# reboot. Overeno na zarizeni: po restartu se thermal-cpufreq-1 presunul
-# z cooling_device10 na 9, thermal-cpufreq-2 z 12 na 11, soc_therm ze
-# zone11 na zone13 a battery ze zone16 na zone12.
-# Zadratovane indexy by tedy po restartu cetly UPLNE JINE cidlo.
+# CAUTION: the numeric cooling_deviceN and thermal_zoneN indices are NOT stable
+# across reboots. Verified on the device: after a restart thermal-cpufreq-1
+# moved from cooling_device10 to 9, thermal-cpufreq-2 from 12 to 11, soc_therm
+# from zone11 to zone13 and battery from zone16 to zone12.
+# Hard-coded indices would therefore read a COMPLETELY DIFFERENT sensor after a
+# restart.
 #
-# Proto se indexy rozpoznavaji za behu podle pole `type`. Nize uvedena cisla
-# jsou jen fallback pro pripad, ze by scan selhal.
+# The indices are therefore resolved at runtime by the `type` field. The numbers
+# below are only a fallback in case the scan fails.
 CDEV_P0=8
 CDEV_P4=10
 CDEV_P8=12
@@ -92,17 +92,17 @@ CDEV_GPU=24
 
 THERMAL_ZONES="big:0 mid:1 little:2 g3d:3 skin:8 soc:11 charger:12 display:13 battery:16"
 
-# resolve_thermal_ids - prevede jmena zon/cdev na aktualni indexy.
+# resolve_thermal_ids - converts zone/cdev names into current indices.
 #
-# VYKON: puvodni verze skenovala vsech ~54 uzlu pres $(cat) = ~350 forku
-# pri KAZDEM spusteni pxtune. Na telefonu priskrcenem na 610 MHz to delalo
-# 20+ s na jedno spusteni a WebUI vypadalo zamrzle (synchronni ksu.exec).
-# Tato verze cte symlinky /dev/thermal/*-by-name (1 readlink na polozku,
-# 13 forku celkem) a vysledek jeste cachuje per-boot do souboru, takze
-# druhe a dalsi spusteni stoji 1 fork (cat cache).
+# PERFORMANCE: the original version scanned all ~54 nodes via $(cat) = ~350
+# forks on EVERY pxtune run. On a phone throttled to 610 MHz that took 20+ s per
+# run and the WebUI looked frozen (a synchronous ksu.exec). This version reads
+# the /dev/thermal/*-by-name symlinks (1 readlink per item, 13 forks in total)
+# and additionally caches the result per boot in a file, so the second and every
+# further run costs 1 fork (cat of the cache).
 IDS_CACHE="$STATE_DIR/.thermal_ids"
 
-# _link_idx <symlink> <prefix> - index z cile symlinku, prazdno pri chybe
+# _link_idx <symlink> <prefix> - the index from a symlink target, empty on error
 _link_idx() {
 	_li=$(readlink "$1" 2>/dev/null) || return 1
 	case "$_li" in
@@ -111,8 +111,8 @@ _link_idx() {
 	return 1
 }
 
-# Pomaly fallback pro pripad, ze /dev/thermal neexistuje (nemelo by nastat,
-# adresar vytvari vendor.thermal.symlinks pri kazdem bootu).
+# A slow fallback in case /dev/thermal does not exist (it should not happen, the
+# directory is created by vendor.thermal.symlinks on every boot).
 _scan_idx() {
 	for _n in "$2"*; do
 		[ -r "$_n/type" ] || continue
@@ -125,31 +125,32 @@ _scan_idx() {
 }
 
 resolve_thermal_ids() {
-	# 1) zkus cache z tohoto bootu (btime se pres reboot zmeni)
+	# 1) try the cache from this boot (btime changes across a reboot)
 	#
-	# POZOR: btime sam o sobe NESTACI. Overeno na zarizeni, ze se zony
-	# precisluji i BEHEM jednoho bootu - quiet_therm byl v 04:06 na
-	# thermal_zone8 a o tri hodiny pozdeji (stejny boot, uptime 11094 s)
-	# uz na thermal_zone9. Cache proto vzdy overime jednim ctenim typu
-	# ("sentinel"): kdyz zona, kterou mame ulozenou jako skin, uz neni
-	# quiet_therm, cache zahodime a resolvujeme znovu. Stoji to 1 cteni
-	# (~0,2 ms) a chrani to pred tim, abychom tise cetli UPLNE JINE cidlo.
+	# CAUTION: btime alone is NOT ENOUGH. It was verified on the device that the
+	# zones get renumbered even DURING a single boot - quiet_therm was on
+	# thermal_zone8 at 04:06 and three hours later (the same boot, uptime
+	# 11094 s) already on thermal_zone9. We therefore always verify the cache
+	# with a single type read (a "sentinel"): when the zone we have stored as the
+	# skin is no longer quiet_therm, we discard the cache and resolve again. That
+	# costs 1 read (~0.2 ms) and protects us from silently reading a COMPLETELY
+	# DIFFERENT sensor.
 	_bt=$(sed -n 's/^btime //p' /proc/stat 2>/dev/null)
 	if [ -f "$IDS_CACHE" ]; then
 		_cl=$(head -n1 "$IDS_CACHE" 2>/dev/null)
 		case "$_cl" in
 			"$_bt "*)
 				set -- $_cl
-				# Poskozena/useknuta cache nesmi shodit skript: `shift 4`
-				# na kratsim seznamu je v shellu fatalni chyba. Proto se
-				# nejdriv overi delka a teprve pak se cache pouzije.
-				# (Nelze pouzit `break` - nejsme uvnitr smycky.)
+				# A corrupted/truncated cache must not take the script down:
+				# `shift 4` on a shorter list is a fatal error in the shell. The
+				# length is therefore checked first and only then is the cache used.
+				# (`break` cannot be used - we are not inside a loop.)
 				if [ "$#" -ge 6 ]; then
 				shift   # btime
 				_c0="$1"; _c4="$2"; _c8="$3"; _cg="$4"
 				shift 4
 				_zl="$*"
-				# sentinel: najdi ulozeny index skinu a over jeho typ
+				# sentinel: find the stored skin index and verify its type
 				_sidx=""
 				for _p in $_zl; do
 					case "$_p" in skin:*) _sidx="${_p#skin:}"; break ;; esac
@@ -163,14 +164,14 @@ resolve_thermal_ids() {
 					fi
 				fi
 				else
-					# cache je useknuta -> zahodit a resolvovat znovu
+					# the cache is truncated -> discard it and resolve again
 					rm -f "$IDS_CACHE" 2>/dev/null
 				fi
 				;;
 		esac
 	fi
 
-	# 2) rychla cesta: readlink na stabilnich symlincich
+	# 2) the fast path: readlink on the stable symlinks
 	_t=$(_link_idx /dev/thermal/cdev-by-name/thermal-cpufreq-0 cooling_device) \
 		|| _t=$(_scan_idx thermal-cpufreq-0 /sys/class/thermal/cooling_device cooling_device)
 	[ -n "$_t" ] && CDEV_P0="$_t"
@@ -184,7 +185,7 @@ resolve_thermal_ids() {
 		|| _t=$(_scan_idx thermal-gpufreq-0 /sys/class/thermal/cooling_device cooling_device)
 	[ -n "$_t" ] && CDEV_GPU="$_t"
 
-	# klic:typ  ->  klic:index  (klice odpovidaji kontraktu JSON pro WebUI)
+	# key:type  ->  key:index  (the keys match the JSON contract for the WebUI)
 	_zl=""
 	for _pair in big:BIG mid:MID little:LITTLE g3d:G3D skin:quiet_therm \
 	             soc:soc_therm charger:charger_therm display:display_therm \
@@ -197,10 +198,10 @@ resolve_thermal_ids() {
 			_zl="$_zl $_key:$_idx"
 		fi
 	done
-	# Fallback konstanty pouzijeme jen kdyz scan nenasel vubec nic.
+	# The fallback constants are used only when the scan found nothing at all.
 	[ -n "$_zl" ] && THERMAL_ZONES="${_zl# }"
 
-	# 3) uloz cache pro dalsi spusteni v tomto bootu
+	# 3) store the cache for further runs during this boot
 	if [ -n "$_bt" ] && [ -d "$STATE_DIR" ]; then
 		{ print -r -- "$_bt $CDEV_P0 $CDEV_P4 $CDEV_P8 $CDEV_GPU $THERMAL_ZONES" > "$IDS_CACHE"; } 2>/dev/null
 	fi
@@ -208,12 +209,12 @@ resolve_thermal_ids() {
 }
 resolve_thermal_ids
 
-# uclamp cgroup skupiny
+# uclamp cgroup groups
 UCLAMP_GROUPS="top-app foreground background system-background camera-daemon nnapi-hal"
 
-# Klice kontraktu profilu (SPEC.md -> "KONTRAKT: formát profilu").
-# Pouziva je profile_apply() pro vynulovani PF_*/PFSET_* i validace
-# per-app overlay (APP_OVERLAY_<klic>), aby byl seznam na JEDNOM miste.
+# The profile contract keys (SPEC.md -> "CONTRACT: profile format").
+# Used by profile_apply() to zero PF_*/PFSET_* and to validate the per-app
+# overlay (APP_OVERLAY_<key>), so that the list lives in ONE place.
 PROFILE_KEYS="UCLAMP_TOPAPP_MIN UCLAMP_TOPAPP_MAX UCLAMP_FG_MIN UCLAMP_FG_MAX
 UCLAMP_BG_MIN UCLAMP_BG_MAX UCLAMP_SYSBG_MIN UCLAMP_SYSBG_MAX
 GPU_MAX_FREQ GPU_MIN_FREQ GPU_POWER_POLICY
@@ -227,35 +228,38 @@ DEVFREQ_MIF_TARGET_LOAD DEVFREQ_MIF_MIN DEVFREQ_DSU_MIN
 CPUPM_CL1_RESIDENCY CPUPM_CL2_RESIDENCY
 GPU_DVFS_PERIOD MEM_LRU_MIN_TTL THERMAL_CDEV_BYPASS"
 
-# --- KONTRAKT v2: mapa klic -> uzel -> druh -------------------------------
-# Tabulka pro set_v2()/snapshot/revert. Format tokenu: KLIC:CESTA:DRUH,
-# oddeleno mezerami (cesty neobsahuji mezeru ani dvojtecku). DRUHY:
-#   int      - cele cislo (is_int); kernel u limit_frequency zaokrouhli na
-#              nejblizsi platny OPP, wr() to nebere jako chybu (jen zaloguje).
-#   bool01   - 0 nebo 1 (uzel si to prevede na false/true - overeno na zarizeni)
-#   load     - dvojice celych cisel "N M" (devfreq interactive/target_load)
-#   enum1020 - 10 nebo 20 (mali dvfs_period)
-# THERMAL_CDEV_BYPASS neni v tabulce - pise se na TRI uzly, resi se zvlast.
+# --- CONTRACT v2: key -> node -> kind ------------------------------------
+# The table for set_v2()/snapshot/revert. Token format: KEY:PATH:KIND,
+# space-separated (paths contain neither a space nor a colon). KINDS:
+#   int      - a whole number (is_int); for limit_frequency the kernel rounds to
+#              the nearest valid OPP, and wr() does not treat that as an error
+#              (it only logs it).
+#   bool01   - 0 or 1 (the node converts it to false/true - verified on the device)
+#   load     - a pair of whole numbers "N M" (devfreq interactive/target_load)
+#   enum1020 - 10 or 20 (mali dvfs_period)
+# THERMAL_CDEV_BYPASS is not in the table - it is written to THREE nodes and is
+# handled separately.
 #
-# VLASTNICTVI - PREMERENO 2026-08-12, revize zaveru z 2026-08-08.
+# OWNERSHIP - RE-MEASURED 2026-08-12, revising the conclusion from 2026-08-08.
 #
-# Test z 08-08 spoustel aplikace pri UZ ROZSVICENE obrazovce a z toho vyvodil,
-# ze limit_frequency drzi. To plati - jenze spoustecem neni start aplikace,
-# ale PROBUZENI DISPLEJE. Snapshot vsech 24 uzlu pred a po
-# `input keyevent KEYCODE_SLEEP` + `KEYCODE_WAKEUP` (bez jedineho dotyku
-# aplikace) ukazal, ze power HAL vraci na stock prave tyhle tri:
+# The test from 08-08 launched apps while the screen was ALREADY ON and
+# concluded from that that limit_frequency holds. That is true - except the
+# trigger is not an app start but a DISPLAY WAKE. A snapshot of all 24 nodes
+# before and after `input keyevent KEYCODE_SLEEP` + `KEYCODE_WAKEUP` (without a
+# single app being touched) showed that the power HAL returns exactly these
+# three to stock:
 #
 #   /proc/vendor_sched/dvfs_headroom                  1024    -> 1100
 #   policy4/sched_pixel/limit_frequency               1418000 -> 1836000
 #   policy8/sched_pixel/limit_frequency               1557000 -> 2363000
 #
-# Vsechno ostatni (uclamp, mali scaling_max_freq, mif target_load, min_ttl_ms,
-# cpupm residency, down_rate_limit_us) drzi.
+# Everything else (uclamp, mali scaling_max_freq, mif target_load, min_ttl_ms,
+# cpupm residency, down_rate_limit_us) holds.
 #
-# DOPAD: dokud se tohle nedoreseovalo, byly OBA taktove stropy powersave -
-# podle vlastniho komentare profilu "nejucinnejsi jednotliva hodnota" - mrtve
-# uz od prvniho odemknuti telefonu. Proto V2_VOLATILE + `pxtune reapply`, ktery
-# demon vola na kazde rozsviceni obrazovky.
+# IMPACT: until this was worked out, BOTH powersave clock caps - by the
+# profile's own comment "the most effective single value" - were dead from the
+# first unlock of the phone. Hence V2_VOLATILE + `pxtune reapply`, which the
+# daemon calls on every screen wake.
 V2_TABLE="VS_DVFS_HEADROOM:/proc/vendor_sched/dvfs_headroom:int
 VS_BG_UCLAMP_MAX:/proc/vendor_sched/groups/bg/uclamp_max:int
 VS_TA_UCLAMP_MIN:/proc/vendor_sched/groups/ta/uclamp_min:int
@@ -274,14 +278,16 @@ CPUPM_CL2_RESIDENCY:/sys/devices/platform/cpupm/cpupm/cpd_cl2_target_residency:i
 GPU_DVFS_PERIOD:$MALI/dvfs_period:enum1020
 MEM_LRU_MIN_TTL:/sys/kernel/mm/lru_gen/min_ttl_ms:int"
 
-# Podmnozina V2_TABLE, kterou si power HAL bere zpatky pri kazdem probuzeni
-# displeje (mereni viz komentar vyse). Prepisuje je `pxtune reapply` - levna
-# cesta bez revertu a bez zbytku profilu, aby se dala volat casto.
+# The subset of V2_TABLE the power HAL takes back on every display wake (see the
+# measurement in the comment above). They are rewritten by `pxtune reapply` - a
+# cheap path without a revert and without the rest of the profile, so it can be
+# called often.
 V2_VOLATILE="VS_DVFS_HEADROOM SCHED_LIMIT_FREQ_LITTLE SCHED_LIMIT_FREQ_MID SCHED_LIMIT_FREQ_BIG"
 
-# Namerene stock hodnoty v2 uzlu (probe 2026-08-07, akita:16/CP1A.260505.005).
-# Slouzi jako fallback pri revertu, kdyz stock.conf tyhle klice jeste nema
-# (stary snapshot z doby pred v2). Stejny vzor jako DEF_GPU_MAX apod.
+# The measured stock values of the v2 nodes (probe 2026-08-07,
+# akita:16/CP1A.260505.005). They serve as a fallback during a revert when
+# stock.conf does not have these keys yet (an old snapshot from before v2). The
+# same pattern as DEF_GPU_MAX and friends.
 DEF_V2_VS_DVFS_HEADROOM="1100"
 DEF_V2_VS_BG_UCLAMP_MAX="130"
 DEF_V2_VS_TA_UCLAMP_MIN="1"
@@ -300,22 +306,22 @@ DEF_V2_CPUPM_CL2_RESIDENCY="10000"
 DEF_V2_GPU_DVFS_PERIOD="20"
 DEF_V2_MEM_LRU_MIN_TTL="0"
 
-# Tri CPU cooling devices pro THERMAL_CDEV_BYPASS (user_vote_bypass). Stock 0.
+# The three CPU cooling devices for THERMAL_CDEV_BYPASS (user_vote_bypass). Stock 0.
 CDEV_BYPASS_NODES="/dev/thermal/cdev-by-name/thermal-cpufreq-0/user_vote_bypass
 /dev/thermal/cdev-by-name/thermal-cpufreq-1/user_vote_bypass
 /dev/thermal/cdev-by-name/thermal-cpufreq-2/user_vote_bypass"
 
-# Blokova zarizeni pro read_ahead_kb
+# Block devices for read_ahead_kb
 IO_DEVS="sda sdb sdc sdd"
 
-# Thermal HAL senzory s profily game/camera
+# Thermal HAL sensors with the game/camera profiles
 THERMAL_SENSOR_MID="VIRTUAL-SKIN-CPU-MID"
 THERMAL_SENSOR_HIGH="VIRTUAL-SKIN-CPU-HIGH"
 
 # ---------------------------------------------------------------------------
-# STOCK hodnoty (fallback, kdyz je stock.conf poskozeny nebo chybi)
+# STOCK values (a fallback when stock.conf is corrupted or missing)
 # SPEC.md: uclamp min=0.00/max=max (nnapi-hal min=1.00), GPU 890000/150000/adaptive,
-#          charge stop=100 start=0, vm 60/20/10/100/0, thermal profil = "" (default)
+#          charge stop=100 start=0, vm 60/20/10/100/0, thermal profile = "" (default)
 # ---------------------------------------------------------------------------
 DEF_UCLAMP_MIN="0"
 DEF_UCLAMP_MAX="max"
@@ -334,15 +340,16 @@ DEF_THERMAL_PROFILE=""
 DEF_DISPLAY_SIZE=""
 DEF_DISPLAY_DENSITY="353"
 
-# Presety rozliseni: "jmeno:W:H:DPI" (jmena jsou zavazna pro WebUI)
+# Resolution presets: "name:W:H:DPI" (the names are binding for the WebUI)
 RES_PRESETS="native:1080:2400:420 900x2000:900:2000:350 810x1800:810:1800:315 720x1600:720:1600:280"
 NATIVE_W=1080
 NATIVE_H=2400
-# Fyzicka hustota panelu je 420, ale uzivatel ma vlastni override (353,
-# ulozeny v secure display_density_forced a zachyceny ve stock.conf).
-# "Navrat na nativni" proto musi vratit UZIVATELOVU hustotu, ne 420 -
-# jinak by kazdy res reset (i 60s pojistka) skokove zvetsil cele UI.
-# native_dpi() cte stock.conf, fallback 420 kdyz zaloha neexistuje.
+# The physical panel density is 420, but the user has their own override (353,
+# stored in secure display_density_forced and captured in stock.conf).
+# "Return to native" must therefore restore the USER'S density, not 420 -
+# otherwise every res reset (including the 60 s safeguard) would enlarge the
+# whole UI in one jump.
+# native_dpi() reads stock.conf, falling back to 420 when the backup does not exist.
 NATIVE_DPI_HW=420
 native_dpi() {
 	stock_getv STOCK_DISPLAY_DENSITY_FORCED ""; _nd="$SV"
@@ -352,8 +359,8 @@ native_dpi() {
 		print -rn -- "$NATIVE_DPI_HW"
 	fi
 }
-# Skutecna hodnota se doplni v main() az po definici stock_get/is_int
-# (mksh vyhodnocuje top-down, tady jeste nejsou k dispozici).
+# The real value is filled in in main(), after stock_get/is_int are defined
+# (mksh evaluates top-down, they are not available here yet).
 NATIVE_DPI=420
 RES_TIMEOUT=60
 
@@ -361,29 +368,29 @@ WR_OK=0
 WR_FAIL=0
 VAL_FAIL=0
 
-# FRAMEWORK_OK=0 => je zakazane volat cokoli pres binder (settings/cmd/dumpsys).
-# Nastavuje se pro "status --json" a pro interni watchdog-check.
+# FRAMEWORK_OK=0 => calling anything over binder (settings/cmd/dumpsys) is
+# forbidden. Set for "status --json" and for the internal watchdog check.
 FRAMEWORK_OK=1
 
 # ---------------------------------------------------------------------------
-# Zaklad: cteni, logovani
+# Basics: reading, logging
 # ---------------------------------------------------------------------------
 
-# rd <path> -> prvni radka souboru na stdout, navratovy kod 1 kdyz nelze cist
+# rd <path> -> the first line of the file on stdout, return code 1 when it cannot be read
 rd() {
 	_rd=""
 	[ -f "$1" ] || return 1
 	[ -r "$1" ] || return 1
-	# POZOR: `IFS= read -r x < soubor` vraci na /proc/sys/* jen PRVNI ZNAK.
-	# Procfs hlasi st_size=0, takze mksh cte po jednom bajtu a skonci.
-	# Overeno na zarizeni:
+	# CAUTION: `IFS= read -r x < file` returns only the FIRST CHARACTER on
+	# /proc/sys/*. Procfs reports st_size=0, so mksh reads byte by byte and stops.
+	# Verified on the device:
 	#     /proc/sys/vm/swappiness            cat=40    read="4"
 	#     /proc/sys/kernel/sched_util_clamp_min  cat=1024  read="1"
 	#     /sys/class/thermal/.../temp        cat=63000 read=63000  (OK)
-	# Fork (head) je ale nutny JEN pro /proc/sys/* - jinde pouzivame
-	# builtin read (0 forku). To je zasadni pro vykon: status --json cte
-	# ~80 hodnot a na priskrcenem telefonu stal fork-na-kazde-cteni
-	# pres 10 s (WebUI pak vypadalo zamrzle).
+	# A fork (head) is however necessary ONLY for /proc/sys/* - elsewhere we use
+	# the read builtin (0 forks). That is essential for performance: status --json
+	# reads ~80 values and on a throttled phone a fork per read cost over 10 s
+	# (which made the WebUI look frozen).
 	case "$1" in
 		/proc/sys/*)
 			_rd=$(head -n1 "$1" 2>/dev/null) || return 1
@@ -403,8 +410,8 @@ rd_def() {
 	print -rn -- "$_rdd"
 }
 
-# bracket <string> -> obsah [zavorek], jinak cely retezec
-# (comp_algorithm / power_policy maji tvar "a [b] c")
+# bracket <string> -> the contents of the [brackets], otherwise the whole string
+# (comp_algorithm / power_policy have the form "a [b] c")
 bracket() {
 	case "$1" in
 		*\[*\]*) print -rn -- "$1" | sed -n 's/.*\[\([^]]*\)\].*/\1/p' ;;
@@ -428,13 +435,15 @@ is_snum() {
 LOG_N=0
 log_rotate() {
 	[ -f "$LOG_FILE" ] || return 0
-	# POZOR: nazvy promennych v log()/log_rotate() musi byt unikatni - vola se
-	# uprostred jinych funkci a prepsani jejich promenne by bylo tise fatalni.
+	# CAUTION: the variable names in log()/log_rotate() have to be unique - it is
+	# called from inside other functions and overwriting one of their variables
+	# would be silently fatal.
 	#
-	# VYKON: `wc -c` je fork. Aplikace profilu zapisuje ~40 radku, takze puvodni
-	# verze forkovala 40x jen kvuli kontrole velikosti. Kontrolujeme proto jen
-	# kazdy 50. zapis - log ma strop 512 kB a jeden radek ma radove 100 B,
-	# takze 50 radku navic je ~5 kB, tj. 1 % preteceni. Zanedbatelne.
+	# PERFORMANCE: `wc -c` is a fork. Applying a profile writes ~40 lines, so the
+	# original version forked 40 times just to check the size. We therefore only
+	# check every 50th write - the log is capped at 512 kB and one line is on the
+	# order of 100 B, so 50 extra lines are ~5 kB, i.e. 1 % of overshoot.
+	# Negligible.
 	LOG_N=$((LOG_N + 1))
 	[ "$((LOG_N % 50))" -eq 1 ] || return 0
 	_logsz=$(wc -c < "$LOG_FILE" 2>/dev/null)
@@ -445,18 +454,18 @@ log_rotate() {
 	chmod 0640 "$LOG_FILE" 2>/dev/null
 }
 
-# log <LEVEL> <zprava...>
+# log <LEVEL> <message...>
 LOG_TS=""
 log() {
 	_loglvl="$1"
 	shift
 	log_rotate
-	# VYKON: date = fork+exec na kazdy radek; aplikace profilu zapisuje
-	# ~40 radku a na priskrcenem telefonu to stalo nekolik sekund.
-	# Timestamp se proto pocita jen JEDNOU za beh procesu - radky jednoho
-	# behu sdili cas startu, coz je pro tenhle log dostacujici granularita.
+	# PERFORMANCE: date = a fork+exec per line; applying a profile writes ~40
+	# lines and on a throttled phone that cost several seconds. The timestamp is
+	# therefore computed only ONCE per process run - the lines of one run share
+	# the start time, which is sufficient granularity for this log.
 	[ -n "$LOG_TS" ] || LOG_TS=$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
-	# print je builtin, printf je /system/bin/printf (fork, ~17 ms).
+	# print is a builtin, printf is /system/bin/printf (a fork, ~17 ms).
 	{ print -r -- "[$LOG_TS] [$_loglvl] $*" >> "$LOG_FILE"; } 2>/dev/null
 }
 
@@ -464,7 +473,7 @@ msg()  { print -r -- "$*"; }
 warn() { print -r -- "$*" >&2; }
 die()  { _c="$1"; shift; warn "pxtune: $*"; log ERROR "$*"; exit "$_c"; }
 
-# vfail <zprava> - odmitnuta (neplatna) hodnota; skript pokracuje dal
+# vfail <message> - a rejected (invalid) value; the script carries on
 vfail() {
 	VAL_FAIL=$((VAL_FAIL + 1))
 	warn "pxtune: $*"
@@ -473,13 +482,14 @@ vfail() {
 }
 
 # ---------------------------------------------------------------------------
-# wr - JEDINA cesta zapisu do sysfs.
-# Overi existenci, overi zapisovatelnost, zaloguje "stara -> nova".
-# Pri chybe zaloguje a POKRACUJE (nikdy neshodi skript).
+# wr - THE ONLY path for writing into sysfs.
+# Verifies existence, verifies writability, logs "old -> new".
+# On an error it logs and CARRIES ON (it never takes the script down).
 # ---------------------------------------------------------------------------
 WR_QUIET=0
-# WR_CHANGED pocita jen SKUTECNE provedene zapisy (WR_OK pocita i preskocene,
-# kde uz spravna hodnota byla). `reapply` podle nej pozna, jestli mel co vracet.
+# WR_CHANGED counts only writes that ACTUALLY happened (WR_OK also counts skipped
+# ones where the value was already correct). `reapply` uses it to tell whether it
+# had anything to restore.
 WR_CHANGED=0
 
 wr() {
@@ -487,59 +497,59 @@ wr() {
 	_wv="$2"
 
 	if [ -z "$_wp" ]; then
-		log ERROR "wr: prazdna cesta"
+		log ERROR "wr: empty path"
 		WR_FAIL=$((WR_FAIL + 1))
 		return 1
 	fi
 	if [ ! -e "$_wp" ]; then
-		log ERROR "wr: neexistuje: $_wp (hodnota '$_wv' zahozena)"
+		log ERROR "wr: does not exist: $_wp (the value '$_wv' was dropped)"
 		WR_FAIL=$((WR_FAIL + 1))
 		return 1
 	fi
 	if [ ! -w "$_wp" ]; then
-		log ERROR "wr: neni zapisovatelne: $_wp (hodnota '$_wv' zahozena)"
+		log ERROR "wr: not writable: $_wp (the value '$_wv' was dropped)"
 		WR_FAIL=$((WR_FAIL + 1))
 		return 1
 	fi
 
-	# VYKON: cteni pres rdv() (globalni V), ne pres $(rd ...). Kazde $()
-	# je fork a wr() se pri prepnuti profilu vola ~40x - to delalo pres
-	# 80 forku jen na cteni stare a nove hodnoty.
+	# PERFORMANCE: read via rdv() (the global V), not via $(rd ...). Every $() is
+	# a fork and wr() is called ~40 times per profile switch - that made over 80
+	# forks just to read the old and new value.
 	rdv "$_wp" "?"
 	_wold="$V"
 
-	# Kdyz uz je hodnota spravna, nezapisujeme. Nektere sysfs nody odmitaji
-	# i zapis vlastni aktualni hodnoty a hlasily by zbytecnou chybu.
-	# Realny pripad z tohoto zarizeni: google,charger/charge_start_level
-	# odmita zapis '0', i kdyz '0' uz tam je -> revert hlasil chybu, ackoli
-	# byl stav v poradku.
+	# When the value is already correct, we do not write. Some sysfs nodes reject
+	# even a write of their own current value and would report a pointless error.
+	# A real case from this device: google,charger/charge_start_level rejects a
+	# write of '0' even when '0' is already there -> the revert reported an error
+	# even though the state was fine.
 	if [ "$_wold" = "$_wv" ]; then
 		WR_OK=$((WR_OK + 1))
 		return 0
 	fi
 
-	# POZOR na poradi redirekci: `> soubor 2>/dev/null` chybu OTEVRENI
-	# souboru nepotlaci (vyhodnocuje se zleva doprava), takze
-	# "Permission denied" utece na stderr - v boot fazi az do bootlogu.
-	# Cely blok proto obalujeme.
+	# MIND the redirection order: `> file 2>/dev/null` does not suppress a file
+	# OPEN error (it is evaluated left to right), so "Permission denied" escapes
+	# to stderr - during the boot phase all the way into the boot log. We
+	# therefore wrap the whole block.
 	if { print -r -- "$_wv" > "$_wp"; } 2>/dev/null; then
 		rdv "$_wp" "?"
-		# WR_QUIET=1: volajici loguje sam jednim souhrnem. Pouziva to `reapply`,
-		# ktery bezi po kazdem rozsviceni obrazovky - po radku na zapis by log
-		# rotoval nekolikrat denne a prebil vsechno ostatni.
-		[ "$WR_QUIET" = "1" ] || log INFO "wr: $_wp: '$_wold' -> '$_wv' (ctenim: '$V')"
+		# WR_QUIET=1: the caller logs a single summary itself. `reapply` uses this;
+		# it runs after every screen wake, and a line per write would rotate the log
+		# several times a day and drown out everything else.
+		[ "$WR_QUIET" = "1" ] || log INFO "wr: $_wp: '$_wold' -> '$_wv' (read back: '$V')"
 		WR_OK=$((WR_OK + 1))
 		WR_CHANGED=$((WR_CHANGED + 1))
 		return 0
 	fi
 
-	log ERROR "wr: zapis selhal: $_wp <- '$_wv' (stara: '$_wold')"
+	log ERROR "wr: the write failed: $_wp <- '$_wv' (old: '$_wold')"
 	WR_FAIL=$((WR_FAIL + 1))
 	return 1
 }
 
 # ---------------------------------------------------------------------------
-# Stav / adresare
+# State / directories
 # ---------------------------------------------------------------------------
 ensure_dirs() {
 	[ -d "$STATE_DIR" ]   || mkdir -p "$STATE_DIR"   2>/dev/null
@@ -565,8 +575,8 @@ auto_state() {
 }
 
 # ---------------------------------------------------------------------------
-# Prace s KEY=VALUE soubory (profily i stock.conf).
-# NESOURCUJEME je - poskozeny/podvrzeny soubor nesmi nic spustit.
+# Working with KEY=VALUE files (profiles and stock.conf).
+# We DO NOT SOURCE them - a corrupted/planted file must not execute anything.
 # ---------------------------------------------------------------------------
 # kv_get <file> <key>
 kv_get() {
@@ -584,7 +594,7 @@ has_key() {
 	grep -q "^[[:space:]]*$2[[:space:]]*=" "$1" 2>/dev/null
 }
 
-# stock.conf je pouzitelny jen kdyz existuje, ma magii a same tvary KEY=VALUE
+# stock.conf is usable only when it exists, has the magic and contains nothing but KEY=VALUE lines
 stock_valid() {
 	[ -f "$STOCK_CONF" ] || return 1
 	grep -q '^STOCK_MAGIC=' "$STOCK_CONF" 2>/dev/null || return 1
@@ -594,19 +604,21 @@ stock_valid() {
 	return 0
 }
 
-# stock_get <key> <default> -> hodnota ze stock.conf, jinak default ze SPEC
-# --- nacitani KEY=VALUE souboru do promennych (bez forku) -------------------
+# stock_get <key> <default> -> the value from stock.conf, otherwise the SPEC default
+# --- loading KEY=VALUE files into variables (fork-free) --------------------
 #
-# VYKON: kv_get() je `sed | tail | sed` = 3 forky na jedno cteni. Pri prepnuti
-# profilu se cte 20x ze stock.conf (reset) a 21x z profilu = pres 120 forku.
-# Na priskrcenem telefonu to delalo 13 s na jedno kliknuti ve WebUI.
-# Nacteme kazdy soubor JEDNOU do promennych s prefixem a dal uz jen ctem.
+# PERFORMANCE: kv_get() is `sed | tail | sed` = 3 forks per read. A profile
+# switch reads 20 times from stock.conf (the reset) and 21 times from the profile
+# = over 120 forks. On a throttled phone that took 13 s per click in the WebUI.
+# We load each file ONCE into prefixed variables and only read from those
+# afterwards.
 #
-# Bezpecnost: klic se propousti jen [A-Za-z0-9_], hodnota se prirazuje pres
-# `eval "PREFIX_$k=\$_v"` - to je prirazeni Z PROMENNE, ne re-evaluace obsahu,
-# takze `$(...)` ani backtick v hodnote se neprovede.
+# Safety: only [A-Za-z0-9_] keys pass, and the value is assigned via
+# `eval "PREFIX_$k=\$_v"` - that is an assignment FROM A VARIABLE, not a
+# re-evaluation of the content, so neither `$(...)` nor a backtick in the value
+# is executed.
 
-# kvload <soubor> <prefix> - naplni <prefix>_<KLIC> promenne
+# kvload <file> <prefix> - fills the <prefix>_<KEY> variables
 kvload() {
 	[ -f "$1" ] || return 1
 	while IFS='=' read -r _kl_k _kl_v; do
@@ -615,14 +627,14 @@ kvload() {
 			*[!A-Za-z0-9_]*) continue ;;
 		esac
 		_kl_v="${_kl_v%%#*}"
-		# osekej mezery na konci
+		# trim trailing spaces
 		while :; do
 			case "$_kl_v" in
 				*' '|*"	") _kl_v="${_kl_v%?}" ;;
 				*) break ;;
 			esac
 		done
-		# osekej uvozovky
+		# trim the quotes
 		case "$_kl_v" in
 			\"*\") _kl_v="${_kl_v#\"}"; _kl_v="${_kl_v%\"}" ;;
 			\'*\') _kl_v="${_kl_v#\'}"; _kl_v="${_kl_v%\'}" ;;
@@ -641,8 +653,8 @@ stock_load() {
 	return 0
 }
 
-# stock_getv <klic> <default> -> globalni SV. Bez forku, na rozdil od
-# $(stock_get ...), coz je subshell (~7,7 ms). cmd_revert jich mel 19.
+# stock_getv <key> <default> -> the global SV. Fork-free, unlike
+# $(stock_get ...), which is a subshell (~7.7 ms). cmd_revert had 19 of them.
 stock_getv() {
 	stock_load
 	eval "SV=\${SC_$1:-}"
@@ -659,7 +671,7 @@ stock_get() {
 	fi
 }
 
-# uclamp_keyv <skupina> -> UK. `tr` byl fork; skupin je pevna mala mnozina.
+# uclamp_keyv <group> -> UK. `tr` was a fork; the set of groups is small and fixed.
 uclamp_keyv() {
 	case "$1" in
 		top-app)           UK=TOP_APP ;;
@@ -678,17 +690,17 @@ uclamp_key() {
 }
 
 # ---------------------------------------------------------------------------
-# Framework (binder) - settings. NIKDY se nesmi zavolat pri "status --json".
+# The framework (binder) - settings. It must NEVER be called during "status --json".
 # ---------------------------------------------------------------------------
 FW_CHECKED=0
 FW_RESULT=1
 framework_ok() {
 	[ "$FRAMEWORK_OK" = "1" ] || return 1
-	# Explicitni deaktivace pro volajici v rane fazi bootu (uninstall.sh):
+	# An explicit opt-out for callers in the early boot phase (uninstall.sh):
 	[ "${PXTUNE_NO_FRAMEWORK:-0}" = "1" ] && return 1
-	# VYKON: `command -v` i `getprop` jsou forky (~8-17 ms) a framework_ok
-	# se vola jednou za kazdy tweak s mechanismem `settings`. Vysledek se
-	# behem jednoho behu nemuze zmenit, tak ho zjistujeme jen jednou.
+	# PERFORMANCE: both `command -v` and `getprop` are forks (~8-17 ms) and
+	# framework_ok is called once per tweak with the `settings` mechanism. The
+	# result cannot change during a single run, so we determine it only once.
 	if [ "$FW_CHECKED" = "0" ]; then
 		FW_CHECKED=1
 		FW_RESULT=1
@@ -700,7 +712,7 @@ framework_ok() {
 	return "$FW_RESULT"
 }
 
-# settings_get <namespace> <key>  ("null" -> prazdno)
+# settings_get <namespace> <key>  ("null" -> empty)
 settings_get() {
 	framework_ok || return 1
 	if command -v timeout >/dev/null 2>&1; then
@@ -710,10 +722,10 @@ settings_get() {
 	fi
 }
 
-# settings_run <akce> <namespace> <klic> [hodnota] - zapis pres `settings`
-# VZDY s timeoutem. `settings` je binder volani; bez timeoutu by zaseknuty
-# system_server (nebo bezici raná faze bootu pri odinstalaci) zablokoval
-# cely skript - v post-fs-data kontextu i cely boot.
+# settings_run <action> <namespace> <key> [value] - a write via `settings`
+# ALWAYS with a timeout. `settings` is a binder call; without a timeout a hung
+# system_server (or an early boot phase running during an uninstall) would block
+# the whole script - and in the post-fs-data context the whole boot.
 settings_run() {
 	framework_ok || return 1
 	if command -v timeout >/dev/null 2>&1; then
@@ -724,7 +736,7 @@ settings_run() {
 }
 
 # ---------------------------------------------------------------------------
-# Snapshot stock hodnot - vytvori se JEDNOU, nikdy neprepisuje.
+# A snapshot of the stock values - created ONCE, never overwritten.
 # ---------------------------------------------------------------------------
 snapshot_stock() {
 	if [ -f "$STOCK_CONF" ]; then
@@ -737,7 +749,7 @@ snapshot_stock() {
 		_dds=$(settings_get secure display_density_forced)
 		_dcap=1
 	else
-		# bez binderu se displej doplni pri prvnim spusteni, ktere framework smi volat
+		# without binder the display values are filled in on the first run that may call the framework
 		_dsz=""
 		_dds=""
 		_dcap=0
@@ -745,9 +757,9 @@ snapshot_stock() {
 
 	_tmp="$STOCK_CONF.tmp.$$"
 	{
-		printf '# pixel_tune - snapshot stock hodnot\n'
-		printf '# Vytvoreno: %s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
-		printf '# NEEDITOVAT RUCNE. Smazani = snapshot se vytvori znovu z AKTUALNICH hodnot.\n'
+		printf '# pixel_tune - a snapshot of the stock values\n'
+		printf '# Created: %s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+		printf '# DO NOT EDIT BY HAND. Deleting it = the snapshot is recreated from the CURRENT values.\n'
 		printf 'STOCK_MAGIC="pixel_tune-stock-v1"\n'
 
 		for _g in $UCLAMP_GROUPS; do
@@ -782,14 +794,14 @@ snapshot_stock() {
 		printf 'STOCK_DISPLAY_SIZE_FORCED="%s"\n'    "$_dsz"
 		printf 'STOCK_DISPLAY_DENSITY_FORCED="%s"\n' "$_dds"
 
-		# Jen pro informaci - zram se za behu NEMENI (swapoff je nebezpecny, SPEC).
+		# For information only - zram is NOT CHANGED at runtime (a swapoff is dangerous, SPEC).
 		printf 'STOCK_ZRAM_DISKSIZE="%s"\n'        "$(rd_def "$ZRAM/disksize" "")"
 		printf 'STOCK_ZRAM_ALGORITHM="%s"\n'       "$(bracket "$(rd_def "$ZRAM/comp_algorithm" "")")"
 		printf 'STOCK_SCHED_UTIL_CLAMP_MIN="%s"\n' "$(rd_def /proc/sys/kernel/sched_util_clamp_min "")"
 
-		# kontrakt v2 - stock hodnoty novych uzlu (pro revert). Fresh instalace
-		# je zachyti z aktualniho (=stock) stavu; na starem snapshotu chybi a
-		# revert pak pouzije DEF_V2_* fallback.
+		# contract v2 - the stock values of the new nodes (for the revert). A fresh
+		# install captures them from the current (= stock) state; on an old snapshot
+		# they are missing and the revert then uses the DEF_V2_* fallback.
 		for _e in $V2_TABLE; do
 			_vk="${_e%%:*}"; _vrest="${_e#*:}"; _vp="${_vrest%:*}"
 			printf 'STOCK_%s="%s"\n' "$_vk" "$(rd_def "$_vp" "")"
@@ -799,14 +811,14 @@ snapshot_stock() {
 	if [ -s "$_tmp" ]; then
 		mv -f "$_tmp" "$STOCK_CONF" 2>/dev/null
 		chmod 0600 "$STOCK_CONF" 2>/dev/null
-		log INFO "stock.conf vytvoren: $STOCK_CONF (displej zachycen=$_dcap)"
+		log INFO "stock.conf created: $STOCK_CONF (display captured=$_dcap)"
 	else
 		rm -f "$_tmp" 2>/dev/null
-		log ERROR "stock.conf se nepodarilo vytvorit"
+		log ERROR "stock.conf could not be created"
 	fi
 }
 
-# Kdyz snapshot vznikl bez binderu, doplni hodnoty displeje pri prvni prilezitosti.
+# When the snapshot was created without binder, fill in the display values at the first opportunity.
 stock_fill_display() {
 	framework_ok || return 0
 	stock_valid || return 0
@@ -822,14 +834,15 @@ stock_fill_display() {
 	if [ -s "$_t" ]; then
 		mv -f "$_t" "$STOCK_CONF" 2>/dev/null
 		chmod 0600 "$STOCK_CONF" 2>/dev/null
-		log INFO "stock.conf: doplneny hodnoty displeje (size='$_dsz' density='$_dds')"
+		log INFO "stock.conf: the display values were filled in (size='$_dsz' density='$_dds')"
 	else
 		rm -f "$_t" 2>/dev/null
 	fi
 }
 
-# balanced.conf je doslovna kopie prikladu ze SPEC.md (kontrakt formatu profilu).
-# Zadne jine profily se negeneruji - jejich hodnoty ve SPEC nejsou.
+# balanced.conf is a verbatim copy of the example from SPEC.md (the profile
+# format contract). No other profiles are generated - their values are not in the
+# SPEC.
 seed_profiles() {
 	[ -d "$PROFILE_DIR" ] || return 0
 	[ -f "$PROFILE_DIR/balanced.conf" ] && return 0
@@ -837,11 +850,11 @@ seed_profiles() {
 		[ -f "$_f" ] && return 0
 	done
 	cat > "$PROFILE_DIR/balanced.conf" 2>/dev/null <<'EOF'
-# povinne
+# mandatory
 PROFILE_NAME="balanced"
-PROFILE_DESC="Vyvazeny - stock chovani"
+PROFILE_DESC="Balanced - stock behaviour"
 
-# uclamp (0-100, nebo "max"; prazdne = nesahat)
+# uclamp (0-100, or "max"; empty = leave it alone)
 UCLAMP_TOPAPP_MIN=""
 UCLAMP_TOPAPP_MAX=""
 UCLAMP_FG_MIN=""
@@ -851,12 +864,12 @@ UCLAMP_BG_MAX=""
 UCLAMP_SYSBG_MIN=""
 UCLAMP_SYSBG_MAX=""
 
-# GPU (kHz, musi byt z povoleneho seznamu; prazdne = nesahat)
+# GPU (kHz, must come from the allowed list; empty = leave it alone)
 GPU_MAX_FREQ=""
 GPU_MIN_FREQ=""
 GPU_POWER_POLICY=""
 
-# thermal HAL profil ("game" | "camera" | "" = default)
+# thermal HAL profile ("game" | "camera" | "" = default)
 THERMAL_PROFILE_CPU_MID=""
 THERMAL_PROFILE_CPU_HIGH=""
 
@@ -869,17 +882,17 @@ VM_VFS_CACHE_PRESSURE=""
 # I/O
 IO_READAHEAD_KB=""
 
-# nabijeni
+# charging
 CHARGE_STOP_LEVEL=""
 EOF
-	[ -f "$PROFILE_DIR/balanced.conf" ] && log INFO "vytvoren vychozi profil balanced.conf"
+	[ -f "$PROFILE_DIR/balanced.conf" ] && log INFO "the default profile balanced.conf was created"
 	return 0
 }
 
 # ---------------------------------------------------------------------------
-# Prepocty
+# Conversions
 # ---------------------------------------------------------------------------
-# nth <index0> <polozka...>
+# nth <index0> <item...>
 nth() {
 	_ni="$1"
 	shift
@@ -903,8 +916,8 @@ in_list() {
 	return 1
 }
 
-# cdev_cap_khz <cur_state> <frekvence vzestupne...>
-# SPEC: cur_state = N  =>  strop = frekvence na indexu (pocet - 1 - N)
+# cdev_cap_khz <cur_state> <frequencies ascending...>
+# SPEC: cur_state = N  =>  the cap = the frequency at index (count - 1 - N)
 cdev_cap_khz() {
 	_cck="$1"
 	shift
@@ -930,7 +943,7 @@ mc_to_c() {
 	printf '%s%d.%d' "$_sg" $((_mc / 1000)) $(((_mc % 1000) / 100))
 }
 
-# last_of <seznam> -> posledni polozka
+# last_of <list> -> the last item
 last_of() {
 	# shellcheck disable=SC2086
 	set -- $1
@@ -938,16 +951,16 @@ last_of() {
 }
 
 # ---------------------------------------------------------------------------
-# JSON helpery
+# JSON helpers
 # ---------------------------------------------------------------------------
 json_esc() {
-	# VYKON: sed = fork+exec na kazdy retezec; status --json jich emituje
-	# ~30 a na priskrcenem telefonu to stalo sekundy. Bezne hodnoty
-	# (jmena profilu, stavy, frekvence) zadne escapovani nepotrebuji -
-	# rychla cesta je pozna pure-shellove a sed se spousti jen vyjimecne.
+	# PERFORMANCE: sed = a fork+exec per string; status --json emits ~30 of them
+	# and on a throttled phone that cost seconds. Ordinary values (profile names,
+	# states, frequencies) need no escaping at all - the fast path recognises them
+	# in pure shell and sed only runs in exceptional cases.
 	case "$1" in
 		*[!A-Za-z0-9\ _.,:/%+-]*)
-			# poradi: nejdriv zpetne lomitko, pak uvozovka, pak ridici znaky
+			# the order: the backslash first, then the quote, then control characters
 			print -rn -- "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[[:cntrl:]]/ /g'
 			;;
 		*)
@@ -958,12 +971,12 @@ json_esc() {
 
 jstr() { printf '"%s"' "$(json_esc "$1")"; }
 
-# jnum <hodnota> -> cele cislo nebo null
+# jnum <value> -> a whole number or null
 jnum() {
 	if is_snum "$1"; then print -rn -- "$1"; else printf 'null'; fi
 }
 
-# jnum_f <hodnota> -> desetinne cislo nebo null
+# jnum_f <value> -> a decimal number or null
 jnum_f() {
 	case "$1" in
 		''|*[!0-9.-]*) printf 'null' ;;
@@ -975,14 +988,14 @@ jbool() {
 	if [ "$1" = "1" ]; then printf 'true'; else printf 'false'; fi
 }
 
-# jtemp <cesta k zone> -> °C jako desetinne cislo nebo null
+# jtemp <zone path> -> °C as a decimal number or null
 jtemp() {
 	_t=$(rd_def "$1" "")
 	if is_snum "$_t"; then mc_to_c "$_t"; else printf 'null'; fi
 }
 
 # ---------------------------------------------------------------------------
-# Validace
+# Validation
 # ---------------------------------------------------------------------------
 valid_uclamp() {
 	[ "$1" = "max" ] && return 0
@@ -1015,22 +1028,22 @@ valid_charge() {
 }
 
 # ---------------------------------------------------------------------------
-# Zapisove operace
+# Write operations
 # ---------------------------------------------------------------------------
 set_uclamp() {
-	# set_uclamp <skupina> <min|max> <hodnota>
+	# set_uclamp <group> <min|max> <value>
 	[ -n "$3" ] || return 0
 	if ! valid_uclamp "$3"; then
-		vfail "neplatna uclamp hodnota '$3' pro $1/$2 (povoleno 0-100 nebo 'max')"
+		vfail "invalid uclamp value '$3' for $1/$2 (allowed: 0-100 or 'max')"
 		return 1
 	fi
 	wr "$CPUCTL/$1/cpu.uclamp.$2" "$3"
 }
 
 set_thermal_profile() {
-	# set_thermal_profile <senzor> <profil>
+	# set_thermal_profile <sensor> <profile>
 	if ! command -v setprop >/dev/null 2>&1; then
-		log ERROR "setprop neni k dispozici, thermal profil $1 nenastaven"
+		log ERROR "setprop is not available, the thermal profile $1 was not set"
 		return 1
 	fi
 	_old=$(getprop "vendor.thermal.$1.profile" 2>/dev/null)
@@ -1042,7 +1055,7 @@ set_thermal_profile() {
 set_io_readahead() {
 	[ -n "$1" ] || return 0
 	if ! is_int "$1"; then
-		vfail "neplatny IO_READAHEAD_KB '$1' (ocekavano cele cislo)"
+		vfail "invalid IO_READAHEAD_KB '$1' (expected a whole number)"
 		return 1
 	fi
 	for _d in $IO_DEVS; do
@@ -1053,7 +1066,7 @@ set_io_readahead() {
 }
 
 set_gpu() {
-	# set_gpu <max> <min> <policy>  (prazdne = nesahat)
+	# set_gpu <max> <min> <policy>  (empty = leave it alone)
 	_gmax="$1"
 	_gmin="$2"
 	_gpol="$3"
@@ -1062,17 +1075,17 @@ set_gpu() {
 		if valid_gpu_freq "$_gmax"; then
 			wr "$MALI/scaling_max_freq" "$_gmax"
 		else
-			vfail "GPU_MAX_FREQ '$_gmax' neni z povoleneho seznamu frekvenci"
+			vfail "GPU_MAX_FREQ '$_gmax' is not from the allowed frequency list"
 		fi
 	fi
 	if [ -n "$_gmin" ]; then
 		if valid_gpu_freq "$_gmin"; then
 			wr "$MALI/scaling_min_freq" "$_gmin"
 		else
-			vfail "GPU_MIN_FREQ '$_gmin' neni z povoleneho seznamu frekvenci"
+			vfail "GPU_MIN_FREQ '$_gmin' is not from the allowed frequency list"
 		fi
 	fi
-	# min mohl driv blokovat snizeni maxima - po zapisu min zkusime max znovu
+	# min may have blocked lowering the maximum earlier - after writing min we try max again
 	if [ -n "$_gmax" ] && [ -n "$_gmin" ] && valid_gpu_freq "$_gmax"; then
 		[ "$(rd_def "$MALI/scaling_max_freq" "")" = "$_gmax" ] || wr "$MALI/scaling_max_freq" "$_gmax"
 	fi
@@ -1080,19 +1093,19 @@ set_gpu() {
 		if valid_gpu_policy "$_gpol"; then
 			wr "$MALI/power_policy" "$_gpol"
 		else
-			vfail "GPU_POWER_POLICY '$_gpol' neplatna (coarse_demand|adaptive|always_on)"
+			vfail "GPU_POWER_POLICY '$_gpol' is invalid (coarse_demand|adaptive|always_on)"
 		fi
 	fi
 	return 0
 }
 
-# v2_valid <druh> <hodnota> - vrati 0 kdyz hodnota sedi na druh uzlu.
+# v2_valid <kind> <value> - returns 0 when the value fits the node kind.
 v2_valid() {
 	case "$1" in
 		int)      is_int "$2" ;;
 		bool01)   case "$2" in 0|1) return 0 ;; *) return 1 ;; esac ;;
 		enum1020) case "$2" in 10|20) return 0 ;; *) return 1 ;; esac ;;
-		load)     # dvojice celych cisel "N M"
+		load)     # a pair of whole numbers "N M"
 			case "$2" in
 				*[!0-9\ ]*) return 1 ;;
 				*' '*) is_int "${2%% *}" && is_int "${2##* }" ;;
@@ -1102,9 +1115,9 @@ v2_valid() {
 	esac
 }
 
-# set_v2 - nasadi klice kontraktu v2 z PF_* na uzly. Prazdne = nesahat.
-# Vola se z profile_apply() az PO restore_stock_values(), takze stock je
-# jiz obnoven a prazdny klic korektne znamena "nech stock".
+# set_v2 - deploys the v2 contract keys from PF_* onto the nodes. Empty = leave
+# it alone. Called from profile_apply() only AFTER restore_stock_values(), so the
+# stock is already restored and an empty key correctly means "keep the stock".
 set_v2() {
 	_e=""
 	for _e in $V2_TABLE; do
@@ -1117,31 +1130,31 @@ set_v2() {
 		if v2_valid "$_vkind" "$_vv"; then
 			wr "$_vp" "$_vv"
 		else
-			vfail "neplatna hodnota '$_vv' pro $_vk (druh $_vkind)"
+			vfail "invalid value '$_vv' for $_vk (kind $_vkind)"
 		fi
 	done
 
-	# THERMAL_CDEV_BYPASS - riziko 3, pise na TRI CPU cooling devices najednou.
-	# Zadny dodavany profil to nenastavuje; smysl ma jen kratkodobe s vlastni
-	# teplotni pojistkou. Prazdne = nesahat.
+	# THERMAL_CDEV_BYPASS - risk 3, writes to THREE CPU cooling devices at once.
+	# None of the shipped profiles sets it; it only makes sense briefly and with a
+	# thermal safeguard of your own. Empty = leave it alone.
 	if [ -n "$PF_THERMAL_CDEV_BYPASS" ]; then
 		if v2_valid bool01 "$PF_THERMAL_CDEV_BYPASS"; then
 			[ "$PF_THERMAL_CDEV_BYPASS" = "1" ] && \
-				log WARN "THERMAL_CDEV_BYPASS=1: VYPINAM skin-driven CPU throttling na 3 cdev (riziko 3, telefon se ohreje)"
+				log WARN "THERMAL_CDEV_BYPASS=1: DISABLING skin-driven CPU throttling on 3 cdevs (risk 3, the phone will get hot)"
 			for _bn in $CDEV_BYPASS_NODES; do
 				[ -e "$_bn" ] && wr "$_bn" "$PF_THERMAL_CDEV_BYPASS"
 			done
 		else
-			vfail "neplatny THERMAL_CDEV_BYPASS '$PF_THERMAL_CDEV_BYPASS' (0|1)"
+			vfail "invalid THERMAL_CDEV_BYPASS '$PF_THERMAL_CDEV_BYPASS' (0|1)"
 		fi
 	fi
 	return 0
 }
 
-# set_v2_volatile - zapise POUZE klice z V2_VOLATILE, tedy ty, ktere si power
-# HAL bere zpatky pri probuzeni displeje. Zbytek profilu se nedotyka: uclamp,
-# GPU strop a spol. drzi samy a prepisovat je znovu by bylo jen forkovani navic.
-# Ocekava uz nactene PF_* (viz profile_apply).
+# set_v2_volatile - writes ONLY the keys from V2_VOLATILE, i.e. those the power
+# HAL takes back on a display wake. It does not touch the rest of the profile:
+# uclamp, the GPU cap and friends hold by themselves and rewriting them would
+# just be extra forking. It expects PF_* to be loaded already (see profile_apply).
 set_v2_volatile() {
 	_e=""
 	for _vk in $V2_VOLATILE; do
@@ -1155,7 +1168,7 @@ set_v2_volatile() {
 			if v2_valid "$_vkind" "$_vv"; then
 				wr "$_vp" "$_vv"
 			else
-				vfail "neplatna hodnota '$_vv' pro $_vk (druh $_vkind)"
+				vfail "invalid value '$_vv' for $_vk (kind $_vkind)"
 			fi
 			break
 		done
@@ -1163,14 +1176,14 @@ set_v2_volatile() {
 	return 0
 }
 
-# set_vm_one <klic> <cesta> <hodnota>
+# set_vm_one <key> <path> <value>
 set_vm_one() {
 	[ -n "$3" ] || return 0
 	if is_int "$3"; then
 		wr "$2" "$3"
 		return 0
 	fi
-	vfail "neplatna hodnota '$3' pro $1 (ocekavano cele cislo)"
+	vfail "invalid value '$3' for $1 (expected a whole number)"
 	return 1
 }
 
@@ -1198,27 +1211,28 @@ cmd_profile() {
 			while [ "$#" -gt 0 ]; do
 				case "$1" in
 					--auto) _pauto=1 ;;
-					# --reset je prijimano jako NO-OP: reset na stock se dela
-					# VZDY (restore_stock_values() na zacatku profile_apply),
-					# takze profily nejsou lepive. Priznak existuje kvuli
-					# kontraktu s pxtune-auto, ktery si podporu --reset zjistuje
-					# za behu - bez nej by spadl do rezimu bez resetu a zbytecne
-					# varoval do logu.
+					# --reset is accepted as a NO-OP: the reset to stock happens
+					# ALWAYS (restore_stock_values() at the start of
+					# profile_apply), so profiles are not sticky. The flag exists
+					# for the contract with pxtune-auto, which detects --reset
+					# support at runtime - without it, it would fall back to the
+					# no-reset mode and warn into the log for nothing.
 					--reset) : ;;
-					# --overlay <pkg>: pred zapisem prebij klice profilu
-					# hodnotami APP_OVERLAY_* z apps/<pkg>.conf. Posila to
-					# demon, kdyz je v popredi aplikace s per-app pravidlem.
+					# --overlay <pkg>: before writing, override the profile keys
+					# with the APP_OVERLAY_* values from apps/<pkg>.conf. The
+					# daemon sends this when an app with a per-app rule is in the
+					# foreground.
 					--overlay)
 						shift
 						_poverlay="$1"
 						case "$_poverlay" in
 							''|.*|*/*|*[!A-Za-z0-9._]*)
-								warn "pxtune: --overlay chce jmeno balicku, ne '$_poverlay'"
+								warn "pxtune: --overlay wants a package name, not '$_poverlay'"
 								exit 1
 								;;
 						esac
 						;;
-					*) warn "pxtune: neznamy parametr '$1' (podporovano: --auto, --reset, --overlay <pkg>)"; exit 1 ;;
+					*) warn "pxtune: unknown parameter '$1' (supported: --auto, --reset, --overlay <pkg>)"; exit 1 ;;
 				esac
 				shift
 			done
@@ -1228,15 +1242,16 @@ cmd_profile() {
 }
 
 # ---------------------------------------------------------------------------
-# reapply - vrat zpet jen ty uzly, ktere si vzal power HAL
+# reapply - restore only the nodes the power HAL took over
 # ---------------------------------------------------------------------------
-# Vola to demon po kazdem rozsviceni obrazovky. Merenim doloneny duvod je
-# u V2_VOLATILE: probuzeni displeje vrati dvfs_headroom a OBA sched_pixel
-# limit_frequency na stock, cimz z powersave zmizi jeho dve nejucinnejsi paky.
+# The daemon calls this after every screen wake. The measurement-backed reason is
+# at V2_VOLATILE: a display wake returns dvfs_headroom and BOTH sched_pixel
+# limit_frequency values to stock, which removes powersave's two most effective
+# levers.
 #
-# Proc samostatny prikaz a ne `profile <aktivni>`: to by znamenalo cely revert
-# na stock a znovuzapis ~40 uzlu pri kazdem odemknuti telefonu. Tady jsou to
-# nejvys 4 zapisy a zadny revert, takze se to da volat casto a levne.
+# Why a separate command and not `profile <active>`: that would mean a full
+# revert to stock and rewriting ~40 nodes on every unlock of the phone. Here it
+# is at most 4 writes and no revert, so it can be called often and cheaply.
 cmd_reapply() {
 	_roverlay=""
 	while [ "$#" -gt 0 ]; do
@@ -1246,12 +1261,12 @@ cmd_reapply() {
 				_roverlay="$1"
 				case "$_roverlay" in
 					''|.*|*/*|*[!A-Za-z0-9._]*)
-						warn "pxtune: --overlay chce jmeno balicku, ne '$_roverlay'"
+						warn "pxtune: --overlay wants a package name, not '$_roverlay'"
 						exit 1
 						;;
 				esac
 				;;
-			*) warn "pxtune: neznamy parametr '$1' (podporovano: --overlay <pkg>)"; exit 1 ;;
+			*) warn "pxtune: unknown parameter '$1' (supported: --overlay <pkg>)"; exit 1 ;;
 		esac
 		shift
 	done
@@ -1260,7 +1275,7 @@ cmd_reapply() {
 	_ract="$V"
 	case "$_ract" in
 		''|.*|*/*|*[!A-Za-z0-9._-]*)
-			warn "pxtune: neznam aktivni profil ($ACTIVE_FILE), nemam co vracet"
+			warn "pxtune: I do not know the active profile ($ACTIVE_FILE), there is nothing to restore"
 			exit 2
 			;;
 	esac
@@ -1268,9 +1283,10 @@ cmd_reapply() {
 }
 
 profile_list() {
-	# VYKON: puvodne 3 forky na profil (basename + $(active_profile) + kv_get,
-	# ktery je sam `sed|tail|sed`). Vsechno jde bez forku: jmeno pres expanzi
-	# parametru, aktivni profil precteme jednou, popis vytahneme ctenim souboru.
+	# PERFORMANCE: originally 3 forks per profile (basename + $(active_profile) +
+	# kv_get, which is itself `sed|tail|sed`). All of it works fork-free: the name
+	# via parameter expansion, the active profile read once, the description pulled
+	# out by reading the file.
 	_found=0
 	rdv "$ACTIVE_FILE" "unknown"
 	_act="$V"
@@ -1290,13 +1306,13 @@ profile_list() {
 			_desc="$_pv"
 			break
 		done < "$_f"
-		# zarovnani bez printf (ten je na Androidu externi binarka)
+		# alignment without printf (on Android that is an external binary)
 		_pad="$_n"
 		while [ "${#_pad}" -lt 14 ]; do _pad="$_pad "; done
 		print -r -- "$_mark $_pad $_desc"
 	done
 	if [ "$_found" -eq 0 ]; then
-		warn "pxtune: v $PROFILE_DIR nejsou zadne profily (*.conf)"
+		warn "pxtune: there are no profiles (*.conf) in $PROFILE_DIR"
 		return 2
 	fi
 	return 0
@@ -1305,34 +1321,34 @@ profile_list() {
 profile_auto() {
 	if [ -f "$OVERRIDE_FILE" ]; then
 		rm -f "$OVERRIDE_FILE" 2>/dev/null
-		log INFO "manual_override zrusen, rizeni profilu vraceno automatu"
+		log INFO "manual_override cleared, profile control handed back to the daemon"
 	fi
-	# Rucni zaklad drzeny demonem behem per-app epizody uz nema smysl bez override.
+	# The manual base held by the daemon during a per-app episode makes no sense without the override.
 	rm -f "$STATE_DIR/manual_base" 2>/dev/null
-	# Demon zjisti zmenu az pri nejblizsi udalosti (prepnuti aplikace).
-	# SIGHUP mu rekne, at prehodnoti stav hned - jinak by se spravny profil
-	# nasadil treba az za nekolik minut.
+	# The daemon would only notice the change at the next event (an app switch).
+	# SIGHUP tells it to re-evaluate the state at once - otherwise the right
+	# profile might only be applied minutes later.
 	auto_signal HUP
-	msg "manual_override zrusen - profil ridi automat (auto=$(auto_state))"
+	msg "manual_override cleared - the daemon controls the profile (auto=$(auto_state))"
 	return 0
 }
 
-# auto_signal <signal> - posle signal bezicimu demonovi, pokud bezi.
-# Nikdy neselze tak, aby shodila volajiciho.
+# auto_signal <signal> - sends a signal to the running daemon, if it is running.
+# It never fails in a way that takes the caller down.
 auto_signal() {
 	_apid=$(rd "$AUTOD_PID" 2>/dev/null | tr -dc '0-9')
 	[ -n "$_apid" ] || return 0
 	[ -d "/proc/$_apid" ] || return 0
 	if kill -"$1" "$_apid" 2>/dev/null; then
-		log INFO "demonovi (pid $_apid) poslan SIG$1"
+		log INFO "SIG$1 sent to the daemon (pid $_apid)"
 	fi
 	return 0
 }
 
-# skin_mc_v -> V = skin teplota (quiet_therm) v milicelsiich, "" kdyz necitelne.
-# Cte pres stabilni symlink /dev/thermal/tz-by-name (indexy zon se posouvaji,
-# viz resolve_thermal_ids); fallback na resolvovany index skin: z THERMAL_ZONES.
-# Bez forku (rdv nastavuje globalni V).
+# skin_mc_v -> V = the skin temperature (quiet_therm) in millicelsius, "" when
+# unreadable. It reads via the stable symlink /dev/thermal/tz-by-name (zone
+# indices shift, see resolve_thermal_ids); the fallback is the resolved skin:
+# index from THERMAL_ZONES. Fork-free (rdv sets the global V).
 skin_mc_v() {
 	rdv "/dev/thermal/tz-by-name/quiet_therm/temp" ""
 	[ -n "$V" ] && return 0
@@ -1344,23 +1360,24 @@ skin_mc_v() {
 	return 0
 }
 
-# profile_apply <jmeno> <0|1 = volano automatem>
+# profile_apply <name> <0|1 = called by the daemon>
 profile_apply() {
 	_name="$1"
 	_auto="$2"
 	_overlay="$3"
-	# _volonly=1: rezim `pxtune reapply`. Profil se nacte uplne stejne (vcetne
-	# overlaye), ale zapisou se jen klice z V2_VOLATILE. Zadny revert, zadny
-	# zapis do 'active', zadne sahani na manual_override - stav profilu se
-	# nemeni, jen se vynuti zpatky to, co mezitim prepsal power HAL.
+	# _volonly=1: the `pxtune reapply` mode. The profile is loaded exactly the same
+	# way (including the overlay), but only the keys from V2_VOLATILE are written.
+	# No revert, no write into 'active', no touching manual_override - the profile
+	# state does not change, only what the power HAL overwrote in the meantime is
+	# forced back.
 	_volonly="$4"
 	case "$_name" in
-		*/*|.*|"") die 1 "neplatne jmeno profilu: '$_name'" ;;
+		*/*|.*|"") die 1 "invalid profile name: '$_name'" ;;
 	esac
 	_pf="$PROFILE_DIR/$_name.conf"
 	if [ ! -f "$_pf" ]; then
-		warn "pxtune: profil '$_name' neexistuje ($_pf)"
-		warn "        dostupne:"
+		warn "pxtune: profile '$_name' does not exist ($_pf)"
+		warn "        available:"
 		profile_list 1>&2
 		exit 1
 	fi
@@ -1368,28 +1385,30 @@ profile_apply() {
 	if [ "$_volonly" = "1" ]; then
 		WR_QUIET=1
 	elif [ "$_auto" = "1" ]; then
-		log INFO "=== aplikuji profil '$_name' (automat, manual_override se nemeni) ==="
+		log INFO "=== applying profile '$_name' (daemon, manual_override unchanged) ==="
 	else
-		log INFO "=== aplikuji profil '$_name' (rucne) ==="
+		log INFO "=== applying profile '$_name' (manual) ==="
 	fi
 	WR_OK=0
 	WR_FAIL=0
 	VAL_FAIL=0
 
-	# Nejdriv vse zpet na stock, aby profil nezdedil hodnoty po tom predchozim.
-	# Bez toho by prazdne klice ("nesahat") znamenaly, ze se predchozi profil
-	# jen castecne prekryje - viz komentar u restore_stock_values().
+	# Everything back to stock first, so the profile does not inherit values from
+	# the previous one. Without that, empty keys ("leave it alone") would mean the
+	# previous profile is only partly overlaid - see the comment at
+	# restore_stock_values().
 	[ "$_volonly" = "1" ] || restore_stock_values
 
-	# Profil nacteme JEDNOU do promennych PF_* (bez forku). Nejdriv je vsechny
-	# vynulujeme, aby po predchozim profilu nezustala viset stara hodnota.
+	# The profile is loaded ONCE into the PF_* variables (fork-free). We zero them
+	# all first, so no old value is left hanging from the previous profile.
 	# shellcheck disable=SC2086
 	for _pk in $PROFILE_KEYS; do
 		eval "PF_$_pk="
 		eval "PFSET_$_pk=0"
 	done
-	# PFSET_* rozlisuje "klic v profilu chybi" od "klic je prazdny" - to je
-	# u THERMAL_PROFILE_* podstatne (prazdna hodnota = vratit na default).
+	# PFSET_* distinguishes "the key is missing from the profile" from "the key is
+	# empty" - which matters for THERMAL_PROFILE_* (an empty value = return to the
+	# default).
 	while IFS='=' read -r _pk _pv; do
 		case "$_pk" in
 			''|\#*)          continue ;;
@@ -1410,18 +1429,20 @@ profile_apply() {
 		eval "PFSET_$_pk=1"
 	done < "$_pf"
 
-	# --- VRSTVA 2 per-app: overlay ------------------------------------------
-	# APP_OVERLAY_<klic> z apps/<pkg>.conf prebiji stejnojmenny klic profilu,
-	# a to POUZE po dobu, co je ten balicek v popredi.
+	# --- PER-APP LAYER 2: the overlay ---------------------------------------
+	# APP_OVERLAY_<key> from apps/<pkg>.conf overrides the profile key of the same
+	# name, and ONLY while that package is in the foreground.
 	#
-	# Proc se to dela PRAVE TADY: profil uz je nacteny v PF_*, ale jeste se nic
-	# nezapsalo. Overlay tedy projde uplne stejnou validaci (set_uclamp,
-	# set_gpu, set_vm, ...) jako hodnoty z profilu - zadna druha cesta zapisu
-	# nevznika a `wr()` zustava jedinym mistem, kudy se do sysfs pise.
+	# Why it is done RIGHT HERE: the profile is already loaded into PF_*, but
+	# nothing has been written yet. The overlay therefore goes through exactly the
+	# same validation (set_uclamp, set_gpu, set_vm, ...) as the values from the
+	# profile - no second write path appears and `wr()` remains the only place
+	# that writes into sysfs.
 	#
-	# NAVRAT JE ZDARMA: restore_stock_values() vyse uz probehl a probehne znovu
-	# pri kazdem dalsim profile_apply(). Overlay se tedy nemuze "zaseknout" -
-	# presne proto je vrstva 2 postavena na profilech a ne na vlastnim stavu.
+	# THE RESTORE IS FREE: restore_stock_values() above has already run and will
+	# run again on every further profile_apply(). The overlay therefore cannot get
+	# "stuck" - which is exactly why layer 2 is built on profiles rather than on
+	# state of its own.
 	_ovn=0
 	if [ -n "$_overlay" ] && [ -f "$APPDIR/$_overlay.conf" ]; then
 		while IFS='=' read -r _ok _ov; do
@@ -1432,7 +1453,7 @@ profile_apply() {
 			case "$_ok" in *[!A-Za-z0-9_]*) continue ;; esac
 			# shellcheck disable=SC2086
 			if ! in_list "$_ok" $PROFILE_KEYS; then
-				log WARN "overlay $_overlay: '$_ok' neni klic kontraktu profilu, ignoruji"
+				log WARN "overlay $_overlay: '$_ok' is not a profile contract key, ignoring"
 				continue
 			fi
 			_ov="${_ov%%#*}"
@@ -1449,24 +1470,24 @@ profile_apply() {
 			eval "PF_$_ok=\$_ov"
 			eval "PFSET_$_ok=1"
 			_ovn=$((_ovn + 1))
-			[ "$_volonly" = "1" ] || log INFO "overlay $_overlay: $_ok='$_ov' prebiji profil '$_name'"
+			[ "$_volonly" = "1" ] || log INFO "overlay $_overlay: $_ok='$_ov' overrides profile '$_name'"
 		done < "$APPDIR/$_overlay.conf"
-		[ "$_ovn" -eq 0 ] && [ "$_volonly" != "1" ] && log INFO "overlay $_overlay: zadny APP_OVERLAY_* klic"
+		[ "$_ovn" -eq 0 ] && [ "$_volonly" != "1" ] && log INFO "overlay $_overlay: no APP_OVERLAY_* key"
 	elif [ -n "$_overlay" ]; then
-		log WARN "overlay: pravidlo pro '$_overlay' neexistuje ($APPDIR/$_overlay.conf), profil '$_name' se aplikuje beze zmeny"
+		log WARN "overlay: no rule for '$_overlay' ($APPDIR/$_overlay.conf), profile '$_name' is applied unchanged"
 	fi
 
-	# Rezim reapply konci tady: profil i overlay jsou nactene, zapisi se jen
-	# uzly, ktere si mezitim vzal HAL zpatky.
+	# The reapply mode ends here: the profile and the overlay are loaded, and only
+	# the nodes the HAL has taken back in the meantime are written.
 	if [ "$_volonly" = "1" ]; then
 		WR_CHANGED=0
 		set_v2_volatile
 		WR_QUIET=0
 		if [ "$WR_CHANGED" -gt 0 ]; then
-			log INFO "reapply: $WR_CHANGED z ${WR_OK} tekavych uzlu profilu '$_name'${_overlay:+ (overlay $_overlay)} vraceno zpet (prepsal je power HAL)"
-			msg "reapply: vraceno $WR_CHANGED tekavych uzlu profilu '$_name'."
+			log INFO "reapply: $WR_CHANGED of ${WR_OK} volatile nodes of profile '$_name'${_overlay:+ (overlay $_overlay)} restored (the power HAL had overwritten them)"
+			msg "reapply: restored $WR_CHANGED volatile nodes of profile '$_name'."
 		else
-			msg "reapply: nic vracet netreba, vsech $WR_OK tekavych uzlu profilu '$_name' sedi."
+			msg "reapply: nothing to restore, all $WR_OK volatile nodes of profile '$_name' match."
 		fi
 		[ "$WR_FAIL" -gt 0 ] && return 2
 		[ "$VAL_FAIL" -gt 0 ] && return 2
@@ -1484,20 +1505,22 @@ profile_apply() {
 
 	set_gpu "$PF_GPU_MAX_FREQ" "$PF_GPU_MIN_FREQ" "$PF_GPU_POWER_POLICY"
 
-	# Pozor: prop si nastavuje i system (napr. "camera" kdyz bezi fotak).
-	# Prazdna hodnota = "nesahat" (kontrakt profilu), default se nevynucuje.
+	# Caution: the prop is also set by the system (e.g. "camera" while the camera
+	# runs). An empty value = "leave it alone" (the profile contract); the default
+	# is not enforced.
 	_tm="$PF_THERMAL_PROFILE_CPU_MID"
 	_th="$PF_THERMAL_PROFILE_CPU_HIGH"
 
-	# --- THERMAL_PROFILE_MAX_SKIN (°C) - pojistka proti "hrani na slunci" -----
-	# game.conf nastavuje thermal prop na "game", coz VYPINA CPU thermal
-	# throttling ze 2 ze 4 skin senzoru (SPEC: "Mode":"game" -> cdev Disabled).
-	# Kdyz je THERMAL_PROFILE_MAX_SKIN neprazdne a skin (quiet_therm) uz je NAD
-	# touhle teplotou, hodnotu "game" NENASADIME - jinak bychom za horka telefon
-	# uvarili. Ostatni hodnoty ("camera", "" = default) nejsou nebezpecne, ty
-	# pojistka nechava projit. Prazdny klic = pojistka vypnuta.
-	# Runtime dohled resi demon (therm_prop_maxskin_guard); tohle je kontrola
-	# v okamziku APLIKACE profilu.
+	# --- THERMAL_PROFILE_MAX_SKIN (°C) - the "gaming in the sun" safeguard ----
+	# game.conf sets the thermal prop to "game", which DISABLES CPU thermal
+	# throttling from 2 of the 4 skin sensors (SPEC: "Mode":"game" -> cdev
+	# Disabled). When THERMAL_PROFILE_MAX_SKIN is non-empty and the skin
+	# (quiet_therm) is already ABOVE that temperature, the value "game" is NOT
+	# DEPLOYED - otherwise we would cook the phone while it is hot. The other
+	# values ("camera", "" = default) are not dangerous and the safeguard lets
+	# them through. An empty key = the safeguard is off.
+	# Runtime supervision is the daemon's job (therm_prop_maxskin_guard); this is
+	# the check at the moment the profile is APPLIED.
 	_skin_over=0
 	if [ -n "$PF_THERMAL_PROFILE_MAX_SKIN" ] && is_int "$PF_THERMAL_PROFILE_MAX_SKIN"; then
 		skin_mc_v
@@ -1508,20 +1531,20 @@ profile_apply() {
 
 	if [ "$PFSET_THERMAL_PROFILE_CPU_MID" = "1" ] && [ -n "$_tm" ]; then
 		if [ "$_skin_over" = "1" ] && [ "$_tm" = "game" ]; then
-			log WARN "THERMAL_PROFILE_CPU_MID='game' NENASAZEN: skin nad THERMAL_PROFILE_MAX_SKIN=${PF_THERMAL_PROFILE_MAX_SKIN} C (jinak by za horka zustalo VYPNUTE CPU thermal throttling)"
+			log WARN "THERMAL_PROFILE_CPU_MID='game' NOT DEPLOYED: the skin is above THERMAL_PROFILE_MAX_SKIN=${PF_THERMAL_PROFILE_MAX_SKIN} C (otherwise CPU thermal throttling would stay OFF while hot)"
 		elif valid_thermal_profile "$_tm"; then
 			set_thermal_profile "$THERMAL_SENSOR_MID" "$_tm"
 		else
-			vfail "neplatny THERMAL_PROFILE_CPU_MID '$_tm' (game|camera|prazdne)"
+			vfail "invalid THERMAL_PROFILE_CPU_MID '$_tm' (game|camera|empty)"
 		fi
 	fi
 	if [ "$PFSET_THERMAL_PROFILE_CPU_HIGH" = "1" ] && [ -n "$_th" ]; then
 		if [ "$_skin_over" = "1" ] && [ "$_th" = "game" ]; then
-			log WARN "THERMAL_PROFILE_CPU_HIGH='game' NENASAZEN: skin nad THERMAL_PROFILE_MAX_SKIN=${PF_THERMAL_PROFILE_MAX_SKIN} C (jinak by za horka zustalo VYPNUTE CPU thermal throttling)"
+			log WARN "THERMAL_PROFILE_CPU_HIGH='game' NOT DEPLOYED: the skin is above THERMAL_PROFILE_MAX_SKIN=${PF_THERMAL_PROFILE_MAX_SKIN} C (otherwise CPU thermal throttling would stay OFF while hot)"
 		elif valid_thermal_profile "$_th"; then
 			set_thermal_profile "$THERMAL_SENSOR_HIGH" "$_th"
 		else
-			vfail "neplatny THERMAL_PROFILE_CPU_HIGH '$_th' (game|camera|prazdne)"
+			vfail "invalid THERMAL_PROFILE_CPU_HIGH '$_th' (game|camera|empty)"
 		fi
 	fi
 
@@ -1537,24 +1560,24 @@ profile_apply() {
 		if valid_charge "$_cs"; then
 			wr "$CHARGER/charge_stop_level" "$_cs"
 		else
-			vfail "neplatny CHARGE_STOP_LEVEL '$_cs' (povoleno 1-100)"
+			vfail "invalid CHARGE_STOP_LEVEL '$_cs' (allowed 1-100)"
 		fi
 	fi
 
-	# Klice kontraktu v2 (vendor_sched, sched_pixel/limit+down_rate, devfreq,
-	# cpupm residency, GPU dvfs_period, cdev bypass). Prazdne = nesahat.
+	# The v2 contract keys (vendor_sched, sched_pixel/limit+down_rate, devfreq,
+	# cpupm residency, GPU dvfs_period, cdev bypass). Empty = leave them alone.
 	set_v2
 
 	print -r -- "$_name" > "$ACTIVE_FILE" 2>/dev/null
 
 	if [ "$_auto" = "1" ]; then
-		log INFO "profil '$_name' aplikovan automatem (ok=$WR_OK chyb=$WR_FAIL neplatnych=$VAL_FAIL)"
-		msg "Profil '$_name' aplikovan (automat). Zapisu OK: $WR_OK, chyb: $WR_FAIL, neplatnych hodnot: $VAL_FAIL."
+		log INFO "profile '$_name' applied by the daemon (ok=$WR_OK errors=$WR_FAIL invalid=$VAL_FAIL)"
+		msg "Profile '$_name' applied (daemon). Writes OK: $WR_OK, errors: $WR_FAIL, invalid values: $VAL_FAIL."
 	else
 		: > "$OVERRIDE_FILE" 2>/dev/null
-		log INFO "profil '$_name' aplikovan rucne (ok=$WR_OK chyb=$WR_FAIL neplatnych=$VAL_FAIL), manual_override nastaven"
-		msg "Profil '$_name' aplikovan. Zapisu OK: $WR_OK, chyb: $WR_FAIL, neplatnych hodnot: $VAL_FAIL."
-		msg "manual_override nastaven (automat do profilu nemluvi). Zrusis: pxtune profile auto"
+		log INFO "profile '$_name' applied manually (ok=$WR_OK errors=$WR_FAIL invalid=$VAL_FAIL), manual_override set"
+		msg "Profile '$_name' applied. Writes OK: $WR_OK, errors: $WR_FAIL, invalid values: $VAL_FAIL."
+		msg "manual_override set (the daemon has no say in the profile). Clear it with: pxtune profile auto"
 	fi
 
 	[ "$WR_FAIL" -gt 0 ] && return 2
@@ -1570,11 +1593,11 @@ cmd_revert() {
 	WR_FAIL=0
 
 	if stock_valid; then
-		msg "Vracim stock hodnoty z $STOCK_CONF"
-		log INFO "=== revert ze stock.conf ==="
+		msg "Restoring the stock values from $STOCK_CONF"
+		log INFO "=== revert from stock.conf ==="
 	else
-		warn "pxtune: stock.conf chybi nebo je poskozeny - pouzivam vychozi hodnoty ze SPEC"
-		log WARN "=== revert: stock.conf nepouzitelny, fallback na SPEC defaulty ==="
+		warn "pxtune: stock.conf is missing or corrupted - using the default values from the SPEC"
+		log WARN "=== revert: stock.conf unusable, falling back to the SPEC defaults ==="
 	fi
 
 	# uclamp
@@ -1591,7 +1614,7 @@ cmd_revert() {
 		[ -n "$_vmax" ] && wr "$CPUCTL/$_g/cpu.uclamp.max" "$_vmax"
 	done
 
-	# GPU: nejdriv min dolu, pak max nahoru (aby se nebranily navzajem)
+	# GPU: min down first, then max up (so they do not block each other)
 	stock_getv STOCK_GPU_MIN_FREQ "$DEF_GPU_MIN"; _gmin="$SV"
 	stock_getv STOCK_GPU_MAX_FREQ "$DEF_GPU_MAX"; _gmax="$SV"
 	stock_getv STOCK_GPU_POWER_POLICY "$DEF_GPU_POLICY"; _gpol="$SV"
@@ -1600,7 +1623,7 @@ cmd_revert() {
 	valid_gpu_policy "$_gpol" || _gpol="$DEF_GPU_POLICY"
 	wr "$MALI/scaling_min_freq" "$_gmin"
 	wr "$MALI/scaling_max_freq" "$_gmax"
-	# hint_max_freq se zalohuje ve snapshot_stock, tak ho i vracime
+	# hint_max_freq is backed up in snapshot_stock, so we restore it as well
 	stock_getv STOCK_GPU_HINT_MAX_FREQ ""; _ghint="$SV"
 	if [ -n "$_ghint" ] && valid_gpu_freq "$_ghint"; then
 		wr "$MALI/hint_max_freq" "$_ghint"
@@ -1614,7 +1637,7 @@ cmd_revert() {
 	stock_getv STOCK_VM_VFS_CACHE_PRESSURE "$DEF_VFS_CACHE_PRESSURE"; _v="$SV"; is_int "$_v" || _v="$DEF_VFS_CACHE_PRESSURE"; wr /proc/sys/vm/vfs_cache_pressure "$_v"
 	stock_getv STOCK_VM_PAGE_CLUSTER "$DEF_PAGE_CLUSTER"; _v="$SV";             is_int "$_v" || _v="$DEF_PAGE_CLUSTER";       wr /proc/sys/vm/page-cluster "$_v"
 
-	# nabijeni
+	# charging
 	stock_getv STOCK_CHARGE_STOP_LEVEL "$DEF_CHARGE_STOP"; _v="$SV";   valid_charge "$_v" || _v="$DEF_CHARGE_STOP"
 	wr "$CHARGER/charge_stop_level" "$_v"
 	stock_getv STOCK_CHARGE_START_LEVEL "$DEF_CHARGE_START"; _v="$SV"; is_int "$_v" || _v="$DEF_CHARGE_START"
@@ -1628,7 +1651,7 @@ cmd_revert() {
 		[ -n "$_v" ] && is_int "$_v" && wr "/sys/block/$_d/queue/read_ahead_kb" "$_v"
 	done
 
-	# thermal HAL profily
+	# thermal HAL profiles
 	stock_getv STOCK_THERMAL_PROFILE_CPU_MID "$DEF_THERMAL_PROFILE"; _v="$SV"
 	valid_thermal_profile "$_v" || _v="$DEF_THERMAL_PROFILE"
 	set_thermal_profile "$THERMAL_SENSOR_MID" "$_v"
@@ -1636,9 +1659,9 @@ cmd_revert() {
 	valid_thermal_profile "$_v" || _v="$DEF_THERMAL_PROFILE"
 	set_thermal_profile "$THERMAL_SENSOR_HIGH" "$_v"
 
-	# kontrakt v2 - vrat nove uzly na stock. Ze stock.conf, jinak DEF_V2_*
-	# (stary snapshot z doby pred v2 tyhle klice nema). Uzly, ktere na tomhle
-	# buildu neexistuji, se preskoci ([ -e ]).
+	# contract v2 - restore the new nodes to stock. From stock.conf, otherwise
+	# DEF_V2_* (an old snapshot from before v2 does not have these keys). Nodes
+	# that do not exist on this build are skipped ([ -e ]).
 	for _e in $V2_TABLE; do
 		_vk="${_e%%:*}"; _vrest="${_e#*:}"; _vp="${_vrest%:*}"; _vkind="${_vrest##*:}"
 		eval "_vdef=\$DEF_V2_$_vk"
@@ -1647,83 +1670,85 @@ cmd_revert() {
 		v2_valid "$_vkind" "$_v" || _v="$_vdef"
 		[ -n "$_v" ] && [ -e "$_vp" ] && wr "$_vp" "$_v"
 	done
-	# THERMAL_CDEV_BYPASS: revert vzdy VYPNE (0) - bezpecny smer, at uz ho
-	# nastavil kdokoli. Stock je 0.
+	# THERMAL_CDEV_BYPASS: a revert always DISABLES it (0) - the safe direction,
+	# whoever set it. The stock value is 0.
 	for _bn in $CDEV_BYPASS_NODES; do
 		[ -e "$_bn" ] && wr "$_bn" "0"
 	done
 
-	# Pri pouziti jako "reset pred profilem" tady koncime: rozliseni ani
-	# stavove soubory se nesmi sahat, to je vec plneho revertu.
+	# When used as a "reset before a profile" we stop here: neither the resolution
+	# nor the state files may be touched, that is the business of a full revert.
 	if [ "${RESTORE_ONLY:-0}" = "1" ]; then
 		return 0
 	fi
 
-	# --- VRSTVA 3 per-app: sundat DRIV, nez zapiseme stock displej ----------
-	# "Vrat VSECHNO na stock" zahrnuje i vrstvu 3 nasazenou per-app pravidlem
-	# (refresh rate, rozliseni). `app leave` je IDEMPOTENTNI, takze se smi
-	# volat naslepo - kdyz nic nasazeno neni, tise skonci s kodem 0.
-	# Tohle je 6. z SESTI nezavislych cest, ktere ho musi volat; ostatnich pet
-	# je v demonovi a v service.sh. Vycet a duvody viz komentar u cmd_leave()
-	# v bin/pxtune-perapp.
-	# Poradi je podstatne: leave zapisuje stary displej, takze musi probehnout
-	# PRED res_write_settings() nize - jinak by prepsal stock hodnotu.
+	# --- PER-APP LAYER 3: take it down BEFORE we write the stock display ----
+	# "Restore EVERYTHING to stock" includes layer 3 deployed by a per-app rule
+	# (refresh rate, resolution). `app leave` is IDEMPOTENT, so it may be called
+	# blindly - when nothing is deployed it quietly exits with code 0.
+	# This is the 6th of the SIX independent paths that must call it; the other
+	# five are in the daemon and in service.sh. The list and the reasons are in
+	# the comment at cmd_leave() in bin/pxtune-perapp.
+	# The order matters: leave writes the old display values, so it has to run
+	# BEFORE res_write_settings() below - otherwise it would overwrite the stock
+	# value.
 	if [ -x "$PERAPP" ]; then
 		"$PERAPP" leave >/dev/null 2>&1
 	elif [ -f "$APPMODE" ]; then
-		log ERROR "$PERAPP neni spustitelny - appmode.active mazu bez navratu vrstvy 3 (rozliseni/refresh muze zustat po per-app pravidle)"
+		log ERROR "$PERAPP is not executable - deleting appmode.active without restoring layer 3 (the resolution/refresh rate may be left over from a per-app rule)"
 		rm -f "$APPMODE" 2>/dev/null
 	fi
 
-	# displej
+	# display
 	stock_getv STOCK_DISPLAY_SIZE_FORCED "$DEF_DISPLAY_SIZE"; _size="$SV"
 	stock_getv STOCK_DISPLAY_DENSITY_FORCED "$DEF_DISPLAY_DENSITY"; _dens="$SV"
 	res_write_settings "$_size" "$_dens"
 	rm -f "$RESPEND_FILE" 2>/dev/null
 
-	# stav
-	# Zamerne PRAZDNE, ne "stock": profiles/stock.conf neexistuje a service.sh
-	# by kazdy boot logoval ERROR "profil 'stock' neexistuje". Prazdno uz umi
-	# zpracovat jako "nic neaplikuj".
+	# state
+	# Deliberately EMPTY, not "stock": profiles/stock.conf does not exist and
+	# service.sh would log ERROR "profile 'stock' does not exist" on every boot.
+	# It already handles empty as "apply nothing".
 	{ : > "$ACTIVE_FILE"; } 2>/dev/null
 	: > "$OVERRIDE_FILE" 2>/dev/null
-	# Rucni zaklad per-app epizody je soucast "vseho na stock" - jinak by ho
-	# demon po revertu omylem obnovil misto cerstve pripnuteho stavu.
+	# The manual base of a per-app episode is part of "everything to stock" -
+	# otherwise the daemon would restore it after the revert instead of the freshly
+	# pinned state.
 	rm -f "$STATE_DIR/manual_base" 2>/dev/null
 
-	log INFO "revert dokoncen (zapisu ok=$WR_OK chyb=$WR_FAIL)"
-	msg "Revert dokoncen. Zapisu OK: $WR_OK, chyb: $WR_FAIL."
-	msg "manual_override nastaven, aby automat hned nezapsal jiny profil."
-	msg "POZNAMKA: zram se za behu nemeni (swapoff je nebezpecny) - zmeny jen v post-fs-data.sh."
+	log INFO "revert finished (writes ok=$WR_OK errors=$WR_FAIL)"
+	msg "Revert finished. Writes OK: $WR_OK, errors: $WR_FAIL."
+	msg "manual_override was set so the daemon does not immediately write another profile."
+	msg "NOTE: zram is not changed at runtime (a swapoff is dangerous) - changes only in post-fs-data.sh."
 	[ "$WR_FAIL" -gt 0 ] && return 2
 	return 0
 }
 
-# restore_stock_values - vrati vsechny profilem ovladane hodnoty na stock,
-# ale NESAHA na rozliseni ani na stavove soubory.
+# restore_stock_values - returns all profile-controlled values to stock, but
+# DOES NOT TOUCH the resolution or the state files.
 #
-# Proc to existuje: prazdna hodnota v profilu znamena "nesahat" (kontrakt
-# profilu). Bez tohohle resetu by profily byly "lepive" - po prepnuti
-# z powersave na balanced (ktery ma vsechny klice prazdne) by zustaly
-# hodnoty z powersave a balanced by nevratil stock, jak slibuje.
-# Overeno na zarizeni: prepnuti powersave -> balanced nechalo top-app
-# uclamp.max na 60 misto 'max'.
+# Why it exists: an empty value in a profile means "leave it alone" (the profile
+# contract). Without this reset the profiles would be "sticky" - after switching
+# from powersave to balanced (which has all keys empty) the values from powersave
+# would remain and balanced would not restore stock as it promises.
+# Verified on the device: switching powersave -> balanced left top-app
+# uclamp.max at 60 instead of 'max'.
 restore_stock_values() {
 	_rsv_ok="$WR_OK"
 	_rsv_fail="$WR_FAIL"
 	RESTORE_ONLY=1
 	cmd_revert >/dev/null 2>&1
 	RESTORE_ONLY=0
-	# zapisy z resetu se nepocitaji do statistiky profilu
+	# writes from the reset do not count towards the profile statistics
 	WR_OK="$_rsv_ok"
 	WR_FAIL="$_rsv_fail"
 	return 0
 }
 
 # ---------------------------------------------------------------------------
-# res - rozliseni / DPI
+# res - resolution / DPI
 # ---------------------------------------------------------------------------
-# res_split <polozka> -> nastavi _pn _pw _ph _pd
+# res_split <item> -> sets _pn _pw _ph _pd
 res_split() {
 	_pn=${1%%:*}
 	_pr=${1#*:}
@@ -1733,7 +1758,7 @@ res_split() {
 	_pd=${_pr##*:}
 }
 
-# res_lookup <jmeno|WxH|W> -> "W H DPI"
+# res_lookup <name|WxH|W> -> "W H DPI"
 res_lookup() {
 	for _p in $RES_PRESETS; do
 		res_split "$_p"
@@ -1755,12 +1780,12 @@ res_preset_names() {
 	print -rn -- "${_out# }"
 }
 
-# display_state_write <W> <H> <DPI> - cache pro status --json (bez binderu)
+# display_state_write <W> <H> <DPI> - a cache for status --json (no binder)
 display_state_write() {
 	printf '%s %s %s\n' "$1" "$2" "$3" > "$DISPSTATE_FILE" 2>/dev/null
 }
 
-# display_state_read -> "W H DPI"; fallback nativni + hustota z stock.conf/getprop
+# display_state_read -> "W H DPI"; the fallback is native + the density from stock.conf/getprop
 display_state_read() {
 	_ds=$(rd "$DISPSTATE_FILE") || _ds=""
 	if [ -n "$_ds" ]; then
@@ -1780,15 +1805,15 @@ res_write_settings() {
 	_sz="$1"
 	_dp="$2"
 	if ! framework_ok; then
-		warn "pxtune: prikaz 'settings' neni k dispozici (nebo je framework zakazany)"
-		log ERROR "settings nedostupny, rozliseni nezmeneno"
+		warn "pxtune: the 'settings' command is not available (or the framework is disabled)"
+		log ERROR "settings unavailable, the resolution was not changed"
 		return 2
 	fi
 
 	if [ -z "$_sz" ]; then
 		settings_run delete global display_size_forced \
 			|| settings_run put global display_size_forced ""
-		log INFO "settings global display_size_forced -> (smazano/prazdne)"
+		log INFO "settings global display_size_forced -> (deleted/empty)"
 	else
 		settings_run put global display_size_forced "$_sz"
 		log INFO "settings global display_size_forced -> '$_sz'"
@@ -1800,10 +1825,10 @@ res_write_settings() {
 	else
 		settings_run delete secure display_density_forced \
 			|| settings_run put secure display_density_forced ""
-		log INFO "settings secure display_density_forced -> (smazano/prazdne)"
+		log INFO "settings secure display_density_forced -> (deleted/empty)"
 	fi
 
-	# cache pro status --json
+	# a cache for status --json
 	if [ -z "$_sz" ]; then
 		_cw="$NATIVE_W"; _ch="$NATIVE_H"
 	else
@@ -1819,7 +1844,7 @@ res_write_settings() {
 	return 0
 }
 
-# res_pending_seconds -> kolik sekund zbyva do automatickeho navratu (0 = nic nebezi)
+# res_pending_seconds -> how many seconds remain until the automatic revert (0 = nothing is running)
 res_pending_seconds() {
 	if [ ! -f "$RESPEND_FILE" ]; then
 		printf '0'
@@ -1841,14 +1866,14 @@ res_pending_seconds() {
 res_current() {
 	_s=$(settings_get global display_size_forced)
 	_d=$(settings_get secure display_density_forced)
-	[ -n "$_s" ] || _s="(prazdne = nativni ${NATIVE_W}x${NATIVE_H})"
-	[ -n "$_d" ] || _d="(prazdne)"
+	[ -n "$_s" ] || _s="(empty = native ${NATIVE_W}x${NATIVE_H})"
+	[ -n "$_d" ] || _d="(empty)"
 	msg "display_size_forced   : $_s"
 	msg "display_density_forced: $_d"
 	if [ -f "$RESPEND_FILE" ]; then
-		msg "res_pending           : ANO - zbyva $(res_pending_seconds) s na 'pxtune res confirm'"
+		msg "res_pending           : YES - $(res_pending_seconds) s left to run 'pxtune res confirm'"
 	else
-		msg "res_pending           : ne"
+		msg "res_pending           : no"
 	fi
 }
 
@@ -1863,7 +1888,7 @@ cmd_res() {
 			return 0
 			;;
 		list)
-			msg "Dostupne presety:"
+			msg "Available presets:"
 			for _p in $RES_PRESETS; do
 				res_split "$_p"
 				printf '  %-10s %sx%s @ %s dpi\n' "$_pn" "$_pw" "$_ph" "$_pd"
@@ -1873,49 +1898,50 @@ cmd_res() {
 		confirm)
 			if [ -f "$RESPEND_FILE" ]; then
 				rm -f "$RESPEND_FILE" 2>/dev/null
-				log INFO "res confirm - zmena rozliseni potvrzena, watchdog zrusen"
-				msg "Rozliseni potvrzeno, automaticky navrat zrusen."
+				log INFO "res confirm - the resolution change was confirmed, the watchdog was cancelled"
+				msg "The resolution was confirmed, the automatic revert was cancelled."
 			else
-				msg "Nic k potvrzeni (res_pending neexistuje)."
+				msg "Nothing to confirm (res_pending does not exist)."
 			fi
 			return 0
 			;;
 		reset)
 			rm -f "$RESPEND_FILE" 2>/dev/null
-			log INFO "res reset - slepy navrat na nativni ${NATIVE_W}x${NATIVE_H} @ ${NATIVE_DPI}dpi"
+			log INFO "res reset - a blind return to native ${NATIVE_W}x${NATIVE_H} @ ${NATIVE_DPI}dpi"
 			res_apply_native || return 2
-			msg "Nastaveno nativni ${NATIVE_W}x${NATIVE_H} @ ${NATIVE_DPI} dpi."
+			msg "Set to native ${NATIVE_W}x${NATIVE_H} @ ${NATIVE_DPI} dpi."
 			return 0
 			;;
 	esac
 
 	if ! _r=$(res_lookup "$1"); then
-		warn "pxtune: neznamy preset rozliseni '$1'"
-		warn "        pouzij: pxtune res list  (presety: $(res_preset_names))"
+		warn "pxtune: unknown resolution preset '$1'"
+		warn "        use: pxtune res list  (presets: $(res_preset_names))"
 		exit 1
 	fi
 	# shellcheck disable=SC2086
 	set -- $_r
 	_w="$1"; _h="$2"; _d="$3"
 
-	log INFO "res: nastavuji ${_w}x${_h} @ ${_d}dpi"
+	log INFO "res: setting ${_w}x${_h} @ ${_d}dpi"
 	res_write_settings "$_w,$_h" "$_d" || return 2
 
 	if [ "$_w" = "$NATIVE_W" ] && [ "$_h" = "$NATIVE_H" ] && [ "$_d" = "$NATIVE_DPI" ]; then
 		rm -f "$RESPEND_FILE" 2>/dev/null
-		msg "Nastaveno nativni ${_w}x${_h} @ ${_d} dpi (bez pojistky)."
+		msg "Set to native ${_w}x${_h} @ ${_d} dpi (no safeguard)."
 		return 0
 	fi
 
-	# POJISTKA: res_pending + odlozeny navrat na nativni za RES_TIMEOUT sekund.
-	# Token = "<epoch vzniku>-<pid>"; z epochy se pocita i res_pending_seconds.
+	# THE SAFEGUARD: res_pending + a delayed return to native after RES_TIMEOUT
+	# seconds. The token = "<creation epoch>-<pid>"; res_pending_seconds is
+	# computed from that epoch too.
 	_tok="$(date '+%s' 2>/dev/null)-$$"
 	print -r -- "$_tok" > "$RESPEND_FILE" 2>/dev/null
 	res_arm_watchdog "$_tok"
 
-	msg "Nastaveno ${_w}x${_h} @ ${_d} dpi."
-	msg "POJISTKA: pokud do ${RES_TIMEOUT} s nespustis 'pxtune res confirm',"
-	msg "          rozliseni se vrati na nativni ${NATIVE_W}x${NATIVE_H} @ ${NATIVE_DPI} dpi."
+	msg "Set to ${_w}x${_h} @ ${_d} dpi."
+	msg "SAFEGUARD: if you do not run 'pxtune res confirm' within ${RES_TIMEOUT} s,"
+	msg "           the resolution returns to native ${NATIVE_W}x${NATIVE_H} @ ${NATIVE_DPI} dpi."
 	return 0
 }
 
@@ -1934,58 +1960,59 @@ res_arm_watchdog() {
 			/system/bin/sh "$SELF" __res_watchdog "$_tok" >/dev/null 2>&1 &
 		fi
 	fi
-	log INFO "res watchdog nasazen (token=$_tok, timeout=${RES_TIMEOUT}s)"
+	log INFO "res watchdog armed (token=$_tok, timeout=${RES_TIMEOUT}s)"
 }
 
 res_watchdog() {
 	_tok="$1"
 	sleep "$RES_TIMEOUT"
 	if [ ! -f "$RESPEND_FILE" ]; then
-		log INFO "res watchdog ($_tok): potvrzeno, nic nedelam"
+		log INFO "res watchdog ($_tok): confirmed, doing nothing"
 		return 0
 	fi
 	_cur=$(rd "$RESPEND_FILE") || _cur=""
 	if [ "$_cur" != "$_tok" ]; then
-		log INFO "res watchdog ($_tok): mezitim prisla novejsi zmena ($_cur), koncim"
+		log INFO "res watchdog ($_tok): a newer change arrived in the meantime ($_cur), exiting"
 		return 0
 	fi
-	log WARN "res watchdog ($_tok): potvrzeni neprislo, vracim nativni rozliseni"
+	log WARN "res watchdog ($_tok): no confirmation arrived, restoring the native resolution"
 	res_apply_native
 	rm -f "$RESPEND_FILE" 2>/dev/null
 	return 0
 }
 
 # ---------------------------------------------------------------------------
-# dpi - samostatna zmena hustoty displeje (nezavisle na rozliseni)
+# dpi - changing the display density on its own (independently of the resolution)
 #
-# MECHANISMUS (overeno na zarizeni 2026-08-07):
-#   `wm density <n>`  -> Override density: n  A ZAROVEN zapise
+# THE MECHANISM (verified on the device 2026-08-07):
+#   `wm density <n>`  -> Override density: n  AND AT THE SAME TIME writes
 #                        settings secure display_density_forced = n
-#   `wm density reset` -> override zrusi
+#   `wm density reset` -> clears the override
 #
-#   POZOR: samotny `settings put secure display_density_forced` se NEPROJEVI.
-#   Overeno: zapis 380 nechal Override na 353. WindowManager musi hodnotu
-#   aplikovat, a to dela prave prikaz `wm`. Klic v settings je jen misto, kam
-#   si ji WM uklada pro pristi boot.
+#   CAUTION: `settings put secure display_density_forced` on its own HAS NO
+#   EFFECT. Verified: writing 380 left the Override at 353. WindowManager has to
+#   apply the value, and that is exactly what the `wm` command does. The settings
+#   key is only where WM stores it for the next boot.
 #
-# HODNOTY
-#   Fyzicka hustota panelu je 420 (ro.sf.lcd_density).
-#   Uzivatel ma vlastni override 353 (mensi = vic obsahu na obrazovce).
-#   Rozsah 280-560 je zamerne konzervativni: pod 280 zacina byt UI necitelne
-#   drobne a systemove dialogy se rozbijeji, nad 560 se nevejdou tlacitka.
+# VALUES
+#   The physical panel density is 420 (ro.sf.lcd_density).
+#   The user has their own override of 353 (lower = more content on screen).
+#   The 280-560 range is deliberately conservative: below 280 the UI starts to be
+#   illegibly small and system dialogs break, above 560 the buttons do not fit.
 #
-# POJISTKA
-#   Stejna jako u rozliseni: po zmene se ceka na `pxtune dpi confirm`.
-#   Bez potvrzeni se do DPI_TIMEOUT sekund vrati puvodni hodnota - takze i
-#   kdyz se UI stane neovladatelnym, samo se to opravi.
-#   Slepy navrat odkudkoli:  su -c "pxtune dpi reset"
+# THE SAFEGUARD
+#   The same as for the resolution: after a change it waits for
+#   `pxtune dpi confirm`. Without a confirmation the original value is restored
+#   within DPI_TIMEOUT seconds - so even if the UI becomes unusable, it fixes
+#   itself.
+#   A blind restore from anywhere:  su -c "pxtune dpi reset"
 # ---------------------------------------------------------------------------
 DPI_MIN=280
 DPI_MAX=560
 DPI_TIMEOUT=60
 DPIPEND_FILE="$STATE_DIR/dpi_pending"
 
-# dpi_current -> aktualni ucinna hustota (Override, jinak fyzicka)
+# dpi_current -> the current effective density (the Override, otherwise the physical one)
 dpi_current() {
 	stock_getv STOCK_DISPLAY_DENSITY_FORCED ""
 	_dc="$SV"
@@ -2004,9 +2031,9 @@ dpi_current() {
 }
 
 dpi_apply() {
-	# dpi_apply <hodnota|reset>
+	# dpi_apply <value|reset>
 	if ! framework_ok; then
-		warn "pxtune: prikaz 'wm' neni k dispozici (system jeste nenabehl?)"
+		warn "pxtune: the 'wm' command is not available (has the system finished booting?)"
 		return 2
 	fi
 	if [ "$1" = "reset" ]; then
@@ -2031,13 +2058,13 @@ dpi_watchdog() {
 	_tok="$1"
 	_old="$2"
 	sleep "$DPI_TIMEOUT"
-	[ -f "$DPIPEND_FILE" ] || { log INFO "dpi watchdog ($_tok): potvrzeno"; return 0; }
+	[ -f "$DPIPEND_FILE" ] || { log INFO "dpi watchdog ($_tok): confirmed"; return 0; }
 	_cur=$(rd "$DPIPEND_FILE") || _cur=""
 	case "$_cur" in
 		"$_tok"*) ;;
-		*) log INFO "dpi watchdog ($_tok): prisla novejsi zmena, koncim"; return 0 ;;
+		*) log INFO "dpi watchdog ($_tok): a newer change arrived, exiting"; return 0 ;;
 	esac
-	log WARN "dpi watchdog ($_tok): potvrzeni neprislo, vracim $_old"
+	log WARN "dpi watchdog ($_tok): no confirmation arrived, restoring $_old"
 	dpi_apply "$_old"
 	rm -f "$DPIPEND_FILE" 2>/dev/null
 	return 0
@@ -2046,33 +2073,33 @@ dpi_watchdog() {
 cmd_dpi() {
 	case "${1:-}" in
 		""|show|current)
-			msg "aktualni hustota : $(dpi_current) dpi"
-			msg "fyzicka panelu   : $NATIVE_DPI_HW dpi"
-			msg "povoleny rozsah  : $DPI_MIN - $DPI_MAX"
+			msg "current density  : $(dpi_current) dpi"
+			msg "physical panel   : $NATIVE_DPI_HW dpi"
+			msg "allowed range    : $DPI_MIN - $DPI_MAX"
 			if [ -f "$DPIPEND_FILE" ]; then
-				msg "POZOR: ceka na potvrzeni - 'pxtune dpi confirm' (jinak se to vrati)"
+				msg "CAUTION: waiting for confirmation - 'pxtune dpi confirm' (otherwise it reverts)"
 			fi
 			return 0
 			;;
 		confirm)
 			if [ -f "$DPIPEND_FILE" ]; then
 				rm -f "$DPIPEND_FILE" 2>/dev/null
-				msg "Potvrzeno, hustota $(dpi_current) dpi zustava."
+				msg "Confirmed, the density of $(dpi_current) dpi stays."
 			else
-				msg "Nic k potvrzeni."
+				msg "Nothing to confirm."
 			fi
 			return 0
 			;;
 		reset)
-			# slepy navrat - funguje i kdyz uzivatel na displej nevidi
+			# a blind restore - it works even when the user cannot see the display
 			stock_getv STOCK_DISPLAY_DENSITY_FORCED ""
 			_rd="$SV"
 			if is_int "$_rd"; then
 				dpi_apply "$_rd"
-				msg "Vraceno na ulozenou hustotu $_rd dpi."
+				msg "Restored to the stored density of $_rd dpi."
 			else
 				dpi_apply reset
-				msg "Override zrusen, plati fyzicka hustota $NATIVE_DPI_HW dpi."
+				msg "The override was cleared, the physical density of $NATIVE_DPI_HW dpi applies."
 			fi
 			rm -f "$DPIPEND_FILE" 2>/dev/null
 			return 0
@@ -2081,12 +2108,12 @@ cmd_dpi() {
 
 	_nd="$1"
 	if ! is_int "$_nd"; then
-		warn "pxtune: pouziti: pxtune dpi <$DPI_MIN-$DPI_MAX | show | confirm | reset>"
+		warn "pxtune: usage: pxtune dpi <$DPI_MIN-$DPI_MAX | show | confirm | reset>"
 		exit 1
 	fi
 	if [ "$_nd" -lt "$DPI_MIN" ] || [ "$_nd" -gt "$DPI_MAX" ]; then
-		warn "pxtune: $_nd je mimo bezpecny rozsah $DPI_MIN-$DPI_MAX"
-		warn "        Mimo nej se UI stava neovladatelnym."
+		warn "pxtune: $_nd is outside the safe range $DPI_MIN-$DPI_MAX"
+		warn "        Outside it the UI becomes unusable."
 		exit 1
 	fi
 
@@ -2102,9 +2129,9 @@ cmd_dpi() {
 	fi
 	log INFO "dpi $_old -> $_nd (watchdog $_tok, timeout ${DPI_TIMEOUT}s)"
 
-	msg "Hustota nastavena na $_nd dpi (bylo $_old)."
-	msg "POJISTKA: do ${DPI_TIMEOUT} s spust 'pxtune dpi confirm',"
-	msg "          jinak se to samo vrati na $_old."
+	msg "The density was set to $_nd dpi (it was $_old)."
+	msg "SAFEGUARD: run 'pxtune dpi confirm' within ${DPI_TIMEOUT} s,"
+	msg "           otherwise it reverts to $_old by itself."
 	return 0
 }
 
@@ -2125,25 +2152,25 @@ cmd_charge() {
 	esac
 
 	if ! valid_charge "$_val"; then
-		warn "pxtune: neplatna hodnota '$1' - povoleno 1-100 nebo 'off'"
+		warn "pxtune: invalid value '$1' - allowed 1-100 or 'off'"
 		exit 1
 	fi
 
 	if wr "$_node" "$_val"; then
-		msg "charge_stop_level nastaven na $_val %."
+		msg "charge_stop_level was set to $_val %."
 		return 0
 	fi
-	warn "pxtune: zapis charge_stop_level selhal (viz log)"
+	warn "pxtune: writing charge_stop_level failed (see the log)"
 	return 2
 }
 
 # ---------------------------------------------------------------------------
-# game - obalka nad 'cmd game'
+# game - a wrapper around 'cmd game'
 # ---------------------------------------------------------------------------
 cmd_game() {
 	case "${1:-}" in
 		''|*[!A-Za-z0-9._]*)
-			warn "pxtune: neplatne jmeno balicku '${1:-}'"
+			warn "pxtune: invalid package name '${1:-}'"
 			exit 1 ;;
 	esac
 	_pkg="$1"
@@ -2152,13 +2179,13 @@ cmd_game() {
 	[ "$#" -ge 1 ] && shift
 
 	if [ -z "$_pkg" ]; then
-		warn "pxtune: pouziti: pxtune game <package> <1|2|3|4|standard|performance|battery|custom>"
-		warn "                 pxtune game <package>            # vypis rezimu a konfigu"
+		warn "pxtune: usage: pxtune game <package> <1|2|3|4|standard|performance|battery|custom>"
+		warn "               pxtune game <package>            # list the modes and configs"
 		warn "                 pxtune game <package> <mode> [--fps N] [--downscale 0.5..0.9|disable]"
 		exit 1
 	fi
 	if ! command -v cmd >/dev/null 2>&1; then
-		warn "pxtune: prikaz 'cmd' neni k dispozici"
+		warn "pxtune: the 'cmd' command is not available"
 		return 2
 	fi
 
@@ -2173,7 +2200,7 @@ cmd_game() {
 	case "$_mode" in
 		1|2|3|4|standard|performance|battery|custom) ;;
 		*)
-			warn "pxtune: neplatny rezim '$_mode' (1|2|3|4|standard|performance|battery|custom)"
+			warn "pxtune: invalid mode '$_mode' (1|2|3|4|standard|performance|battery|custom)"
 			exit 1
 			;;
 	esac
@@ -2189,18 +2216,18 @@ cmd_game() {
 			--fps)
 				shift
 				_fps="$1"
-				is_int "$_fps" || { warn "pxtune: --fps chce cele cislo"; exit 1; }
+				is_int "$_fps" || { warn "pxtune: --fps wants a whole number"; exit 1; }
 				;;
 			--downscale)
 				shift
 				_ds="$1"
 				case "$_ds" in
 					disable|0.[5-9]|0.[5-9]0) ;;
-					*) warn "pxtune: --downscale chce 0.5..0.9 nebo 'disable' (pod 0.5 se rozbiji dotyk u her)"; exit 1 ;;
+					*) warn "pxtune: --downscale wants 0.5..0.9 or 'disable' (below 0.5 touch input breaks in games)"; exit 1 ;;
 				esac
 				;;
 			*)
-				warn "pxtune: neznamy parametr '$1'"
+				warn "pxtune: unknown parameter '$1'"
 				exit 1
 				;;
 		esac
@@ -2214,34 +2241,37 @@ cmd_game() {
 }
 
 # ---------------------------------------------------------------------------
-# zram - AKCE nad zram0 (ne profil)
+# zram - ACTIONS on zram0 (not a profile)
 #
-# `pxtune zram writeback [sekundy]` - odsune komprimovane stranky, ktere jsou
-# necinne >= <sekundy> (default 3600 = 1 h), na backing device (loop50), a tim
-# uvolni RAM. Je to AKCE, ne nastaveni (jako wake_lock), proto CLI a ne profil.
+# `pxtune zram writeback [seconds]` - moves compressed pages that have been idle
+# for >= <seconds> (default 3600 = 1 h) onto the backing device (loop50) and
+# thereby frees RAM. It is an ACTION, not a setting (like wake_lock), hence a CLI
+# command and not a profile key.
 #
-# Bezpecnost UFS: writeback_limit_enable=1 + writeback_limit stropuje pocet
-# zapsanych stranek na 65536 (po 4 KiB = ~256 MiB / beh), aby se opakovanym
-# spoustenim zbytecne neopotreboval flash. Uzly idle/writeback jsou write-only
-# (prava 220), takze wr() u nich nemuze precist starou hodnotu (zaloguje '?') -
-# to je v poradku, jen se vzdy zapise. bd_stat je citelny, logujeme pred/po.
+# UFS safety: writeback_limit_enable=1 + writeback_limit caps the number of
+# written pages at 65536 (at 4 KiB each = ~256 MiB per run), so repeated runs do
+# not wear the flash needlessly. The idle/writeback nodes are write-only
+# (permissions 220), so wr() cannot read the old value from them (it logs '?') -
+# that is fine, it simply always writes. bd_stat is readable, so we log it
+# before/after.
 #
-# NENI to nebezpecne jako swapoff (SPEC): writeback jen presouva stranky na disk,
-# swap zustava aktivni. Proto smi bezet za behu, na rozdil od zmen velikosti zramu.
+# This is NOT dangerous like a swapoff (SPEC): writeback only moves pages to
+# disk, swap stays active. It may therefore run at runtime, unlike zram size
+# changes.
 # ---------------------------------------------------------------------------
 zram_writeback() {
 	_age="${1:-3600}"
 	if ! is_int "$_age"; then
-		warn "pxtune: zram writeback <sekundy> chce cele cislo (vek necinnosti), vychozi 3600"
+		warn "pxtune: zram writeback <seconds> wants a whole number (the idle age), the default is 3600"
 		exit 1
 	fi
 	if [ ! -d "$ZRAM" ]; then
-		warn "pxtune: $ZRAM neexistuje"
+		warn "pxtune: $ZRAM does not exist"
 		return 2
 	fi
 	if [ ! -e "$ZRAM/writeback" ]; then
-		warn "pxtune: zram writeback neni podporovan (chybi $ZRAM/writeback - neni nastaveny backing_dev?)"
-		log ERROR "zram writeback: $ZRAM/writeback neexistuje"
+		warn "pxtune: zram writeback is not supported (missing $ZRAM/writeback - is backing_dev not set?)"
+		log ERROR "zram writeback: $ZRAM/writeback does not exist"
 		return 2
 	fi
 
@@ -2249,39 +2279,40 @@ zram_writeback() {
 	WR_FAIL=0
 
 	_bd_before=$(rd_def "$ZRAM/bd_stat" "n/a")
-	log INFO "=== zram writeback (vek >= ${_age}s) === bd_stat pred: $_bd_before"
+	log INFO "=== zram writeback (age >= ${_age}s) === bd_stat before: $_bd_before"
 
-	# Strop tohoto behu: 65536 stranek po 4 KiB = ~256 MiB. Konzervativne, aby
-	# se pri opakovanem volani zbytecne neopotreboval UFS.
+	# The cap for this run: 65536 pages of 4 KiB = ~256 MiB. Conservative, so that
+	# repeated calls do not wear the UFS needlessly.
 	wr "$ZRAM/writeback_limit_enable" 1
 	wr "$ZRAM/writeback_limit" 65536
-	# idle a writeback jsou WRITE-ONLY (0220). wr() je pred zapisem cte (rdv),
-	# coz na write-only uzlu vyhodi "Permission denied" na stderr. Pisem proto
-	# primo, se spravnym poradim redirekci (2>/dev/null uvnitr {}). Uspech
-	# poznat z bd_stat pred/po, ne ze zpetneho cteni.
+	# idle and writeback are WRITE-ONLY (0220). wr() reads them before writing
+	# (rdv), which on a write-only node throws "Permission denied" to stderr. We
+	# therefore write directly, with the correct redirection order (2>/dev/null
+	# inside {}). Success is judged from bd_stat before/after, not from a read
+	# back.
 	if { print -r -- "$_age" > "$ZRAM/idle"; } 2>/dev/null; then
 		WR_OK=$((WR_OK + 1))
-		log INFO "wr: $ZRAM/idle <- '$_age' (write-only, bez zpetneho cteni)"
+		log INFO "wr: $ZRAM/idle <- '$_age' (write-only, no read back)"
 	else
 		WR_FAIL=$((WR_FAIL + 1))
-		log ERROR "wr: zapis do $ZRAM/idle selhal (vek $_age)"
+		log ERROR "wr: the write into $ZRAM/idle failed (age $_age)"
 	fi
 	if { print -r -- idle > "$ZRAM/writeback"; } 2>/dev/null; then
 		WR_OK=$((WR_OK + 1))
-		log INFO "wr: $ZRAM/writeback <- 'idle' (write-only, bez zpetneho cteni)"
+		log INFO "wr: $ZRAM/writeback <- 'idle' (write-only, no read back)"
 	else
 		WR_FAIL=$((WR_FAIL + 1))
-		log ERROR "wr: zapis do $ZRAM/writeback selhal"
+		log ERROR "wr: the write into $ZRAM/writeback failed"
 	fi
 
 	_bd_after=$(rd_def "$ZRAM/bd_stat" "n/a")
-	log INFO "=== zram writeback hotovo (ok=$WR_OK chyb=$WR_FAIL) === bd_stat po: $_bd_after"
+	log INFO "=== zram writeback done (ok=$WR_OK errors=$WR_FAIL) === bd_stat after: $_bd_after"
 
-	msg "zram writeback: stranky necinne >= ${_age}s oznaceny a zapsany na backing device."
-	msg "  strop tohoto behu : 65536 stranek (~256 MiB)"
-	msg "  bd_stat pred      : $_bd_before"
-	msg "  bd_stat po        : $_bd_after"
-	msg "  (bd_stat = 'bd_count bd_reads bd_writes' ve 4KiB strankach)"
+	msg "zram writeback: pages idle for >= ${_age}s were marked and written to the backing device."
+	msg "  cap for this run : 65536 pages (~256 MiB)"
+	msg "  bd_stat before   : $_bd_before"
+	msg "  bd_stat after    : $_bd_after"
+	msg "  (bd_stat = 'bd_count bd_reads bd_writes' in 4KiB pages)"
 	[ "$WR_FAIL" -gt 0 ] && return 2
 	return 0
 }
@@ -2293,35 +2324,36 @@ cmd_zram() {
 			zram_writeback "$@"
 			;;
 		""|*)
-			warn "pxtune: pouziti: pxtune zram writeback [sekundy]   (vychozi 3600 = 1 h)"
+			warn "pxtune: usage: pxtune zram writeback [seconds]   (the default is 3600 = 1 h)"
 			exit 1
 			;;
 	esac
 }
 
 # ---------------------------------------------------------------------------
-# dexopt - obalka nad `pm compile -m speed -f <pkg>`
+# dexopt - a wrapper around `pm compile -m speed -f <pkg>`
 #
-# Prekompiluje balicek do plne AOT (speed), coz zrychli beh za cenu mista
-# a jednorazoveho CPU/tepla. `pm` je BINDER klient -> vzdy s timeoutem a jen
-# kdyz uz nabehl framework. NIKDY nevolat z demona (blokujici, forkujici binder).
+# Recompiles a package to full AOT (speed), which speeds up execution at the cost
+# of space and a one-off burst of CPU/heat. `pm` is a BINDER client -> always with
+# a timeout and only once the framework is up. NEVER call it from the daemon
+# (a blocking, forking binder call).
 # ---------------------------------------------------------------------------
 cmd_dexopt() {
 	_pkg="${1:-}"
 	case "$_pkg" in
 		''|*[!A-Za-z0-9._]*)
-			warn "pxtune: dexopt chce platne jmeno balicku, ne '${_pkg}'"
-			warn "        pouziti: pxtune dexopt <package>"
+			warn "pxtune: dexopt wants a valid package name, not '${_pkg}'"
+			warn "        usage: pxtune dexopt <package>"
 			exit 1
 			;;
 	esac
 	if ! command -v pm >/dev/null 2>&1; then
-		warn "pxtune: prikaz 'pm' neni k dispozici"
+		warn "pxtune: the 'pm' command is not available"
 		return 2
 	fi
 	if ! framework_ok; then
-		warn "pxtune: framework jeste nenabehl (pm je binder) - zkus pozdeji"
-		log ERROR "dexopt $_pkg: framework nedostupny"
+		warn "pxtune: the framework is not up yet (pm is binder) - try later"
+		log ERROR "dexopt $_pkg: the framework is unavailable"
 		return 2
 	fi
 
@@ -2335,31 +2367,32 @@ cmd_dexopt() {
 	[ -n "$_out" ] && msg "$_out"
 	log INFO "dexopt $_pkg -> rc=$_rc: $_out"
 	if [ "$_rc" -ne 0 ]; then
-		warn "pxtune: pm compile skoncil s kodem $_rc"
+		warn "pxtune: pm compile exited with code $_rc"
 		return 2
 	fi
 	return 0
 }
 
 # ---------------------------------------------------------------------------
-# thermal - vysvetleni aktualniho stavu skinu vuci prahum VIRTUAL-SKIN
+# thermal - explains the current skin state against the VIRTUAL-SKIN thresholds
 #
-# HORKA CESTA (WebUI to muze volat): akumuluj do promenne, vypis JEDNIM print,
-# zadny printf/mc_to_c (fork). Prahy jsou ze SPEC/probe-analiza (mC):
-#   LIGHT-ODPM 37/39 | CPU-MID 39/41 | CPU-HIGH 41/43/52 | GPU 43/45/46,5/52
-#   hystereze 1,9 C (HotHysteresis)
+# A HOT PATH (the WebUI may call it): accumulate into a variable, print with a
+# SINGLE print, no printf/mc_to_c (forks). The thresholds come from
+# SPEC/probe-analysis (mC):
+#   LIGHT-ODPM 37/39 | CPU-MID 39/41 | CPU-HIGH 41/43/52 | GPU 43/45/46.5/52
+#   hysteresis 1.9 C (HotHysteresis)
 # ---------------------------------------------------------------------------
 thermal_explain() {
 	skin_mc_v
 	if ! is_int "$V"; then
-		warn "pxtune: skin (quiet_therm) se nepodarilo precist"
+		warn "pxtune: the skin (quiet_therm) could not be read"
 		return 2
 	fi
 	_sk="$V"
-	# skin je kladny => bezforkovy prepocet na °C s jednim desetinnym mistem
+	# the skin is positive => a fork-free conversion to °C with one decimal place
 	_skc="$((_sk / 1000)).$(( (_sk % 1000) / 100 ))"
 
-	# nejblizsi prah NAD aktualnim skinem
+	# the nearest threshold ABOVE the current skin
 	_next=""
 	for _t in 37000 39000 41000 43000 45000 46500 52000; do
 		if [ "$_t" -gt "$_sk" ]; then _next="$_t"; break; fi
@@ -2367,35 +2400,35 @@ thermal_explain() {
 
 	_o="=== pxtune thermal explain ==="
 	_o="$_o
-skin (quiet_therm): $_skc C   (rozhoduje o skrceni, ne junction)"
+skin (quiet_therm): $_skc C   (this decides the throttling, not the junction)"
 
 	if [ -z "$_next" ]; then
 		_o="$_o
-Skin je nad nejvyssim prahem 52,0 C - CPU-HIGH i GPU skrti KRITICKY."
+The skin is above the highest threshold of 52.0 C - both CPU-HIGH and GPU are throttling CRITICALLY."
 		print -r -- "$_o"
 		return 0
 	fi
 
-	# kolik °C zbyva k dalsimu prahu
+	# how many °C remain to the next threshold
 	_d=$((_next - _sk))
 	_dc="$((_d / 1000)).$(( (_d % 1000) / 100 ))"
 	_nc="$((_next / 1000)).$(( (_next % 1000) / 100 ))"
 
 	case "$_next" in
-		37000) _lbl="VIRTUAL-SKIN-CPU-LIGHT-ODPM (1. stupen)"; _cool="CPU cooling (thermal-cpufreq-0/1/2)" ;;
+		37000) _lbl="VIRTUAL-SKIN-CPU-LIGHT-ODPM (1st step)"; _cool="CPU cooling (thermal-cpufreq-0/1/2)" ;;
 		39000) _lbl="VIRTUAL-SKIN-CPU-MID (1) + LIGHT-ODPM (2)"; _cool="CPU cooling (thermal-cpufreq-0/1/2)" ;;
-		41000) _lbl="VIRTUAL-SKIN-CPU-MID (2) + CPU-HIGH (1)"; _cool="CPU cooling, silnejsi strop (thermal-cpufreq-0/1/2)" ;;
+		41000) _lbl="VIRTUAL-SKIN-CPU-MID (2) + CPU-HIGH (1)"; _cool="CPU cooling, a tighter cap (thermal-cpufreq-0/1/2)" ;;
 		43000) _lbl="VIRTUAL-SKIN-CPU-HIGH (2) + GPU (1)"; _cool="CPU (thermal-cpufreq-0/1/2) + GPU (thermal-gpufreq-0)" ;;
 		45000) _lbl="VIRTUAL-SKIN-GPU (2)"; _cool="GPU cooling (thermal-gpufreq-0)" ;;
 		46500) _lbl="VIRTUAL-SKIN-GPU (3)"; _cool="GPU cooling (thermal-gpufreq-0)" ;;
-		52000) _lbl="VIRTUAL-SKIN-CPU-HIGH (3) + GPU (4)"; _cool="CPU + GPU, KRITICKE skrceni" ;;
+		52000) _lbl="VIRTUAL-SKIN-CPU-HIGH (3) + GPU (4)"; _cool="CPU + GPU, CRITICAL throttling" ;;
 	esac
 
 	_o="$_o
-nejblizsi prah    : $_nc C  (zbyva $_dc C)
-  spusti senzor   : $_lbl
-  priskrti        : $_cool
-hystereze         : 1,9 C (skrceni povoli az pri poklesu ~1,9 C pod prah)"
+next threshold    : $_nc C  ($_dc C to go)
+  triggers sensor : $_lbl
+  will throttle   : $_cool
+hysteresis        : 1.9 C (throttling is released only ~1.9 C below the threshold)"
 	print -r -- "$_o"
 	return 0
 }
@@ -2404,56 +2437,56 @@ cmd_thermal() {
 	case "${1:-}" in
 		explain) thermal_explain ;;
 		""|*)
-			warn "pxtune: pouziti: pxtune thermal explain"
+			warn "pxtune: usage: pxtune thermal explain"
 			exit 1
 			;;
 	esac
 }
 
 # ---------------------------------------------------------------------------
-# auto - prepinac adaptivniho demona (NEZAVISLY na manual_override)
+# auto - the adaptive daemon switch (INDEPENDENT of manual_override)
 # ---------------------------------------------------------------------------
 cmd_auto() {
 	case "$1" in
 		on)
 			printf 'on\n' > "$AUTO_FILE" 2>/dev/null
-			log INFO "auto zapnut"
-			# Samotny soubor demona nespusti - je potreba ho nastartovat.
+			log INFO "auto enabled"
+			# The file alone does not start the daemon - it has to be launched.
 			if [ -x "$AUTOD" ]; then
 				"$AUTOD" start >/dev/null 2>&1 \
-					&& msg "Adaptivni automat: ZAPNUT (demon spusten)" \
-					|| msg "Adaptivni automat: ZAPNUT (demona se nepodarilo spustit, viz log)"
+					&& msg "Adaptive daemon: ENABLED (daemon started)" \
+					|| msg "Adaptive daemon: ENABLED (the daemon could not be started, see the log)"
 			else
-				msg "Adaptivni automat: ZAPNUT (demon $AUTOD nenalezen)"
+				msg "Adaptive daemon: ENABLED (the daemon $AUTOD was not found)"
 			fi
 			;;
 		off)
 			printf 'off\n' > "$AUTO_FILE" 2>/dev/null
-			log INFO "auto vypnut"
+			log INFO "auto disabled"
 			if [ -x "$AUTOD" ]; then
 				"$AUTOD" stop >/dev/null 2>&1
 			fi
-			msg "Adaptivni automat: VYPNUT"
+			msg "Adaptive daemon: DISABLED"
 			;;
 		""|status)
 			msg "auto            : $(auto_state)"
 			if [ -x "$AUTOD" ]; then
 				_apid=$(rd "$AUTOD_PID" 2>/dev/null | tr -dc '0-9')
 				if [ -n "$_apid" ] && [ -d "/proc/$_apid" ]; then
-					msg "demon           : bezi (pid $_apid)"
+					msg "daemon          : running (pid $_apid)"
 				else
-					msg "demon           : nebezi"
+					msg "daemon          : not running"
 				fi
 			fi
 			if [ -f "$OVERRIDE_FILE" ]; then
-				msg "manual_override : ANO (uzivatel zamkl profil rucne)"
+				msg "manual_override : YES (the user pinned the profile by hand)"
 			else
-				msg "manual_override : ne"
+				msg "manual_override : no"
 			fi
-			msg "aktivni profil  : $(active_profile)"
+			msg "active profile  : $(active_profile)"
 			;;
 		*)
-			warn "pxtune: pouziti: pxtune auto <on|off|status>"
+			warn "pxtune: usage: pxtune auto <on|off|status>"
 			exit 1
 			;;
 	esac
@@ -2467,14 +2500,14 @@ cmd_log() {
 	_n=50
 	if [ "$1" = "-n" ]; then
 		shift
-		is_int "$1" || { warn "pxtune: -n chce cele cislo"; exit 1; }
+		is_int "$1" || { warn "pxtune: -n wants a whole number"; exit 1; }
 		_n="$1"
 	elif [ -n "$1" ]; then
-		warn "pxtune: pouziti: pxtune log [-n N]"
+		warn "pxtune: usage: pxtune log [-n N]"
 		exit 1
 	fi
 	if [ ! -f "$LOG_FILE" ]; then
-		warn "pxtune: log neexistuje: $LOG_FILE"
+		warn "pxtune: the log does not exist: $LOG_FILE"
 		return 2
 	fi
 	tail -n "$_n" "$LOG_FILE"
@@ -2482,7 +2515,7 @@ cmd_log() {
 }
 
 # ---------------------------------------------------------------------------
-# status - spolecne cteni
+# status - the shared reads
 # ---------------------------------------------------------------------------
 # zram_stat -> "orig compr mem_used"
 zram_stat() {
@@ -2493,7 +2526,7 @@ zram_stat() {
 	printf '%s %s %s' "${1:-}" "${2:-}" "${3:-}"
 }
 
-# policy_cap_khz <cdev_id> <seznam frekvenci> -> aktualni tepelny strop v kHz
+# policy_cap_khz <cdev_id> <frequency list> -> the current thermal cap in kHz
 policy_cap_khz() {
 	_cs=$(rd_def "$THERMAL/cooling_device$1/cur_state" "")
 	# shellcheck disable=SC2086
@@ -2502,14 +2535,14 @@ policy_cap_khz() {
 
 status_text() {
 	msg "=== pxtune $PXTUNE_VERSION ==="
-	msg "profil          : $(active_profile)"
-	if [ -f "$OVERRIDE_FILE" ]; then msg "manual_override : ANO"; else msg "manual_override : ne"; fi
+	msg "profile         : $(active_profile)"
+	if [ -f "$OVERRIDE_FILE" ]; then msg "manual_override : YES"; else msg "manual_override : no"; fi
 	msg "auto            : $(auto_state)"
-	[ -f "$DISABLE_FILE" ] && msg "DISABLE         : ANO (modul je vypnuty)"
-	[ -f "$RESPEND_FILE" ] && msg "res_pending     : ANO (zbyva $(res_pending_seconds) s)"
+	[ -f "$DISABLE_FILE" ] && msg "DISABLE         : YES (the module is off)"
+	[ -f "$RESPEND_FILE" ] && msg "res_pending     : YES ($(res_pending_seconds) s left)"
 	msg ""
 
-	msg "--- Teploty (kernelove sysfs zony) ---"
+	msg "--- Temperatures (kernel sysfs zones) ---"
 	for _z in $THERMAL_ZONES; do
 		_zn=${_z%%:*}
 		_zi=${_z##*:}
@@ -2520,16 +2553,16 @@ status_text() {
 			printf '  %-10s (zone%-2s) %6s\n' "$_zn" "$_zi" "n/a"
 		fi
 	done
-	msg "  VIRTUAL-SKIN*: preskoceno (dumpsys thermalservice pod su visi na binderu)"
+	msg "  VIRTUAL-SKIN*: skipped (dumpsys thermalservice hangs on binder under su)"
 	msg ""
 
-	msg "--- CPU (governor sched_pixel, scaling_max_freq je 0444 = read-only) ---"
+	msg "--- CPU (the sched_pixel governor; scaling_max_freq is 0444 = read-only) ---"
 	status_cpu_line policy0 "Little 4xA510" "$FREQ_P0" "$CDEV_P0"
 	status_cpu_line policy4 "Big 4xA715"    "$FREQ_P4" "$CDEV_P4"
 	status_cpu_line policy8 "Prime 1xX3"    "$FREQ_P8" "$CDEV_P8"
 	msg ""
 
-	msg "--- Cooling devices (rizeni ma thermal HAL, jen cteme) ---"
+	msg "--- Cooling devices (controlled by the thermal HAL, we only read) ---"
 	status_cdev_line "$CDEV_P0"  "thermal-cpufreq-0" policy0 "$FREQ_P0"
 	status_cdev_line "$CDEV_P4"  "thermal-cpufreq-1" policy4 "$FREQ_P4"
 	status_cdev_line "$CDEV_P8"  "thermal-cpufreq-2" policy8 "$FREQ_P8"
@@ -2555,24 +2588,24 @@ status_text() {
 		"$(rd_def /proc/sys/kernel/sched_util_clamp_min "n/a")"
 	msg ""
 
-	msg "--- Thermal HAL profily (setprop) ---"
+	msg "--- Thermal HAL profiles (setprop) ---"
 	printf '  %-24s %s\n' "$THERMAL_SENSOR_MID"  "$(getprop "vendor.thermal.$THERMAL_SENSOR_MID.profile" 2>/dev/null)"
 	printf '  %-24s %s\n' "$THERMAL_SENSOR_HIGH" "$(getprop "vendor.thermal.$THERMAL_SENSOR_HIGH.profile" 2>/dev/null)"
 	msg ""
 
-	msg "--- Pamet ---"
+	msg "--- Memory ---"
 	_dsz=$(rd_def "$ZRAM/disksize" "")
 	if is_int "$_dsz"; then
-		# setiny GiB (3969961984 B = 3,70 GiB = 3,97 GB).
-		# POZOR na mksh 32bit aritmetiku: _dsz * 100 pretece uz na
-		# stock velikosti zramu. Proto se nejdriv deli na MiB.
+		# hundredths of a GiB (3969961984 B = 3.70 GiB = 3.97 GB).
+		# MIND mksh's 32-bit arithmetic: _dsz * 100 overflows already at the stock
+		# zram size. That is why we divide down to MiB first.
 		_gh=$(( ( (_dsz / 1048576) * 100 + 512 ) / 1024 ))
 		printf '  zram disksize   %s B (%s MiB / %s.%02d GiB)\n' \
 			"$_dsz" $((_dsz / 1048576)) $((_gh / 100)) $((_gh % 100))
 	else
 		printf '  zram disksize   n/a\n'
 	fi
-	printf '  zram algoritmus %s (HW Emerald Hill - NEMENIT)\n' "$(bracket "$(rd_def "$ZRAM/comp_algorithm" "n/a")")"
+	printf '  zram algorithm  %s (HW Emerald Hill - DO NOT CHANGE)\n' "$(bracket "$(rd_def "$ZRAM/comp_algorithm" "n/a")")"
 	if _zs=$(zram_stat); then
 		# shellcheck disable=SC2086
 		set -- $_zs
@@ -2584,7 +2617,7 @@ status_text() {
 	printf '  page-cluster    %s\n' "$(rd_def /proc/sys/vm/page-cluster "n/a")"
 	msg ""
 
-	msg "--- Baterie / nabijeni ---"
+	msg "--- Battery / charging ---"
 	printf '  capacity        %s %%\n' "$(rd_def "$BATT/capacity" "n/a")"
 	printf '  status          %s\n'    "$(rd_def "$BATT/status" "n/a")"
 	_bt=$(rd_def "$BATT/temp" "")
@@ -2599,7 +2632,7 @@ status_text() {
 	printf '  start_level     %s\n'    "$(rd_def "$CHARGER/charge_start_level" "n/a")"
 	msg ""
 
-	msg "--- Displej ---"
+	msg "--- Display ---"
 	res_current
 	return 0
 }
@@ -2607,7 +2640,7 @@ status_text() {
 status_cpu_line() {
 	_p="$1"; _lbl="$2"; _list="$3"; _cd="$4"
 	_cap=$(policy_cap_khz "$_cd" "$_list") || _cap="n/a"
-	printf '  %-8s %-14s cur=%-9s strop=%-9s hw_max=%s kHz\n' \
+	printf '  %-8s %-14s cur=%-9s cap=%-9s hw_max=%s kHz\n' \
 		"$_p" "$_lbl" "$(rd_def "$CPUFREQ/$_p/scaling_cur_freq" "n/a")" "$_cap" "$(last_of "$_list")"
 }
 
@@ -2621,26 +2654,27 @@ status_cdev_line() {
 	if is_int "$_cs" && _capk=$(cdev_cap_khz "$_cs" $_list); then
 		_cap="$(khz_to_mhz "$_capk") MHz"
 	fi
-	printf '  cd%-3s %-18s %-8s cur_state=%-3s max_state=%-3s strop=%s\n' \
+	printf '  cd%-3s %-18s %-8s cur_state=%-3s max_state=%-3s cap=%s\n' \
 		"$_id" "$_typ" "$_who" "${_cs:-n/a}" "${_ms:-n/a}" "$_cap"
 }
 
 # ---------------------------------------------------------------------------
 # status --json
 #
-# ZAVAZNY KONTRAKT pro WebUI. Cte VYHRADNE sysfs + stavove soubory v $STATE_DIR.
-# Zadny dumpsys, zadne cmd, zadne settings -> zadny binder, nemuze zatuhnout.
-# Jednotky: thermal.* = °C (desetinne), cpu/gpu = kHz, mem.zram_* = bajty,
-#           battery.temp = °C.
+# A BINDING CONTRACT for the WebUI. It reads sysfs + the state files in
+# $STATE_DIR EXCLUSIVELY. No dumpsys, no cmd, no settings -> no binder, it cannot
+# hang.
+# Units: thermal.* = °C (decimal), cpu/gpu = kHz, mem.zram_* = bytes,
+#        battery.temp = °C.
 # ---------------------------------------------------------------------------
-# ----- bezforkove pomocniky pro status --json ------------------------------
-# VYKON: puvodni emitter delal ~120 subshellu ($(...) = fork). Na telefonu,
-# ktery je zrovna termalne priskrceny, stal jeden beh 10-25 s a synchronni
-# WebUI most pak vypadal zamrzle. Tyto helpery ctou builtin read-em do
-# globalni promenne V - nula forku (vyjimka: /proc/sys/* potrebuje head,
-# viz komentar v rd()).
+# ----- fork-free helpers for status --json ---------------------------------
+# PERFORMANCE: the original emitter made ~120 subshells ($(...) = a fork). On a
+# phone that happens to be thermally throttled, one run cost 10-25 s and the
+# synchronous WebUI bridge then looked frozen. These helpers read with the read
+# builtin into the global variable V - zero forks (the exception: /proc/sys/*
+# needs head, see the comment in rd()).
 
-# rdv <cesta> <default> -> V
+# rdv <path> <default> -> V
 rdv() {
 	V="$2"
 	[ -f "$1" ] && [ -r "$1" ] || return 0
@@ -2651,7 +2685,7 @@ rdv() {
 	[ -n "$V" ] || V="$2"
 }
 
-# nv - normalizuj V na JSON cislo (neplatne/prazdne -> null)
+# nv - normalise V into a JSON number (invalid/empty -> null)
 nv() {
 	case "$V" in
 		''|*[!0-9.-]*) V=null ;;
@@ -2659,7 +2693,7 @@ nv() {
 	esac
 }
 
-# tempv <cesta> -> V jako °C s jednim desetinnym mistem, nebo null
+# tempv <path> -> V as °C with one decimal place, or null
 tempv() {
 	rdv "$1" ""
 	case "$V" in
@@ -2672,7 +2706,7 @@ tempv() {
 	fi
 }
 
-# capv <cdev_id> <seznam freq vzestupne> -> V = ucinny strop v kHz, nebo null
+# capv <cdev_id> <freq list ascending> -> V = the effective cap in kHz, or null
 # (cur_state = N => index pocet-1-N ve vzestupnem seznamu; overeno na zarizeni
 # na trech nezavislych bodech: 8/9->610000, 10/14->910000, 12/14->1164000)
 capv() {
@@ -2711,8 +2745,8 @@ bracketv() {
 	esac
 }
 
-# strv <cesta> - nacte V a obali ho do JSON retezce (rychla cesta bez seda,
-# sed jen kdyz hodnota obsahuje neco, co je potreba escapovat)
+# strv <path> - reads V and wraps it in a JSON string (a fast path without sed;
+# sed runs only when the value contains something that needs escaping)
 strv() {
 	rdv "$1" ""
 	case "$V" in
@@ -2721,20 +2755,22 @@ strv() {
 	esac
 }
 
-# status_json - ZAVAZNY KONTRAKT pro WebUI.
+# status_json - A BINDING CONTRACT for the WebUI.
 #
-# VYKON: tahle funkce se vola z WebUI kazdych ~5 s pres synchronni ksu.exec.
-# Puvodni verze mela 29 substituci (mnoho vnorenych, tj. ~50 forku) a na
-# termalne priskrcenem telefonu (Little na 610 MHz z 1704) trvala pres 9 s -
-# WebView se s ni zasekl a uzivatel to hlasil jako "modul je zaseknuty".
-# Proto je cela prepsana na helpery rdv/nv/tempv/capv/bracketv/strv, ktere
-# ctou builtin read-em do globalni V. Zadne $(...) uvnitr.
-# Kdyz sem budes neco pridavat, drz se te konvence.
+# PERFORMANCE: this function is called from the WebUI every ~5 s over a
+# synchronous ksu.exec. The original version had 29 substitutions (many nested,
+# i.e. ~50 forks) and on a thermally throttled phone (Little at 610 MHz out of
+# 1704) it took over 9 s - the WebView froze on it and the user reported it as
+# "the module is stuck". That is why it is written entirely with the helpers
+# rdv/nv/tempv/capv/bracketv/strv, which read with the read builtin into the
+# global V. No $(...) inside.
+# If you add something here, stick to that convention.
 status_json() {
-	# Akumulujeme do jedne promenne a vypisujeme JEDNIM print. Duvod je merenim
-	# dolozeny: `printf` NENI na tomhle systemu builtin, je to /system/bin/printf,
-	# tedy fork za ~17 ms. Puvodni verze mela 46 printf = ~800 ms jen na vypis.
-	# `print` a `echo` builtiny jsou, akumulace do promenne je zdarma.
+	# We accumulate into a single variable and print with a SINGLE print. The
+	# reason is backed by measurement: `printf` is NOT a builtin on this system, it
+	# is /system/bin/printf, i.e. a fork of ~17 ms. The original version had 46
+	# printf calls = ~800 ms just to print. `print` and `echo` are builtins, and
+	# accumulating into a variable is free.
 	J='{'
 
 	# --- profile ---
@@ -2753,7 +2789,7 @@ status_json() {
 	done
 	J="$J]},"
 
-	# --- auto (nezavisle na manual_override) ---
+	# --- auto (independent of manual_override) ---
 	rdv "$AUTO_FILE" "on"
 	case "$V" in
 		off|OFF|0|false) J="$J\"auto\":{\"enabled\":false}," ;;
@@ -2824,7 +2860,7 @@ status_json() {
 	rdv "$CHARGER/charge_start_level" ""; nv
 	J="$J\"charge_start_level\":$V},"
 
-	# --- display (z cache, zadny binder) ---
+	# --- display (from the cache, no binder) ---
 	_dw="$NATIVE_W"; _dh="$NATIVE_H"; _dd="$NATIVE_DPI"
 	rdv "$DISPSTATE_FILE" ""
 	if [ -n "$V" ]; then
@@ -2845,11 +2881,12 @@ status_json() {
 	if [ -f "$RESPEND_FILE" ]; then J="${J}true"; else J="${J}false"; fi
 	J="$J,\"res_pending_seconds\":$(res_pending_seconds)}"
 
-	# --- per-app (vrstva 3) - VYHRADNE ze souboru, zadny binder ------------
-	# appmode.active ma jeden radek:
-	#   <pkg>|<epoch>|<stara_min_refresh>|<stary_peak_refresh>|<stare_size>|<stara_density>
-	# Sentinely: "-" = nebylo nastaveno (navrat = delete), "=" = nesahali jsme.
-	# Parsuje se ${x%%|*} / ${x#*|} = nula forku (konvence rdv/nv/bracketv).
+	# --- per-app (layer 3) - EXCLUSIVELY from files, no binder --------------
+	# appmode.active has a single line:
+	#   <pkg>|<epoch>|<old_min_refresh>|<old_peak_refresh>|<old_size>|<old_density>
+	# The sentinels: "-" = it was not set (restore = delete), "=" = we did not
+	# touch it.
+	# Parsed with ${x%%|*} / ${x#*|} = zero forks (the rdv/nv/bracketv convention).
 	_apkg=""; _at=null; _armin="="; _arpk="="; _asz="="; _ade="="
 	rdv "$APPMODE" ""
 	if [ -n "$V" ]; then
@@ -2860,8 +2897,9 @@ status_json() {
 		_arpk="${_al%%|*}";  _al="${_al#*|}"
 		_asz="${_al%%|*}"
 		_ade="${_al#*|}"
-		# jmeno balicku musi mit tecku - poskozeny radek (jedno slovo bez "|")
-		# by jinak proslo jako platny balicek a WebUI by hlasilo cizi stav
+		# the package name must contain a dot - otherwise a corrupted line (a single
+		# word without "|") would pass as a valid package and the WebUI would report
+		# somebody else's state
 		case "$_apkg" in ''|*[!A-Za-z0-9._]*) _apkg="" ;; esac
 		case "$_apkg" in *.*) ;; *) _apkg="" ;; esac
 		case "$_at" in ''|*[!0-9]*) _at=null ;; esac
@@ -2892,7 +2930,7 @@ cmd_status() {
 	case "$1" in
 		"")     status_text ;;
 		--json) status_json ;;
-		*)      warn "pxtune: pouziti: pxtune status [--json]"; exit 1 ;;
+		*)      warn "pxtune: usage: pxtune status [--json]"; exit 1 ;;
 	esac
 }
 
@@ -2900,16 +2938,16 @@ cmd_status() {
 # selftest
 # ---------------------------------------------------------------------------
 st_row() {
-	# st_row <cesta> <poznamka> [opt]   - "opt" = chybejici polozka neni chyba
-	# Vlastni prefix _st*, protoze se vola uvnitr cizich smycek (napr. for _p in ...).
+	# st_row <path> <note> [opt]   - "opt" = a missing item is not an error
+	# Its own _st* prefix, because it is called inside other loops (e.g. for _p in ...).
 	_stp="$1"; _stn="$2"; _sto="$3"
-	if [ -e "$_stp" ]; then _ste="ano"; else _ste="NE"; fi
-	if [ -w "$_stp" ]; then _stw="ano"; else _stw="ne"; fi
+	if [ -e "$_stp" ]; then _ste="yes"; else _ste="NO"; fi
+	if [ -w "$_stp" ]; then _stw="yes"; else _stw="no"; fi
 	if [ -d "$_stp" ]; then
-		_stv="<adresar>"
+		_stv="<directory>"
 	elif [ -e "$_stp" ]; then
-		_stv=$(rd "$_stp" 2>/dev/null) || _stv="<necitelne>"
-		[ -n "$_stv" ] || _stv="<prazdne>"
+		_stv=$(rd "$_stp" 2>/dev/null) || _stv="<unreadable>"
+		[ -n "$_stv" ] || _stv="<empty>"
 	else
 		_stv="-"
 	fi
@@ -2917,7 +2955,7 @@ st_row() {
 		?????????????????????????????????*) _stv="$(print -rn -- "$_stv" | cut -c1-30)..." ;;
 	esac
 	printf '%-52s %-4s %-5s %-34s %s\n' "$_stp" "$_ste" "$_stw" "$_stv" "$_stn"
-	if [ "$_ste" = "NE" ] && [ "$_sto" != "opt" ]; then
+	if [ "$_ste" = "NO" ] && [ "$_sto" != "opt" ]; then
 		ST_MISSING=$((ST_MISSING + 1))
 	fi
 	return 0
@@ -2925,66 +2963,66 @@ st_row() {
 
 st_hdr() {
 	printf '\n== %s ==\n' "$1"
-	printf '%-52s %-4s %-5s %-34s %s\n' "CESTA" "EXI" "ZAP" "HODNOTA" "POZNAMKA"
+	printf '%-52s %-4s %-5s %-34s %s\n' "PATH" "EXI" "WRT" "VALUE" "NOTE"
 }
 
 cmd_selftest() {
 	ST_MISSING=0
 	printf 'pxtune %s selftest - %s\n' "$PXTUNE_VERSION" "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
-	printf 'uid=%s  skript=%s\n' "$(id -u 2>/dev/null)" "$SELF"
+	printf 'uid=%s  script=%s\n' "$(id -u 2>/dev/null)" "$SELF"
 
-	st_hdr "Stav modulu"
+	st_hdr "Module state"
 	st_row "$STATE_DIR" ""
 	st_row "$PROFILE_DIR" ""
-	st_row "$STOCK_CONF" "$(if stock_valid; then printf 'validni'; else printf 'CHYBI/POSKOZENY -> fallback na SPEC'; fi)"
+	st_row "$STOCK_CONF" "$(if stock_valid; then printf 'valid'; else printf 'MISSING/CORRUPTED -> falling back to the SPEC'; fi)"
 	st_row "$ACTIVE_FILE" "" opt
-	st_row "$OVERRIDE_FILE" "volitelne: uzivatel zamkl profil" opt
-	st_row "$AUTO_FILE" "volitelne: on|off (chybi = on)" opt
-	st_row "$DISABLE_FILE" "volitelne: existuje = modul vypnuty" opt
-	st_row "$BOOTCNT_FILE" "volitelne: >=3 => DISABLE" opt
-	st_row "$RESPEND_FILE" "volitelne: ceka na 'res confirm'" opt
-	st_row "$DISPSTATE_FILE" "cache displeje pro --json (bez binderu)" opt
-	st_row "$LOG_FILE" "rotace nad 512 kB"
+	st_row "$OVERRIDE_FILE" "optional: the user pinned a profile" opt
+	st_row "$AUTO_FILE" "optional: on|off (missing = on)" opt
+	st_row "$DISABLE_FILE" "optional: exists = the module is off" opt
+	st_row "$BOOTCNT_FILE" "optional: >=3 => DISABLE" opt
+	st_row "$RESPEND_FILE" "optional: waiting for 'res confirm'" opt
+	st_row "$DISPSTATE_FILE" "a display cache for --json (no binder)" opt
+	st_row "$LOG_FILE" "rotates above 512 kB"
 
-	st_hdr "CPU cpufreq (scaling_max_freq je 0444 - zapis NELZE)"
+	st_hdr "CPU cpufreq (scaling_max_freq is 0444 - writing is IMPOSSIBLE)"
 	for _p in policy0 policy4 policy8; do
 		st_row "$CPUFREQ/$_p/scaling_cur_freq" "read-only"
-		st_row "$CPUFREQ/$_p/scaling_max_freq" "ocekavano NEzapisovatelne"
-		st_row "$CPUFREQ/$_p/scaling_governor" "sched_pixel - NEMENIT"
+		st_row "$CPUFREQ/$_p/scaling_max_freq" "expected to be NON-writable"
+		st_row "$CPUFREQ/$_p/scaling_governor" "sched_pixel - DO NOT CHANGE"
 	done
 
-	st_hdr "Cooling devices (vlastnik thermal HAL, jen cteme)"
+	st_hdr "Cooling devices (owned by the thermal HAL, we only read)"
 	for _c in "$CDEV_P0" "$CDEV_P4" "$CDEV_P8" "$CDEV_GPU"; do
 		st_row "$THERMAL/cooling_device$_c/type" ""
-		st_row "$THERMAL/cooling_device$_c/cur_state" "HAL prepisuje ~7 s"
+		st_row "$THERMAL/cooling_device$_c/cur_state" "the HAL rewrites it every ~7 s"
 		st_row "$THERMAL/cooling_device$_c/max_state" ""
 	done
 
-	st_hdr "uclamp cgroups (HLAVNI PAKA)"
+	st_hdr "uclamp cgroups (THE MAIN LEVER)"
 	for _g in $UCLAMP_GROUPS; do
 		st_row "$CPUCTL/$_g/cpu.uclamp.min" ""
 		st_row "$CPUCTL/$_g/cpu.uclamp.max" ""
 	done
-	st_row "/proc/sys/kernel/sched_util_clamp_min" "stock 1024 - NESAHAT"
+	st_row "/proc/sys/kernel/sched_util_clamp_min" "stock 1024 - DO NOT TOUCH"
 
 	st_hdr "GPU Mali"
-	st_row "$MALI/scaling_max_freq" "bezpecna paka, drzi"
+	st_row "$MALI/scaling_max_freq" "a safe lever, it holds"
 	st_row "$MALI/scaling_min_freq" ""
 	st_row "$MALI/hint_max_freq" ""
 	st_row "$MALI/power_policy" "coarse_demand|adaptive|always_on"
 	st_row "$MALI/cur_freq" ""
 	st_row "$MALI/utilization" ""
 
-	st_hdr "Thermal zony"
+	st_hdr "Thermal zones"
 	for _z in $THERMAL_ZONES; do
 		st_row "$THERMAL/thermal_zone${_z##*:}/temp" "${_z%%:*}"
 	done
-	st_row "/dev/thermal/tz-by-name/quiet_therm/temp" "skin pro 'thermal explain' (stabilni symlink)" opt
+	st_row "/dev/thermal/tz-by-name/quiet_therm/temp" "the skin for 'thermal explain' (a stable symlink)" opt
 	printf '%-52s %-4s %-5s %-34s %s\n' "dumpsys thermalservice" "-" "-" "-" \
-		"NEPOUZIVA SE (pod su visi na binderu)"
+		"NOT USED (it hangs on binder under su)"
 
-	st_hdr "Nabijeni a baterie"
-	st_row "$CHARGER/charge_stop_level" "root zapsat MUZE"
+	st_hdr "Charging and battery"
+	st_row "$CHARGER/charge_stop_level" "root CAN write it"
 	st_row "$CHARGER/charge_start_level" ""
 	st_row "$CHARGER/bd_trigger_temp" ""
 	st_row "$CHARGER/bd_trigger_time" ""
@@ -2992,51 +3030,51 @@ cmd_selftest() {
 	st_row "$CHARGER/bd_temp_enable" ""
 	st_row "$BATT/capacity" ""
 	st_row "$BATT/status" ""
-	st_row "$BATT/temp" "desetiny C"
+	st_row "$BATT/temp" "tenths of a degree C"
 	st_row "$BATT/cycle_count" ""
 	st_row "$BATT/current_now" ""
 
-	st_hdr "Pamet"
-	st_row "$ZRAM/disksize" "menit jen v post-fs-data.sh"
-	st_row "$ZRAM/comp_algorithm" "lz77eh (HW Emerald Hill) - NEMENIT"
+	st_hdr "Memory"
+	st_row "$ZRAM/disksize" "change only in post-fs-data.sh"
+	st_row "$ZRAM/comp_algorithm" "lz77eh (HW Emerald Hill) - DO NOT CHANGE"
 	st_row "$ZRAM/mm_stat" ""
-	st_row "$ZRAM/idle" "zram writeback: oznaceni necinnych (write-only)" opt
-	st_row "$ZRAM/writeback" "zram writeback: spousteni (write-only)" opt
-	st_row "$ZRAM/writeback_limit" "zram writeback: strop ve strankach" opt
-	st_row "$ZRAM/writeback_limit_enable" "zram writeback: 1 = strop aktivni" opt
-	st_row "$ZRAM/bd_stat" "zram writeback: statistika backing device" opt
+	st_row "$ZRAM/idle" "zram writeback: marking idle pages (write-only)" opt
+	st_row "$ZRAM/writeback" "zram writeback: triggering it (write-only)" opt
+	st_row "$ZRAM/writeback_limit" "zram writeback: the cap in pages" opt
+	st_row "$ZRAM/writeback_limit_enable" "zram writeback: 1 = the cap is active" opt
+	st_row "$ZRAM/bd_stat" "zram writeback: backing device statistics" opt
 	st_row "/proc/sys/vm/swappiness" ""
 	st_row "/proc/sys/vm/dirty_ratio" ""
 	st_row "/proc/sys/vm/dirty_background_ratio" ""
 	st_row "/proc/sys/vm/vfs_cache_pressure" ""
-	st_row "/proc/sys/vm/page-cluster" "0 = optimalni pro zram"
+	st_row "/proc/sys/vm/page-cluster" "0 = optimal for zram"
 
 	st_hdr "I/O"
 	for _d in $IO_DEVS; do
 		st_row "/sys/block/$_d/queue/read_ahead_kb" ""
 	done
 
-	st_hdr "Externi prikazy"
+	st_hdr "External commands"
 	for _b in settings cmd pm getprop setprop id date tail sed tr wc cut basename nohup sleep; do
 		if command -v "$_b" >/dev/null 2>&1; then
-			_s="ano"
+			_s="yes"
 		else
-			_s="NE"
+			_s="NO"
 			ST_MISSING=$((ST_MISSING + 1))
 		fi
 		printf '%-52s %-4s\n' "$_b" "$_s"
 	done
 
-	st_hdr "Kontrola JSON kontraktu"
+	st_hdr "JSON contract check"
 	if status_json > /dev/null 2>&1; then
-		printf '%-52s %s\n' "status --json" "vygenerovan bez chyby"
+		printf '%-52s %s\n' "status --json" "generated without error"
 	else
-		printf '%-52s %s\n' "status --json" "SELHAL"
+		printf '%-52s %s\n' "status --json" "FAILED"
 		ST_MISSING=$((ST_MISSING + 1))
 	fi
 
-	printf '\nChybejicich/nedostupnych polozek: %s\n' "$ST_MISSING"
-	log INFO "selftest: chybejicich polozek = $ST_MISSING"
+	printf '\nMissing/unavailable items: %s\n' "$ST_MISSING"
+	log INFO "selftest: missing items = $ST_MISSING"
 	[ "$ST_MISSING" -gt 0 ] && return 2
 	return 0
 }
@@ -3046,35 +3084,35 @@ cmd_selftest() {
 # ---------------------------------------------------------------------------
 usage() {
 	cat <<EOF
-pxtune $PXTUNE_VERSION - kernel manager pro Pixel 8a (Tensor G3)
+pxtune $PXTUNE_VERSION - a kernel manager for the Pixel 8a (Tensor G3)
 
-  pxtune status [--json]        stav: profil, teploty, frekvence, uclamp, zram, nabijeni
-                                --json cte VYHRADNE sysfs (zadny binder)
-  pxtune profile list           seznam profilu
-  pxtune profile current        jmeno aktivniho profilu
-  pxtune profile <name>         prepnout profil (nastavi manual_override)
-  pxtune profile <name> --auto  prepnout profil bez dotyku na manual_override (pro demona)
-  pxtune profile auto           zrusit manual_override, vratit rizeni automatu
-  pxtune reapply [--overlay P]  vratit uzly, ktere prepsal power HAL (dvfs_headroom,
-                                sched_pixel limit_frequency); vola demon po rozsviceni
-  pxtune revert                 vratit VSE na stock z backup/stock.conf
+  pxtune status [--json]        state: profile, temperatures, frequencies, uclamp, zram, charging
+                                --json reads sysfs EXCLUSIVELY (no binder)
+  pxtune profile list           list the profiles
+  pxtune profile current        the name of the active profile
+  pxtune profile <name>         switch profile (sets manual_override)
+  pxtune profile <name> --auto  switch profile without touching manual_override (for the daemon)
+  pxtune profile auto           clear manual_override, hand control back to the daemon
+  pxtune reapply [--overlay P]  restore the nodes the power HAL overwrote (dvfs_headroom,
+                                sched_pixel limit_frequency); the daemon calls it on screen wake
+  pxtune revert                 restore EVERYTHING to stock from backup/stock.conf
   pxtune res <preset|confirm|reset|list>
-                                presety: $(res_preset_names)
+                                presets: $(res_preset_names)
   pxtune charge <1-100|off>     charge_stop_level (off = 100)
-  pxtune game <package> [mode]  obalka nad 'cmd game'
-  pxtune zram writeback [sek]   odsun necinnych zram stranek na disk (vychozi 3600 s)
-  pxtune dexopt <package>       pm compile -m speed -f <pkg> (plna AOT kompilace)
-  pxtune thermal explain        skin vs. prahy VIRTUAL-SKIN (co se stane pri prekroceni)
+  pxtune game <package> [mode]  a wrapper around 'cmd game'
+  pxtune zram writeback [sec]   push idle zram pages out to disk (default 3600 s)
+  pxtune dexopt <package>       pm compile -m speed -f <pkg> (full AOT compilation)
+  pxtune thermal explain        skin vs. the VIRTUAL-SKIN thresholds (what happens when crossed)
   pxtune app <list|show|set|rm|sync|json>
-                                per-app profily (bin/pxtune-perapp)
-                                'app enter <pkg>' / 'app leave' jsou INTERNI (demon)
-  pxtune auto <on|off|status>   adaptivni demon (nezavisle na manual_override)
-  pxtune log [-n N]             vypis logu (vychozi 50 radku)
-  pxtune selftest               overi vsechny cesty ze SPEC
+                                per-app profiles (bin/pxtune-perapp)
+                                'app enter <pkg>' / 'app leave' are INTERNAL (the daemon)
+  pxtune auto <on|off|status>   the adaptive daemon (independent of manual_override)
+  pxtune log [-n N]             print the log (default 50 lines)
+  pxtune selftest               verify all the paths from the SPEC
 
-Stav: $STATE_DIR
-Log : $LOG_FILE
-Exit: 0 = OK, 1 = chyba argumentu, 2 = chyba behu
+State: $STATE_DIR
+Log  : $LOG_FILE
+Exit : 0 = OK, 1 = argument error, 2 = runtime error
 EOF
 }
 
@@ -3082,29 +3120,30 @@ EOF
 # main
 # ---------------------------------------------------------------------------
 main() {
-	# "status --json" bezi pod root shellem WebUI kazdych 5 s -> zadny binder.
+	# "status --json" runs under the WebUI's root shell every 5 s -> no binder.
 	if [ "$1" = "status" ] && [ "$2" = "--json" ]; then
 		FRAMEWORK_OK=0
 	fi
-	# `tweak json` vola WebUI pri otevreni zalozky. V registru je 7 tweaku
-	# s mechanismem `settings`, coz jsou BINDER volani - kazde az 10 s
-	# timeoutu. Namereno: `tweak json` trvalo 25 s a WebUI kvuli tomu
-	# zamrzalo. Binder se tu proto zakazuje VZDY, i pro --live; polozky
-	# s mech=settings pak hlasi ulozenou hodnotu misto zive.
+	# The WebUI calls `tweak json` when the tab is opened. The registry has 7
+	# tweaks with the `settings` mechanism, which are BINDER calls - each with up
+	# to a 10 s timeout. Measured: `tweak json` took 25 s and the WebUI froze
+	# because of it. Binder is therefore ALWAYS disabled here, including for
+	# --live; items with mech=settings then report the stored value instead of the
+	# live one.
 	if [ "$1" = "tweak" ] && [ "$2" = "json" ]; then
 		FRAMEWORK_OK=0
 	fi
-	# totez pro `app json`
+	# the same for `app json`
 	if [ "$1" = "app" ] && [ "$2" = "json" ]; then
 		FRAMEWORK_OK=0
 	fi
 
 	ensure_dirs
 
-	# "nativni" hustota = uzivateluv stock override (353), ne HW 420
+	# the "native" density = the user's stock override (353), not the HW 420
 	NATIVE_DPI=$(native_dpi)
 
-	# interni: watchdog rozliseni (bezi na pozadi)
+	# internal: the resolution watchdog (runs in the background)
 	if [ "$1" = "__dpi_watchdog" ]; then
 		shift
 		dpi_watchdog "$1" "$2"
@@ -3116,23 +3155,25 @@ main() {
 		exit 0
 	fi
 
-	# Per-app profily jsou v samostatnem skriptu (bin/pxtune-perapp) a deleguji
-	# se HNED, jeste pred snapshot_stock/seed_profiles.
-	# Duvod pro rane odbočeni: "app enter"/"app leave" vola demon pri kazde
-	# zmene popredi a "app json" vola WebUI v polling smycce - snapshot ani
-	# seedovani profilu k tomu nejsou potreba a stoji forky navic.
-	# exec, ne volani: setri jeden fork a chybovy kod probublá primo.
+	# Per-app profiles live in a separate script (bin/pxtune-perapp) and are
+	# delegated IMMEDIATELY, before snapshot_stock/seed_profiles.
+	# The reason for branching this early: "app enter"/"app leave" are called by
+	# the daemon on every foreground change and "app json" is called by the WebUI
+	# in a polling loop - neither the snapshot nor seeding profiles is needed for
+	# that, and both cost extra forks.
+	# exec rather than a call: it saves one fork and the exit code bubbles up
+	# directly.
 	if [ "$1" = "app" ]; then
 		shift
 		if [ -x "$PERAPP" ]; then
 			exec "$PERAPP" "$@"
 		fi
 		if [ -f "$PERAPP" ]; then
-			# modul rozbaleny bez prav x (nekteri spravci to delaji)
+			# the module unpacked without the x permission (some managers do that)
 			exec /system/bin/sh "$PERAPP" "$@"
 		fi
-		warn "pxtune: bin/pxtune-perapp nenalezen ($PERAPP)"
-		log ERROR "app: $PERAPP neexistuje"
+		warn "pxtune: bin/pxtune-perapp not found ($PERAPP)"
+		log ERROR "app: $PERAPP does not exist"
 		exit 2
 	fi
 
@@ -3155,15 +3196,16 @@ main() {
 		dexopt)            cmd_dexopt "$@" ;;
 		thermal)           cmd_thermal "$@" ;;
 		auto)              cmd_auto "$@" ;;
-		# per-app profily a tweaky jsou v samostatnych skriptech.
-		# exec, ne volani: setri jeden fork a chybovy kod probublá primo.
+		# per-app profiles and tweaks live in separate scripts.
+		# exec rather than a call: it saves one fork and the exit code bubbles up
+		# directly.
 		metrics)
 			_pm="$(dirname "$0")/pxtune-metrics"
 			[ -x "$_pm" ] || _pm=/data/adb/modules/pixel_tune/bin/pxtune-metrics
 			if [ -x "$_pm" ]; then
 				exec "$_pm" "$@"
 			fi
-			warn "pxtune: bin/pxtune-metrics nenalezen"
+			warn "pxtune: bin/pxtune-metrics not found"
 			exit 2
 			;;
 		app)
@@ -3172,19 +3214,19 @@ main() {
 			if [ -x "$_pa" ]; then
 				exec "$_pa" "$@"
 			fi
-			warn "pxtune: bin/pxtune-perapp nenalezen"
+			warn "pxtune: bin/pxtune-perapp not found"
 			exit 2
 			;;
 		tweak)
-			# pxtune-tweaks NENI samostatny program, je to knihovna: definuje
-			# cmd_tweak() a pouziva zdejsi wr()/rdv()/log()/warn(). Proto se
-			# SOURCUJE, ne spousti. Deje se to LINE - jen kdyz uzivatel opravdu
-			# sahne na tweaky - aby 1500 radku navic nezdrzovalo kazde spusteni
-			# (parsovani skriptu je merene ~4 ms na kB).
+			# pxtune-tweaks is NOT a standalone program, it is a library: it defines
+			# cmd_tweak() and uses the wr()/rdv()/log()/warn() from here. That is why
+			# it is SOURCED rather than executed. It happens LAZILY - only when the
+			# user actually touches the tweaks - so that 1500 extra lines do not slow
+			# down every run (parsing a script measures at ~4 ms per kB).
 			_tw="$(dirname "$0")/pxtune-tweaks"
 			[ -f "$_tw" ] || _tw=/data/adb/modules/pixel_tune/bin/pxtune-tweaks
 			if [ ! -f "$_tw" ]; then
-				warn "pxtune: bin/pxtune-tweaks nenalezen"
+				warn "pxtune: bin/pxtune-tweaks not found"
 				exit 2
 			fi
 			SELF="$0"
@@ -3196,7 +3238,7 @@ main() {
 		selftest)          cmd_selftest ;;
 		-h|--help|help|"") usage; [ -z "$_cmd" ] && exit 1; exit 0 ;;
 		-v|--version)      printf 'pxtune %s\n' "$PXTUNE_VERSION" ;;
-		*)                 warn "pxtune: neznamy prikaz '$_cmd'"; usage >&2; exit 1 ;;
+		*)                 warn "pxtune: unknown command '$_cmd'"; usage >&2; exit 1 ;;
 	esac
 }
 
