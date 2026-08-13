@@ -1,76 +1,78 @@
 #!/system/bin/sh
 #
-# pxtune-perapp - per-app profily pro pixel_tune
+# pxtune-perapp - per-app profiles for pixel_tune
 #                 Google Pixel 8a "akita" / Tensor G3 "zuma" / Android 16 / KernelSU-Next
 #
-# POSIX sh (toybox/mksh, 32bit). Zadne bashismy.
-# Exit kody: 0 = OK, 1 = chyba argumentu, 2 = chyba behu.
+# POSIX sh (toybox/mksh, 32-bit). No bashisms.
+# Exit codes: 0 = OK, 1 = argument error, 2 = runtime error.
 #
-# Vola se z `pxtune app <podprikaz>` (dispatch v bin/pxtune) i primo z demona
-# (`pxtune app enter <pkg>` / `pxtune app leave`).
-#
-# ===========================================================================
-# TRI VRSTVY - JADRO NAVRHU
-# ===========================================================================
-#
-#   vrstva | co                                          | per-app? | navrat
-#   -------+---------------------------------------------+----------+---------------------
-#     1    | Android Game Mode (`cmd game set/mode`)      | ANO      | netreba, drzi system
-#     2    | pxtune profil (uclamp, GPU, vm, thermal)     | ne       | ZDARMA - profile_apply()
-#          |                                             |          | vola restore_stock_values()
-#     3    | refresh rate, rozliseni (settings/binder)    | ne       | MUSI SE VRATIT EXPLICITNE
-#
-# Vrstva 3 je zamerne mala prave proto, ze jen ona potrebuje navrat.
-# Vrstva 2 se NEAPLIKUJE odsud - dela to `pxtune profile <name> --auto
-# --overlay <pkg>`, ktere vola demon (viz target_profile krok 3b). Vyjimka:
-# kdyz demon nebezi, aplikuje ji `app enter` sam, jinak by APP_PROFILE
-# pri `auto=off` nikdy nic neudelal.
+# Called from `pxtune app <subcommand>` (dispatch in bin/pxtune) and directly
+# from the daemon (`pxtune app enter <pkg>` / `pxtune app leave`).
 #
 # ===========================================================================
-# FORMAT PRAVIDLA
+# THREE LAYERS - THE CORE OF THE DESIGN
 # ===========================================================================
 #
-# Jeden soubor na balicek: /data/adb/pixel_tune/apps/<package>.conf, KEY=VALUE.
-# Prazdna hodnota = NESAHAT. Soubor se NESOURCUJE (vlastni parser) - poskozeny
-# nebo podvrzeny soubor nesmi nic spustit.
+#   layer | what                                        | per-app? | restore
+#   ------+---------------------------------------------+----------+---------------------
+#     1   | Android Game Mode (`cmd game set/mode`)      | YES      | not needed, the system keeps it
+#     2   | pxtune profile (uclamp, GPU, vm, thermal)    | no       | FREE - profile_apply()
+#         |                                             |          | calls restore_stock_values()
+#     3   | refresh rate, resolution (settings/binder)   | no       | MUST BE RESTORED EXPLICITLY
 #
-# PROC JEDEN SOUBOR NA BALICEK: vyhledani pravidla je `[ -f "$APPDIR/$pkg.conf" ]`,
-# tedy NULA forku na kazdou udalost popredi. Jeden spolecny soubor by znamenal
-# grep (fork = 7,7 ms naemereno) pri kazdem prepnuti aplikace.
-#
-# ===========================================================================
-# VYKON (namereno na tomhle zarizeni)
-# ===========================================================================
-#   fork ................ ~7,7 ms
-#   builtin read ze sysfs . 0,44 ms
-#   zapis do sysfs ....... 27-31 ms
-# WebUI vola modul pres synchronni most, takze kazdy usetreny fork je videt.
-# Konvence prevzata z bin/pxtune: helpery rdv/nv/bracketv nastavuji globalni V
-# a neforkuji. V horke ceste demona (kazda udalost popredi) nesmi byt ani jeden
-# zbytecny fork - proto demon parsuje pravidlo sam (apprule_load) a tenhle
-# skript vola az kdyz se opravdu neco meni.
+# Layer 3 is deliberately small precisely because it is the only one that needs
+# restoring. Layer 2 is NOT APPLIED from here - that is done by
+# `pxtune profile <name> --auto --overlay <pkg>`, which the daemon calls (see
+# target_profile step 3b). The exception: when the daemon is not running,
+# `app enter` applies it itself, otherwise APP_PROFILE would never do anything
+# with `auto=off`.
 #
 # ===========================================================================
-# PASTI (namereno)
+# RULE FORMAT
 # ===========================================================================
-#   1. `read < /proc/sys/*` vraci jen PRVNI ZNAK -> tam head -n1
-#   2. `> soubor 2>/dev/null` chybu otevreni NEPOTLACI -> { ... } 2>/dev/null
-#   3. mksh je 32bitovy
-#   4. settings/cmd jsou binder -> vzdy timeout 10
-#   5. indexy thermal_zoneN/cooling_deviceN nejsou stabilni pres reboot
+#
+# One file per package: /data/adb/pixel_tune/apps/<package>.conf, KEY=VALUE.
+# An empty value = LEAVE IT ALONE. The file is NOT SOURCED (a dedicated parser)
+# - a corrupted or planted file must not be able to execute anything.
+#
+# WHY ONE FILE PER PACKAGE: looking a rule up is
+# `[ -f "$APPDIR/$pkg.conf" ]`, i.e. ZERO forks per foreground event. A single
+# shared file would mean a grep (a fork = 7.7 ms measured) on every app switch.
+#
+# ===========================================================================
+# PERFORMANCE (measured on this device)
+# ===========================================================================
+#   fork ................. ~7.7 ms
+#   builtin read from sysfs  0.44 ms
+#   write to sysfs ....... 27-31 ms
+# The WebUI calls the module over a synchronous bridge, so every saved fork
+# shows. The convention is taken from bin/pxtune: the helpers rdv/nv/bracketv
+# set the global V and do not fork. There must not be a single pointless fork in
+# the daemon's hot path (every foreground event) - which is why the daemon
+# parses the rule itself (apprule_load) and only calls this script when
+# something really changes.
+#
+# ===========================================================================
+# TRAPS (measured)
+# ===========================================================================
+#   1. `read < /proc/sys/*` returns only the FIRST CHARACTER -> use head -n1 there
+#   2. `> file 2>/dev/null` DOES NOT suppress an open error -> { ... } 2>/dev/null
+#   3. mksh is 32-bit
+#   4. settings/cmd are binder -> always timeout 10
+#   5. thermal_zoneN/cooling_deviceN indices are not stable across reboots
 #
 
 PERAPP_VERSION="1.0.0"
 
 # ---------------------------------------------------------------------------
-# Cesty (zrcadli bin/pxtune)
+# Paths (mirrors bin/pxtune)
 # ---------------------------------------------------------------------------
 STATE_DIR="/data/adb/pixel_tune"
 APPDIR="$STATE_DIR/apps"
 PROFILE_DIR="$STATE_DIR/profiles"
 APPMODE="$STATE_DIR/appmode.active"
-APPWARN="$STATE_DIR/appmode.warn"        # "jednou za relaci" pro WARN hlasky
-APPGSTAMP="$STATE_DIR/appmode.gamestamp" # rate-limit pro GAME_APPLY=enter
+APPWARN="$STATE_DIR/appmode.warn"        # "once per session" for WARN messages
+APPGSTAMP="$STATE_DIR/appmode.gamestamp" # rate limit for GAME_APPLY=enter
 RESPEND_FILE="$STATE_DIR/res_pending"
 AUTOD_PID="$STATE_DIR/pxtune-auto.pid"
 LOG_FILE="$STATE_DIR/pxtune.log"
@@ -84,56 +86,59 @@ PXTUNE="${SELF%/*}/pxtune"
 [ -x "$PXTUNE" ] || PXTUNE="/data/adb/modules/pixel_tune/bin/pxtune"
 
 # ===========================================================================
-# TVRDE POJISTKY (zamerne v KODU, ne v konfiguraci)
+# HARD SAFEGUARDS (deliberately in the CODE, not in the configuration)
 # ===========================================================================
 #
 # APP_RES_ENABLE_DEFAULT = 0
-#   ZMENA ROZLISENI JE PRO TEDKA ZAKAZANA. Klic APP_RES je implementovany,
-#   ale bez vyslovneho APP_RES_ENABLE=1 v pravidle se IGNORUJE. Chybejici klic
-#   = 0, ne 1. Sablona to ma taky na 0, ale rozhoduje TOHLE - sablona je jen
-#   dokumentace, kdezto uzivatel muze napsat conf rucne.
+#   CHANGING THE RESOLUTION IS FORBIDDEN FOR NOW. The APP_RES key is
+#   implemented, but without an explicit APP_RES_ENABLE=1 in the rule it is
+#   IGNORED. A missing key = 0, not 1. The template has it at 0 as well, but
+#   THIS is what decides - the template is only documentation, whereas the user
+#   can write a conf by hand.
 APP_RES_ENABLE_DEFAULT=0
 #
-# REFRESH_VERIFIED = 1  -- OVERENO NA ZARIZENI 2026-08-07
-#   Jmena klicu i to, ze zapis skutecne zabere, je overene:
+# REFRESH_VERIFIED = 1  -- VERIFIED ON THE DEVICE 2026-08-07
+#   Both the key names and the fact that the write really takes effect are
+#   verified:
 #     settings get system peak_refresh_rate   -> 120
 #     settings get system min_refresh_rate    -> 60
 #     settings put system peak_refresh_rate 120
 #       -> dumpsys display: "mode 2, renderFrameRate 120.00001"
-#   Namespace `global` ma taky klice stejneho jmena (hodnoty 120.0/60.0),
-#   ale rozhoduje `system` - po zapisu do nej se displej prokazatelne prepnul.
+#   The `global` namespace also has keys of the same name (values 120.0/60.0),
+#   but `system` is what decides - after writing into it the display
+#   demonstrably switched.
 #
-#   POZOR: zapis do peak_refresh_rate je GLOBALNI. Per-app to funguje jen tak,
-#   ze se pri vstupu do aplikace nastavi a pri odchodu VRATI. Proto je navrat
-#   (`app leave`) volany ze sesti nezavislych mist - kdyby vypadl, zustal by
-#   telefon zamceny na nizsi frekvenci.
+#   CAUTION: writing peak_refresh_rate is GLOBAL. Per-app only works by setting
+#   it on entering the app and RESTORING it on leaving. That is why the restore
+#   (`app leave`) is called from six independent places - if it were missed, the
+#   phone would stay locked at a lower refresh rate.
 REFRESH_VERIFIED=1
 REFRESH_NS="system"
 REFRESH_KEY_MIN="min_refresh_rate"
 REFRESH_KEY_PEAK="peak_refresh_rate"
 #
-# Povolene hodnoty refresh rate. SPEC: panel je adaptivni 60-120 Hz, mode 2 =
-# 120 Hz. Nic mimo tenhle seznam se nezapise.
+# Allowed refresh rate values. SPEC: the panel is adaptive 60-120 Hz, mode 2 =
+# 120 Hz. Nothing outside this list is written.
 REFRESH_ALLOWED="60 90 120"
 #
-# Presety rozliseni - ZRCADLI RES_PRESETS v bin/pxtune. Kdyz se tam neco prida,
-# musi se to pridat i sem (validace APP_RES).
+# Resolution presets - MIRRORS RES_PRESETS in bin/pxtune. When something is
+# added there, it has to be added here too (APP_RES validation).
 RES_PRESET_NAMES="native 900x2000 810x1800 720x1600"
 
-# Vychozi hodnoty anti-flappingu (demon ma stejne, viz APP_MIN_FG_DEF/APP_STICKY_DEF)
+# Anti-flapping defaults (the daemon has the same, see APP_MIN_FG_DEF/APP_STICKY_DEF)
 DEF_MIN_FG_SEC=8
 DEF_STICKY_SEC=25
 DEF_PRIORITY=50
 
-# GAME_APPLY=enter: nejkratsi interval mezi dvema binderovymi re-aplikacemi
-# vrstvy 1 na tentyz balicek. Bez toho by aplikace strilejici resume eventy
-# mohla hammerovat `cmd game`.
+# GAME_APPLY=enter: the shortest interval between two binder re-applications of
+# layer 1 to the same package. Without it an app firing resume events could
+# hammer `cmd game`.
 GAME_REAPPLY_MIN_SEC=300
 
 S_TIMEOUT=10
 
 # ---------------------------------------------------------------------------
-# Zaklad
+# Basics
 # ---------------------------------------------------------------------------
 HAVE_TIMEOUT=0
 command -v timeout >/dev/null 2>&1 && HAVE_TIMEOUT=1
@@ -155,8 +160,8 @@ log_rotate() {
 	chmod 0640 "$LOG_FILE" 2>/dev/null
 }
 
-# log <UROVEN> <zprava...>  - timestamp se pocita JEDNOU za beh procesu
-# (date = fork; viz stejne resene log() v bin/pxtune)
+# log <LEVEL> <message...>  - the timestamp is computed ONCE per process run
+# (date = a fork; see the identically solved log() in bin/pxtune)
 log() {
 	_llvl="$1"
 	shift
@@ -183,7 +188,7 @@ in_list() {
 	return 1
 }
 
-# rdv <cesta> <default> -> V (bez forku; /proc/sys/* potrebuje head, viz past 1)
+# rdv <path> <default> -> V (no fork; /proc/sys/* needs head, see trap 1)
 rdv() {
 	V="$2"
 	[ -f "$1" ] && [ -r "$1" ] || return 0
@@ -194,7 +199,7 @@ rdv() {
 	[ -n "$V" ] || V="$2"
 }
 
-# wrf <cesta> <obsah> - zapis do souboru; past 2: obal celeho bloku
+# wrf <path> <content> - write to a file; trap 2: wrap the whole block
 wrf() {
 	{ printf '%s\n' "$2" > "$1"; } 2>/dev/null
 }
@@ -207,9 +212,10 @@ json_esc() {
 		*) printf '%s' "$1" ;;
 	esac
 }
-# VYKON: `printf` NENI na Androidu builtin (je to /system/bin/printf, fork
-# ~17 ms) a `$(jstr ...)` je dalsi fork navic. Helpery proto NEVYPISUJI,
-# ale pripojuji do globalni promenne J. Stejna konvence jako v bin/pxtune.
+# PERFORMANCE: `printf` is NOT a builtin on Android (it is /system/bin/printf,
+# a fork of ~17 ms) and `$(jstr ...)` is another fork on top. The helpers
+# therefore DO NOT PRINT but append to the global variable J. The same
+# convention as in bin/pxtune.
 jstr() {
 	case "$1" in
 		''|*[!A-Za-z0-9\ _.,:/%+-]*) J="$J\"$(json_esc "$1")\"" ;;
@@ -224,13 +230,13 @@ valid_pkg() {
 		''|.*|*/*) return 1 ;;
 		*[!A-Za-z0-9._]*) return 1 ;;
 	esac
-	# musi vypadat jako balicek (aspon jedna tecka) - chrani pred prekklepem
+	# it has to look like a package (at least one dot) - guards against a typo
 	case "$1" in *.*) return 0 ;; esac
 	return 1
 }
 
 # ---------------------------------------------------------------------------
-# Framework (binder). VZDY s timeoutem - past 4.
+# The framework (binder). ALWAYS with a timeout - trap 4.
 # ---------------------------------------------------------------------------
 framework_ok() {
 	[ "${PXTUNE_NO_FRAMEWORK:-0}" = "1" ] && return 1
@@ -239,7 +245,7 @@ framework_ok() {
 	return 0
 }
 
-# st_get <namespace> <klic> -> SV ("" kdyz null/prazdne/nedostupne)
+# st_get <namespace> <key> -> SV ("" when null/empty/unavailable)
 st_get() {
 	SV=""
 	framework_ok || return 1
@@ -273,7 +279,7 @@ st_del() {
 	fi
 }
 
-# gamecmd <argumenty...> - `cmd game`, binder, vzdy s timeoutem
+# gamecmd <arguments...> - `cmd game`, binder, always with a timeout
 gamecmd() {
 	command -v cmd >/dev/null 2>&1 || return 1
 	if [ "$HAVE_TIMEOUT" = "1" ]; then
@@ -290,8 +296,8 @@ daemon_alive() {
 	return 0
 }
 
-# warn_once <klic> <zprava> - WARN nejvyse jednou za relaci (relace = jedna
-# epizoda appmode; marker se maze v app leave)
+# warn_once <key> <message> - WARN at most once per session (a session = one
+# appmode episode; the marker is deleted in app leave)
 warn_once() {
 	rdv "$APPWARN" ""
 	case " $V " in
@@ -303,11 +309,12 @@ warn_once() {
 }
 
 # ===========================================================================
-# PARSER PRAVIDLA (nesourcuje se)
+# THE RULE PARSER (nothing is sourced)
 #
-# Bezpecnost: klic se propousti jen z whitelistu (nebo prefixu APP_OVERLAY_),
-# hodnota se prirazuje pres `eval "R_$k=\$_rv"` - to je prirazeni Z PROMENNE,
-# ne re-evaluace obsahu, takze $(...) ani backtick v hodnote se neprovede.
+# Safety: a key only passes if it is on the whitelist (or has the APP_OVERLAY_
+# prefix), and the value is assigned via `eval "R_$k=\$_rv"` - that is an
+# assignment FROM A VARIABLE, not a re-evaluation of the content, so neither
+# $(...) nor a backtick inside the value is executed.
 # ===========================================================================
 
 RULE_KEYS="APP_PKG APP_DESC APP_ENABLED GAME_MODE GAME_FPS GAME_DOWNSCALE GAME_APPLY APP_PROFILE APP_REFRESH_MIN APP_REFRESH_PEAK APP_RES APP_RES_ENABLE APP_MIN_FG_SEC APP_STICKY_SEC APP_THERMAL_CAP APP_PRIORITY"
@@ -327,7 +334,7 @@ rule_clear() {
 R_OVERLAY_KEYS=""
 rule_clear
 
-# rule_load <pkg> -> R_* promenne, RL_OK=1 kdyz soubor existuje
+# rule_load <pkg> -> R_* variables, RL_OK=1 when the file exists
 rule_load() {
 	rule_clear
 	valid_pkg "$1" || return 1
@@ -354,10 +361,10 @@ rule_load() {
 			\"*\") _rv="${_rv#\"}"; _rv="${_rv%\"}" ;;
 			\'*\') _rv="${_rv#\'}"; _rv="${_rv%\'}" ;;
 		esac
-		# APP_DESC smi mit mezery a diakritiku, ostatni klice ne
+		# APP_DESC may contain spaces and diacritics, the other keys may not
 		if [ "$_rk" != "APP_DESC" ]; then
 			case "$_rv" in
-				*[!A-Za-z0-9._-]*) log WARN "$1.conf: klic $_rk ma nepovolene znaky, ignoruji"; continue ;;
+				*[!A-Za-z0-9._-]*) log WARN "$1.conf: key $_rk has disallowed characters, ignoring"; continue ;;
 			esac
 		else
 			case "$_rv" in
@@ -374,7 +381,7 @@ rule_load() {
 	return 0
 }
 
-# rule_defaults - doplni vychozi hodnoty tam, kde klic chybi
+# rule_defaults - fills in defaults where a key is missing
 rule_defaults() {
 	[ -n "$R_APP_PKG" ] || R_APP_PKG="$RL_PKG"
 	case "$R_APP_ENABLED" in
@@ -397,7 +404,7 @@ rule_defaults() {
 		1|on|ON|true|yes) R_APP_THERMAL_CAP=1 ;;
 		*) R_APP_THERMAL_CAP=0 ;;
 	esac
-	# TVRDA POJISTKA: chybejici klic = 0. Nikdy ne 1.
+	# HARD SAFEGUARD: a missing key = 0. Never 1.
 	case "$R_APP_RES_ENABLE" in
 		1|on|ON|true|yes) R_APP_RES_ENABLE=1 ;;
 		*) R_APP_RES_ENABLE="$APP_RES_ENABLE_DEFAULT" ;;
@@ -406,57 +413,58 @@ rule_defaults() {
 }
 
 # ---------------------------------------------------------------------------
-# Validace jednotlivych klicu (pouziva `app set` i `app show`)
-# validate_key <klic> <hodnota> -> 0 OK, 1 chyba (duvod v VERR)
+# Validation of individual keys (used by both `app set` and `app show`)
+# validate_key <key> <value> -> 0 OK, 1 error (the reason lands in VERR)
 # ---------------------------------------------------------------------------
 validate_key() {
 	VERR=""
 	_vk="$1"
 	_vv="$2"
-	[ -z "$_vv" ] && return 0        # prazdna hodnota = nesahat, vzdy OK
+	[ -z "$_vv" ] && return 0        # an empty value = leave it alone, always OK
 	case "$_vk" in
 		APP_PKG)
-			valid_pkg "$_vv" || VERR="neplatne jmeno balicku" ;;
+			valid_pkg "$_vv" || VERR="invalid package name" ;;
 		APP_DESC)
 			: ;;
 		APP_ENABLED|APP_THERMAL_CAP|APP_RES_ENABLE)
-			case "$_vv" in 0|1|on|off|true|false|yes|no) ;; *) VERR="ocekavano 0 nebo 1" ;; esac ;;
+			case "$_vv" in 0|1|on|off|true|false|yes|no) ;; *) VERR="expected 0 or 1" ;; esac ;;
 		GAME_MODE)
 			case "$_vv" in 1|2|3|4|standard|performance|battery|custom) ;; *) VERR="1|2|3|4|standard|performance|battery|custom" ;; esac ;;
 		GAME_FPS)
 			if is_int "$_vv"; then
-				[ "$_vv" -gt 240 ] && VERR="FPS mimo rozsah 0-240"
+				[ "$_vv" -gt 240 ] && VERR="FPS outside the range 0-240"
 			else
-				VERR="ocekavano cele cislo"
+				VERR="expected a whole number"
 			fi ;;
 		GAME_DOWNSCALE)
-			# POVOLENO 0.3..0.9 (na vyslovne prani uzivatele 2026-08-09).
-			# VAROVANI: pod 0.5 muze GameManager u Unity her (PoGO) rozbit
-			# mapovani/plynulost dotyku (zaseknuty vstup) i citelnost dialogu.
-			# 0.3/0.35/0.4/0.45 jsou proto na vlastni riziko - otestuj dotyk.
-			case "$_vv" in disable|0.[3-9]|0.[3-9][05]) ;; *) VERR="0.3..0.9 nebo 'disable'" ;; esac ;;
+			# ALLOWED 0.3..0.9 (at the user's explicit request 2026-08-09).
+			# WARNING: below 0.5 the GameManager can break touch mapping/smoothness
+			# in Unity games (PoGO) (stuck input) as well as dialog legibility.
+			# 0.3/0.35/0.4/0.45 are therefore at your own risk - test the touch input.
+			case "$_vv" in disable|0.[3-9]|0.[3-9][05]) ;; *) VERR="0.3..0.9 or 'disable'" ;; esac ;;
 		GAME_APPLY)
 			case "$_vv" in once|enter) ;; *) VERR="once|enter" ;; esac ;;
 		APP_PROFILE)
-			if [ ! -f "$PROFILE_DIR/$_vv.conf" ]; then VERR="profil '$_vv' neexistuje v $PROFILE_DIR"; fi ;;
+			if [ ! -f "$PROFILE_DIR/$_vv.conf" ]; then VERR="profile '$_vv' does not exist in $PROFILE_DIR"; fi ;;
 		APP_REFRESH_MIN|APP_REFRESH_PEAK)
-			in_list "$_vv" "$REFRESH_ALLOWED" || VERR="povoleno jen: $REFRESH_ALLOWED" ;;
+			in_list "$_vv" "$REFRESH_ALLOWED" || VERR="only allowed: $REFRESH_ALLOWED" ;;
 		APP_RES)
-			in_list "$_vv" "$RES_PRESET_NAMES" || VERR="preset musi byt jeden z: $RES_PRESET_NAMES" ;;
+			in_list "$_vv" "$RES_PRESET_NAMES" || VERR="the preset must be one of: $RES_PRESET_NAMES" ;;
 		APP_MIN_FG_SEC)
-			is_int "$_vv" || VERR="ocekavano cele cislo (sekundy)" ;;
+			is_int "$_vv" || VERR="expected a whole number (seconds)" ;;
 		APP_STICKY_SEC)
-			is_int "$_vv" || VERR="ocekavano cele cislo (sekundy)" ;;
+			is_int "$_vv" || VERR="expected a whole number (seconds)" ;;
 		APP_PRIORITY)
 			if is_int "$_vv"; then
-				[ "$_vv" -gt 100 ] && VERR="rozsah 0-100"
+				[ "$_vv" -gt 100 ] && VERR="range 0-100"
 			else
-				VERR="ocekavano cele cislo 0-100"
+				VERR="expected a whole number 0-100"
 			fi ;;
 		APP_OVERLAY_*)
-			# Hodnotu overi az set_uclamp/set_gpu/... v profile_apply, ktere
-			# maji validaci na jednom miste (kontrakt profilu). Tady jen
-			# hlidame, ze to je klic kontraktu profilu, ne preklep.
+			# The value is validated later by set_uclamp/set_gpu/... in
+			# profile_apply, which have the validation in one place (the profile
+			# contract). Here we only check that it is a profile contract key and
+			# not a typo.
 			_vpk="${_vk#APP_OVERLAY_}"
 			case "$_vpk" in
 				UCLAMP_TOPAPP_MIN|UCLAMP_TOPAPP_MAX|UCLAMP_FG_MIN|UCLAMP_FG_MAX|\
@@ -465,33 +473,35 @@ validate_key() {
 				THERMAL_PROFILE_CPU_MID|THERMAL_PROFILE_CPU_HIGH|\
 				VM_SWAPPINESS|VM_DIRTY_RATIO|VM_DIRTY_BG_RATIO|VM_VFS_CACHE_PRESSURE|\
 				IO_READAHEAD_KB|CHARGE_STOP_LEVEL) ;;
-				*) VERR="'$_vpk' neni klic kontraktu profilu (viz SPEC.md)" ;;
+				*) VERR="'$_vpk' is not a profile contract key (see SPEC.md)" ;;
 			esac ;;
 		*)
-			VERR="neznamy klic" ;;
+			VERR="unknown key" ;;
 	esac
 	[ -z "$VERR" ] && return 0
 	return 1
 }
 
 # ===========================================================================
-# STAV VRSTVY 3 - appmode.active
+# LAYER 3 STATE - appmode.active
 #
-# JEDEN RADEK, zapsany PRED aplikaci (ne po ni!):
+# ONE LINE, written BEFORE applying (not after!):
 #
-#   <pkg>|<epoch>|<stara_min_refresh>|<stary_peak_refresh>|<stare_display_size_forced>|<stara_density>
+#   <pkg>|<epoch>|<old_min_refresh>|<old_peak_refresh>|<old_display_size_forced>|<old_density>
 #
-# Dva sentinely, protoze "nebylo nastaveno" a "nesahali jsme na to" se pri
-# navratu chovaji RUZNE:
-#     -   hodnota nebyla nastavena  -> navrat = settings delete
-#     =   my jsme na to nesahali    -> navrat = nedelat nic
-# Bez toho rozliseni by vypnuta pojistka (APP_RES_ENABLE=0, REFRESH_VERIFIED=0)
-# pri odchodu zbytecne maza uzivateluv vlastni `display_density_forced`.
+# Two sentinels, because "was not set" and "we did not touch it" behave
+# DIFFERENTLY on restore:
+#     -   the value was not set     -> restore = settings delete
+#     =   we did not touch it       -> restore = do nothing
+# Without that distinction, a disabled safeguard (APP_RES_ENABLE=0,
+# REFRESH_VERIFIED=0) would needlessly delete the user's own
+# `display_density_forced` on exit.
 #
-# PROC SE PISE PRED APLIKACI: kdyby proces umrel mezi zapisem settings a
-# zapisem stavu, uzivatel by zustal na cizim rozliseni / 60 Hz a NIKDO by
-# nevedel, co vratit. Naopak stav bez aplikace je neskodny - `app leave`
-# jen zapise zpet to, co uz tam je (a `wr`-style porovnani to preskoci).
+# WHY IT IS WRITTEN BEFORE APPLYING: if the process died between writing the
+# settings and writing the state, the user would be left on someone else's
+# resolution / 60 Hz and NOBODY would know what to restore. State without the
+# application, in contrast, is harmless - `app leave` just writes back what is
+# already there (and a `wr`-style comparison skips it).
 # ===========================================================================
 
 AM_PKG=""; AM_T=0; AM_RMIN="="; AM_RPEAK="="; AM_SIZE="="; AM_DENS="="
@@ -501,7 +511,7 @@ appmode_read() {
 	[ -f "$APPMODE" ] || return 1
 	IFS='|' read -r AM_PKG AM_T AM_RMIN AM_RPEAK AM_SIZE AM_DENS < "$APPMODE" 2>/dev/null || return 1
 	if ! valid_pkg "$AM_PKG"; then
-		log ERROR "appmode.active je poskozeny (balicek='$AM_PKG') - vratim vrstvu 3 naslepo na systemovy default"
+		log ERROR "appmode.active is corrupted (package='$AM_PKG') - restoring layer 3 blindly to the system default"
 		return 2
 	fi
 	is_int "$AM_T" || AM_T=0
@@ -520,27 +530,28 @@ appmode_write() {
 	chmod 0600 "$APPMODE" 2>/dev/null
 }
 
-# sentinel: prazdna hodnota -> "-", jinak hodnota
+# sentinel: an empty value -> "-", otherwise the value
 sent() {
 	if [ -z "$1" ]; then printf '%s' '-'; else printf '%s' "$1"; fi
 }
 
 # ===========================================================================
-# VRSTVA 1 - Android Game Mode
+# LAYER 1 - Android Game Mode
 #
-# Zapisuje se JEN z `app set` / `app sync` (a z `app enter`, kdyz si to
-# pravidlo vyslovne vyzada pres GAME_APPLY=enter - to je pojistka pro pripad,
-# ze `cmd game set` nepreziva reboot; viz OTEVRENE OTAZKY ve vystupu ukolu).
-# DEMON `cmd` NEVOLA NIKDY - `cmd` je binder a demon ma zasadu zadny binder.
-# `app enter` je samostatny kratkozivy proces, ne demon.
+# Written ONLY from `app set` / `app sync` (and from `app enter` when the rule
+# explicitly asks for it via GAME_APPLY=enter - that is a safeguard for the case
+# where `cmd game set` does not survive a reboot; see OPEN QUESTIONS in the task
+# output).
+# THE DAEMON NEVER CALLS `cmd` - `cmd` is binder and the daemon has a no-binder
+# rule. `app enter` is a separate short-lived process, not the daemon.
 # ===========================================================================
 
 game_apply() {
-	# game_apply <pkg> - vraci 0 kdyz se aspon neco povedlo
+	# game_apply <pkg> - returns 0 when at least something succeeded
 	_gp="$1"
 	_gany=0
 	if ! command -v cmd >/dev/null 2>&1; then
-		log ERROR "prikaz 'cmd' neni k dispozici - vrstva 1 (Game Mode) preskocena"
+		log ERROR "the 'cmd' command is not available - layer 1 (Game Mode) skipped"
 		return 1
 	fi
 	if [ -n "$R_GAME_MODE" ]; then
@@ -548,11 +559,12 @@ game_apply() {
 		log INFO "cmd game mode $R_GAME_MODE $_gp -> ${_go:-ok}"
 		_gany=1
 	fi
-	# POZOR: `cmd game set` NAHRAZUJE celou intervention konfiguraci, nepridava.
-	# Dve samostatna volani se proto navzajem prepisou - overeno na zarizeni:
-	# `set --fps 30` a pak `set --downscale 0.7` skoncilo jako
-	#   Modes: {4=[Scaling:0.7, Fps:]}      <- fps se ztratilo
-	# Proto se oba priznaky posilaji v JEDNOM volani.
+	# CAUTION: `cmd game set` REPLACES the whole intervention configuration, it
+	# does not add to it. Two separate calls therefore overwrite each other -
+	# verified on the device: `set --fps 30` followed by `set --downscale 0.7`
+	# ended up as
+	#   Modes: {4=[Scaling:0.7, Fps:]}      <- the fps was lost
+	# That is why both flags are sent in a SINGLE call.
 	if [ -n "$R_GAME_FPS" ] || [ -n "$R_GAME_DOWNSCALE" ]; then
 		set --
 		[ -n "$R_GAME_FPS" ]       && set -- "$@" --fps "$R_GAME_FPS"
@@ -561,12 +573,12 @@ game_apply() {
 		log INFO "cmd game set $* $_gp -> ${_go:-ok}"
 		_gany=1
 	fi
-	[ "$_gany" = "1" ] || log INFO "$_gp: zadne GAME_* klice, vrstva 1 se nenastavuje"
+	[ "$_gany" = "1" ] || log INFO "$_gp: no GAME_* keys, layer 1 is not set"
 	return 0
 }
 
-# GAME_APPLY=enter: rate limit, aby aplikace strilejici resume eventy
-# nehammerovala binder
+# GAME_APPLY=enter: a rate limit so that an app firing resume events does not
+# hammer binder
 game_reapply_due() {
 	rdv "$APPGSTAMP" ""
 	_gsp=${V%% *}
@@ -586,28 +598,28 @@ game_stamp() {
 }
 
 # ===========================================================================
-# VRSTVA 3 - refresh rate + rozliseni
+# LAYER 3 - refresh rate + resolution
 # ===========================================================================
 
 refresh_apply() {
-	# refresh_apply <min> <peak> - vraci pres RA_OLDMIN / RA_OLDPEAK stare hodnoty
+	# refresh_apply <min> <peak> - returns the old values via RA_OLDMIN / RA_OLDPEAK
 	RA_OLDMIN="="
 	RA_OLDPEAK="="
 	if [ -z "$1" ] && [ -z "$2" ]; then
 		return 0
 	fi
 	if [ "$REFRESH_VERIFIED" != "1" ]; then
-		warn_once refresh "APP_REFRESH_MIN/PEAK je nastaveno, ale jmena klicu refresh rate NEJSOU na Androidu 16 overena (REFRESH_VERIFIED=0 v bin/pxtune-perapp) - vrstva 3 refresh rate se NEAPLIKUJE. Overovaci prikazy jsou ve vystupu ukolu."
+		warn_once refresh "APP_REFRESH_MIN/PEAK is set, but the refresh rate key names are NOT verified on Android 16 (REFRESH_VERIFIED=0 in bin/pxtune-perapp) - the layer 3 refresh rate is NOT APPLIED. The verification commands are in the task output."
 		return 0
 	fi
-	# stary stav se cte VZDY pred zapisem (kvuli navratu)
+	# the old state is ALWAYS read before writing (for the restore)
 	st_get "$REFRESH_NS" "$REFRESH_KEY_MIN"  && RA_OLDMIN=$(sent "$SV")
 	st_get "$REFRESH_NS" "$REFRESH_KEY_PEAK" && RA_OLDPEAK=$(sent "$SV")
 	return 0
 }
 
 refresh_commit() {
-	# refresh_commit <min> <peak> - skutecny zapis (az PO appmode_write)
+	# refresh_commit <min> <peak> - the actual write (only AFTER appmode_write)
 	[ "$REFRESH_VERIFIED" = "1" ] || return 0
 	if [ -n "$1" ]; then
 		st_put "$REFRESH_NS" "$REFRESH_KEY_MIN" "$1" \
@@ -621,17 +633,17 @@ refresh_commit() {
 }
 
 refresh_restore() {
-	# refresh_restore <stara_min> <stara_peak>
+	# refresh_restore <old_min> <old_peak>
 	[ "$REFRESH_VERIFIED" = "1" ] || return 0
 	case "$1" in
 		'='|'') : ;;
 		'-') st_del "$REFRESH_NS" "$REFRESH_KEY_MIN"; log INFO "settings delete $REFRESH_NS $REFRESH_KEY_MIN" ;;
-		*)   st_put "$REFRESH_NS" "$REFRESH_KEY_MIN" "$1"; log INFO "settings $REFRESH_NS $REFRESH_KEY_MIN -> $1 (navrat)" ;;
+		*)   st_put "$REFRESH_NS" "$REFRESH_KEY_MIN" "$1"; log INFO "settings $REFRESH_NS $REFRESH_KEY_MIN -> $1 (restore)" ;;
 	esac
 	case "$2" in
 		'='|'') : ;;
 		'-') st_del "$REFRESH_NS" "$REFRESH_KEY_PEAK"; log INFO "settings delete $REFRESH_NS $REFRESH_KEY_PEAK" ;;
-		*)   st_put "$REFRESH_NS" "$REFRESH_KEY_PEAK" "$2"; log INFO "settings $REFRESH_NS $REFRESH_KEY_PEAK -> $2 (navrat)" ;;
+		*)   st_put "$REFRESH_NS" "$REFRESH_KEY_PEAK" "$2"; log INFO "settings $REFRESH_NS $REFRESH_KEY_PEAK -> $2 (restore)" ;;
 	esac
 	return 0
 }
@@ -641,10 +653,10 @@ refresh_restore() {
 # ===========================================================================
 cmd_enter() {
 	_ep="$1"
-	valid_pkg "$_ep" || die 1 "neplatny balicek: '$_ep'"
+	valid_pkg "$_ep" || die 1 "invalid package: '$_ep'"
 
 	if ! rule_load "$_ep"; then
-		# pravidlo zmizelo - kdyz je na nej nasazena vrstva 3, sundej ji
+		# the rule is gone - if layer 3 is deployed for it, take it down
 		appmode_read
 		[ "$AM_PKG" = "$_ep" ] && cmd_leave
 		return 0
@@ -653,28 +665,29 @@ cmd_enter() {
 	if [ "$R_APP_ENABLED" != "1" ]; then
 		appmode_read
 		[ "$AM_PKG" = "$_ep" ] && cmd_leave
-		log INFO "$_ep: APP_ENABLED=0, pravidlo se ignoruje"
+		log INFO "$_ep: APP_ENABLED=0, the rule is ignored"
 		return 0
 	fi
 
-	# --- uz nekdo drzi vrstvu 3? ------------------------------------------
+	# --- is somebody already holding layer 3? -----------------------------
 	appmode_read
 	_ar=$?
 	if [ "$_ar" = "2" ]; then
-		cmd_leave                     # poskozeny stav -> slepy navrat
+		cmd_leave                     # corrupted state -> blind restore
 		appmode_read
 	fi
 	if [ -n "$AM_PKG" ]; then
 		if [ "$AM_PKG" = "$_ep" ]; then
-			# Idempotence: opakovany enter tehoz balicku nic nemeni.
-			# (Rychle proletnuti aplikacemi tudy neprojde uz z demona,
-			#  ale CLI a service.sh sem mohou prijit kdykoli.)
-			log INFO "$_ep: vrstva 3 uz je nasazena, nic nemenim"
+			# Idempotence: entering the same package again changes nothing.
+			# (Quickly flicking through apps never gets this far from the daemon,
+			#  but the CLI and service.sh can arrive here at any time.)
+			log INFO "$_ep: layer 3 is already deployed, changing nothing"
 			return 0
 		fi
-		# APP_PRIORITY: drzitel s vyssi prioritou se nenecha vytlacit,
-		# dokud mu bezi sticky okno. Zabranuje tomu, aby notifikace nebo
-		# rychla odpoved ve zpravach sundala nastaveni bezici hry.
+		# APP_PRIORITY: a holder with a higher priority does not let itself be
+		# displaced while its sticky window is running. This prevents a
+		# notification or a quick reply in messages from taking down the settings
+		# of a running game.
 		_amprio="$DEF_PRIORITY"
 		_amsticky="$DEF_STICKY_SEC"
 		_savepkg="$RL_PKG"
@@ -688,22 +701,22 @@ cmd_enter() {
 		_now=$(date '+%s' 2>/dev/null)
 		is_int "$_now" || _now=0
 		if [ "$R_APP_PRIORITY" -lt "$_amprio" ] && [ "$((_now - AM_T))" -lt "$_amsticky" ]; then
-			log INFO "$_ep (priorita $R_APP_PRIORITY) nevytlaci $AM_PKG (priorita $_amprio, sticky bezi) - vrstva 3 zustava"
+			log INFO "$_ep (priority $R_APP_PRIORITY) does not displace $AM_PKG (priority $_amprio, sticky running) - layer 3 stays"
 			return 0
 		fi
 		cmd_leave
 	fi
 
-	# --- vrstva 1 (jen kdyz si to pravidlo vyslovne vyzada) ---------------
+	# --- layer 1 (only when the rule explicitly asks for it) --------------
 	if [ "$R_GAME_APPLY" = "enter" ]; then
 		if game_reapply_due "$_ep"; then
-			log INFO "$_ep: GAME_APPLY=enter -> znovu nasazuji vrstvu 1"
+			log INFO "$_ep: GAME_APPLY=enter -> redeploying layer 1"
 			game_apply "$_ep"
 			game_stamp "$_ep"
 		fi
 	fi
 
-	# --- vrstva 3: nejdriv PRECIST stary stav ------------------------------
+	# --- layer 3: first READ the old state ---------------------------------
 	refresh_apply "$R_APP_REFRESH_MIN" "$R_APP_REFRESH_PEAK"
 	_oldsize="="
 	_olddens="="
@@ -714,71 +727,77 @@ cmd_enter() {
 			st_get global display_size_forced     && _oldsize=$(sent "$SV")
 			st_get secure display_density_forced  && _olddens=$(sent "$SV")
 		else
-			# TVRDE OMEZENI: bez APP_RES_ENABLE=1 se APP_RES ignoruje.
-			warn_once res "$_ep: APP_RES='$R_APP_RES' se IGNORUJE, protoze APP_RES_ENABLE neni 1 (vychozi je 0 primo v kodu). Zmena rozliseni je zakazana, dokud ji vyslovne nepovolis."
+			# HARD LIMIT: without APP_RES_ENABLE=1, APP_RES is ignored.
+			warn_once res "$_ep: APP_RES='$R_APP_RES' is IGNORED, because APP_RES_ENABLE is not 1 (the default is 0 in the code itself). Changing the resolution is forbidden until you explicitly allow it."
 		fi
 	fi
 
-	# --- stav se zapisuje PRED aplikaci ------------------------------------
+	# --- the state is written BEFORE applying -------------------------------
 	appmode_write "$_ep" "$RA_OLDMIN" "$RA_OLDPEAK" "$_oldsize" "$_olddens"
 
-	# --- a teprve ted se aplikuje ------------------------------------------
+	# --- and only now is it applied -----------------------------------------
 	refresh_commit "$R_APP_REFRESH_MIN" "$R_APP_REFRESH_PEAK"
 	if [ "$_dores" = "1" ]; then
-		# POVINNE pres `pxtune res <preset>`: ten sam vytvori res_pending
-		# a nasadi res_arm_watchdog (60s navrat na nativni, kdyz neprijde
-		# `pxtune res confirm`). Vlastni cestu k zapisu rozliseni tady
-		# ZAMERNE nedelame - pojistka smi byt jen jedna a uz existuje.
+		# MANDATORY via `pxtune res <preset>`: it creates res_pending itself and
+		# deploys res_arm_watchdog (a 60 s return to native when
+		# `pxtune res confirm` does not arrive). We DELIBERATELY do not write the
+		# resolution ourselves here - there may be only one safeguard and it
+		# already exists.
 		if [ -x "$PXTUNE" ]; then
 			"$PXTUNE" res "$R_APP_RES" >/dev/null 2>&1
-			log WARN "$_ep: nasazeno rozliseni '$R_APP_RES' pres 'pxtune res' (bezi 60s pojistka res_pending; potvrdit 'pxtune res confirm')"
+			log WARN "$_ep: resolution '$R_APP_RES' deployed via 'pxtune res' (a 60 s res_pending safeguard is running; confirm with 'pxtune res confirm')"
 		else
-			log ERROR "$PXTUNE neni spustitelny - rozliseni '$R_APP_RES' se nenasadilo"
+			log ERROR "$PXTUNE is not executable - the resolution '$R_APP_RES' was not deployed"
 		fi
 	fi
 
-	# --- vrstva 2 -----------------------------------------------------------
-	# Normalne ji nasazuje demon (target_profile krok 3b + --overlay).
-	# Kdyz demon nebezi (auto=off, po padu), udelej to tady - jinak by
-	# APP_PROFILE nikdy nic neudelal.
+	# --- layer 2 -----------------------------------------------------------
+	# Normally it is deployed by the daemon (target_profile step 3b + --overlay).
+	# When the daemon is not running (auto=off, after a crash), do it here -
+	# otherwise APP_PROFILE would never do anything.
 	if [ -n "$R_APP_PROFILE" ] && ! daemon_alive; then
 		if [ -f "$STATE_DIR/manual_override" ]; then
-			log INFO "$_ep: manual_override existuje, vrstvu 2 nenasazuji (rucni volba ma prednost)"
+			log INFO "$_ep: manual_override exists, not deploying layer 2 (a manual choice takes precedence)"
 		elif [ -x "$PXTUNE" ]; then
 			"$PXTUNE" profile "$R_APP_PROFILE" --auto --overlay "$_ep" >/dev/null 2>&1
-			log INFO "$_ep: demon nebezi, vrstvu 2 ('$R_APP_PROFILE') nasadil app enter"
+			log INFO "$_ep: the daemon is not running, layer 2 ('$R_APP_PROFILE') was deployed by app enter"
 		fi
 	fi
 
-	log INFO "app enter $_ep: vrstva 3 nasazena (refresh min='${R_APP_REFRESH_MIN:-}' peak='${R_APP_REFRESH_PEAK:-}' res='${R_APP_RES:-}' res_povoleno=$R_APP_RES_ENABLE)"
+	log INFO "app enter $_ep: layer 3 deployed (refresh min='${R_APP_REFRESH_MIN:-}' peak='${R_APP_REFRESH_PEAK:-}' res='${R_APP_RES:-}' res_allowed=$R_APP_RES_ENABLE)"
 	return 0
 }
 
 # ===========================================================================
-# app leave  - IDEMPOTENTNI
+# app leave  - IDEMPOTENT
 #
-# PROC HO MUSI VOLAT SEST NEZAVISLYCH CEST:
+# WHY SIX INDEPENDENT PATHS HAVE TO CALL IT:
 #
-#   1. normalni odchod z aplikace  - demon, vetev @APPLEAVE po APP_STICKY_SEC
-#   2. zhasnuti obrazovky          - demon, on_screen 0; uzivatel uz aplikaci
-#                                    nevidi a udalost popredi uz nemusi prijit
-#   3. cisty konec demona          - demon, cleanup(); po SIGTERM uz nikdo
-#                                    vrstvu 3 nesundá
-#   4. start nove instance po padu - demon, prime_state(); predchozi instance
-#                                    umrela uprostred epizody a stav zustal
-#   5. reboot                      - service.sh; appmode.active prezije reboot
-#                                    v /data, ale `settings` uz Android nacetl
-#                                    ze svého ulozeni - stav a skutecnost se
-#                                    musi srovnat
-#   6. pxtune revert               - uzivatel rekl "vrat VSECHNO na stock";
-#                                    vrstva 3 je soucast toho "vseho"
+#   1. a normal exit from the app  - the daemon, the @APPLEAVE branch after
+#                                    APP_STICKY_SEC
+#   2. the screen turning off      - the daemon, on_screen 0; the user can no
+#                                    longer see the app and a foreground event
+#                                    may never arrive
+#   3. a clean daemon shutdown     - the daemon, cleanup(); after SIGTERM
+#                                    nobody else would take layer 3 down
+#   4. a new instance starting     - the daemon, prime_state(); the previous
+#      after a crash                 instance died mid-episode and the state
+#                                    was left behind
+#   5. a reboot                    - service.sh; appmode.active survives a
+#                                    reboot in /data, but Android has already
+#                                    loaded `settings` from its own storage -
+#                                    state and reality have to be reconciled
+#   6. pxtune revert               - the user said "put EVERYTHING back to
+#                                    stock"; layer 3 is part of that
+#                                    "everything"
 #
-# Kazda z tech cest je jediny bod, kudy dana situace projde - zadna druha
-# neexistuje. Chyba tady znamena, ze uzivatel zustane zamceny na 60 Hz nebo
-# na cizim rozliseni a nema jak se z toho dostat jinak nez rucne v Nastavenich
-# (u rozliseni ani to ne, kdyz je UI necitelne mala/velke).
-# Proto je funkce idempotentni: bez appmode.active konci tise s kodem 0,
-# takze ji smi kdokoli volat naslepo, kdykoli a opakovane.
+# Each of those paths is the only point that particular situation passes
+# through - there is no second one. A failure here means the user stays locked
+# at 60 Hz or on someone else's resolution with no way out other than by hand in
+# Settings (and with the resolution, not even that, if the UI is illegibly
+# small/large).
+# That is why the function is idempotent: without appmode.active it quietly
+# exits with code 0, so anyone may call it blindly, at any time, repeatedly.
 # ===========================================================================
 cmd_leave() {
 	appmode_read
@@ -786,13 +805,13 @@ cmd_leave() {
 
 	if [ "$_lr" = "1" ]; then
 		rm -f "$APPWARN" 2>/dev/null
-		return 0                      # nic nasazeno = nic k vraceni
+		return 0                      # nothing deployed = nothing to restore
 	fi
 
 	if [ "$_lr" = "2" ]; then
-		# Poskozeny stav. Nevime, co jsme zapsali - vratime vrstvu 3 na
-		# systemovy default. Radeji zbytecny zasah nez zamceny uzivatel.
-		log ERROR "appmode.active nelze rozparsovat - slepy navrat vrstvy 3 na default"
+		# Corrupted state. We do not know what we wrote - so we restore layer 3 to
+		# the system default. Better a pointless intervention than a locked-out user.
+		log ERROR "appmode.active cannot be parsed - blind restore of layer 3 to the default"
 		if [ "$REFRESH_VERIFIED" = "1" ]; then
 			st_del "$REFRESH_NS" "$REFRESH_KEY_MIN"
 			st_del "$REFRESH_NS" "$REFRESH_KEY_PEAK"
@@ -808,23 +827,23 @@ cmd_leave() {
 
 	if [ "$AM_SIZE" != "=" ] || [ "$AM_DENS" != "=" ]; then
 		case "$AM_SIZE" in
-			'-') st_del global display_size_forced; log INFO "settings delete global display_size_forced (navrat)" ;;
+			'-') st_del global display_size_forced; log INFO "settings delete global display_size_forced (restore)" ;;
 			'=') : ;;
-			*)   st_put global display_size_forced "$AM_SIZE"; log INFO "settings global display_size_forced -> $AM_SIZE (navrat)" ;;
+			*)   st_put global display_size_forced "$AM_SIZE"; log INFO "settings global display_size_forced -> $AM_SIZE (restore)" ;;
 		esac
 		case "$AM_DENS" in
-			'-') st_del secure display_density_forced; log INFO "settings delete secure display_density_forced (navrat)" ;;
+			'-') st_del secure display_density_forced; log INFO "settings delete secure display_density_forced (restore)" ;;
 			'=') : ;;
-			*)   st_put secure display_density_forced "$AM_DENS"; log INFO "settings secure display_density_forced -> $AM_DENS (navrat)" ;;
+			*)   st_put secure display_density_forced "$AM_DENS"; log INFO "settings secure display_density_forced -> $AM_DENS (restore)" ;;
 		esac
-		# Pojistka uz neni potreba - rozliseni je zpatky tam, kde bylo.
+		# The safeguard is no longer needed - the resolution is back where it was.
 		if [ -f "$RESPEND_FILE" ] && [ -x "$PXTUNE" ]; then
 			"$PXTUNE" res confirm >/dev/null 2>&1
 		fi
 	fi
 
 	rm -f "$APPMODE" "$APPWARN" 2>/dev/null
-	log INFO "app leave: vrstva 3 vracena po '$AM_PKG' (refresh min='$AM_RMIN' peak='$AM_RPEAK' size='$AM_SIZE' dens='$AM_DENS')"
+	log INFO "app leave: layer 3 restored after '$AM_PKG' (refresh min='$AM_RMIN' peak='$AM_RPEAK' size='$AM_SIZE' dens='$AM_DENS')"
 	return 0
 }
 
@@ -833,10 +852,10 @@ cmd_leave() {
 # ===========================================================================
 
 cmd_list() {
-	[ -d "$APPDIR" ] || { msg "Zadna pravidla ($APPDIR neexistuje)."; return 0; }
+	[ -d "$APPDIR" ] || { msg "No rules ($APPDIR does not exist)."; return 0; }
 	appmode_read
 	_lany=0
-	printf '%-2s %-40s %-4s %-12s %-6s %-6s %s\n' "" "BALICEK" "ZAP" "PROFIL" "MODE" "FPS" "POPIS"
+	printf '%-2s %-40s %-4s %-12s %-6s %-6s %s\n' "" "PACKAGE" "ON" "PROFILE" "MODE" "FPS" "DESCRIPTION"
 	for _lf in "$APPDIR"/*.conf; do
 		[ -f "$_lf" ] || continue
 		_lany=1
@@ -846,44 +865,44 @@ cmd_list() {
 		rule_defaults
 		_lm=" "
 		[ "$_ln" = "$AM_PKG" ] && _lm="*"
-		_le="ne"
-		[ "$R_APP_ENABLED" = "1" ] && _le="ano"
+		_le="no"
+		[ "$R_APP_ENABLED" = "1" ] && _le="yes"
 		printf '%-2s %-40s %-4s %-12s %-6s %-6s %s\n' \
 			"$_lm" "$_ln" "$_le" "${R_APP_PROFILE:--}" "${R_GAME_MODE:--}" "${R_GAME_FPS:--}" "$R_APP_DESC"
 	done
 	if [ "$_lany" = "0" ]; then
-		msg "Zadna pravidla v $APPDIR."
-		msg "Sablona: /data/adb/modules/pixel_tune/apps/example.conf.template"
+		msg "No rules in $APPDIR."
+		msg "Template: /data/adb/modules/pixel_tune/apps/example.conf.template"
 		return 0
 	fi
 	msg ""
 	if [ -n "$AM_PKG" ]; then
-		msg "* = na tenhle balicek je prave nasazena vrstva 3 (od epochy $AM_T)"
+		msg "* = layer 3 is currently deployed for this package (since epoch $AM_T)"
 	fi
 	return 0
 }
 
 cmd_show() {
-	valid_pkg "$1" || die 1 "neplatny balicek: '$1'"
+	valid_pkg "$1" || die 1 "invalid package: '$1'"
 	if ! rule_load "$1"; then
-		warn "pxtune app: pravidlo pro '$1' neexistuje ($APPDIR/$1.conf)"
+		warn "pxtune app: no rule for '$1' ($APPDIR/$1.conf)"
 		return 2
 	fi
 	rule_defaults
 	appmode_read
 	msg "=== $1 ==="
-	msg "soubor            : $RL_FILE"
+	msg "file              : $RL_FILE"
 	msg "APP_DESC          : $R_APP_DESC"
 	msg "APP_ENABLED       : $R_APP_ENABLED"
 	msg ""
-	msg "--- vrstva 1: Android Game Mode (per-app, systemova, navrat netreba) ---"
-	msg "GAME_MODE         : ${R_GAME_MODE:-(nesahat)}"
-	msg "GAME_FPS          : ${R_GAME_FPS:-(nesahat)}"
-	msg "GAME_DOWNSCALE    : ${R_GAME_DOWNSCALE:-(nesahat)}"
+	msg "--- layer 1: Android Game Mode (per-app, system-held, no restore needed) ---"
+	msg "GAME_MODE         : ${R_GAME_MODE:-(leave alone)}"
+	msg "GAME_FPS          : ${R_GAME_FPS:-(leave alone)}"
+	msg "GAME_DOWNSCALE    : ${R_GAME_DOWNSCALE:-(leave alone)}"
 	msg "GAME_APPLY        : $R_GAME_APPLY"
 	msg ""
-	msg "--- vrstva 2: pxtune profil (globalni, navrat zdarma pres restore_stock_values) ---"
-	msg "APP_PROFILE       : ${R_APP_PROFILE:-(nechat na automatu)}"
+	msg "--- layer 2: pxtune profile (global, restore is free via restore_stock_values) ---"
+	msg "APP_PROFILE       : ${R_APP_PROFILE:-(leave it to the daemon)}"
 	if [ -n "$R_OVERLAY_KEYS" ]; then
 		for _sk in $R_OVERLAY_KEYS; do
 			eval "_sv=\$R_$_sk"
@@ -891,68 +910,68 @@ cmd_show() {
 		done
 	fi
 	msg ""
-	msg "--- vrstva 3: refresh / rozliseni (globalni, MUSI SE VRATIT) ---"
+	msg "--- layer 3: refresh / resolution (global, MUST BE RESTORED) ---"
 	if [ "$REFRESH_VERIFIED" = "1" ]; then
-		msg "APP_REFRESH_MIN   : ${R_APP_REFRESH_MIN:-(nesahat)}"
-		msg "APP_REFRESH_PEAK  : ${R_APP_REFRESH_PEAK:-(nesahat)}"
+		msg "APP_REFRESH_MIN   : ${R_APP_REFRESH_MIN:-(leave alone)}"
+		msg "APP_REFRESH_PEAK  : ${R_APP_REFRESH_PEAK:-(leave alone)}"
 	else
-		msg "APP_REFRESH_MIN   : ${R_APP_REFRESH_MIN:-(nesahat)}   [VYPNUTO: jmena klicu neoverena]"
-		msg "APP_REFRESH_PEAK  : ${R_APP_REFRESH_PEAK:-(nesahat)}   [VYPNUTO: jmena klicu neoverena]"
+		msg "APP_REFRESH_MIN   : ${R_APP_REFRESH_MIN:-(leave alone)}   [DISABLED: key names unverified]"
+		msg "APP_REFRESH_PEAK  : ${R_APP_REFRESH_PEAK:-(leave alone)}   [DISABLED: key names unverified]"
 	fi
 	if [ "$R_APP_RES_ENABLE" = "1" ]; then
-		msg "APP_RES           : ${R_APP_RES:-(nesahat)}"
+		msg "APP_RES           : ${R_APP_RES:-(leave alone)}"
 	else
-		msg "APP_RES           : ${R_APP_RES:-(nesahat)}   [IGNORUJE SE: APP_RES_ENABLE=0]"
+		msg "APP_RES           : ${R_APP_RES:-(leave alone)}   [IGNORED: APP_RES_ENABLE=0]"
 	fi
 	msg "APP_RES_ENABLE    : $R_APP_RES_ENABLE"
 	msg ""
-	msg "--- anti-flapping a priorita ---"
-	msg "APP_MIN_FG_SEC    : $R_APP_MIN_FG_SEC s (vstup je OPOZDENY)"
-	msg "APP_STICKY_SEC    : $R_APP_STICKY_SEC s (odchod je LINY)"
-	msg "APP_THERMAL_CAP   : $R_APP_THERMAL_CAP (1 = smi ignorovat teplotni uroven 1; uroven >= 2 NIKDY)"
+	msg "--- anti-flapping and priority ---"
+	msg "APP_MIN_FG_SEC    : $R_APP_MIN_FG_SEC s (entry is DELAYED)"
+	msg "APP_STICKY_SEC    : $R_APP_STICKY_SEC s (exit is LAZY)"
+	msg "APP_THERMAL_CAP   : $R_APP_THERMAL_CAP (1 = may ignore thermal level 1; level >= 2 NEVER)"
 	msg "APP_PRIORITY      : $R_APP_PRIORITY"
 	msg ""
 	if [ "$AM_PKG" = "$1" ]; then
-		msg "STAV              : AKTIVNI (vrstva 3 nasazena, epocha $AM_T)"
-		msg "  ulozeny navrat  : refresh_min='$AM_RMIN' refresh_peak='$AM_RPEAK' size='$AM_SIZE' density='$AM_DENS'"
+		msg "STATE             : ACTIVE (layer 3 deployed, epoch $AM_T)"
+		msg "  saved restore   : refresh_min='$AM_RMIN' refresh_peak='$AM_RPEAK' size='$AM_SIZE' density='$AM_DENS'"
 	else
-		msg "STAV              : neaktivni${AM_PKG:+ (vrstvu 3 drzi '$AM_PKG')}"
+		msg "STATE             : inactive${AM_PKG:+ (layer 3 is held by '$AM_PKG')}"
 	fi
 	msg ""
-	msg "PORADI PRIORIT (natvrdo v kodu):"
-	msg "  rucni manual_override > teplotni/bateriovy strop > per-app pravidlo > adaptivni automat"
+	msg "PRIORITY ORDER (hard-coded):"
+	msg "  manual override > thermal/battery cap > per-app rule > adaptive daemon"
 	return 0
 }
 
-# rule_save <pkg> - prepise cely conf z aktualnich R_* promennych (tmp + mv)
+# rule_save <pkg> - rewrites the whole conf from the current R_* variables (tmp + mv)
 rule_save() {
 	_sf="$APPDIR/$1.conf"
 	_st="$_sf.tmp.$$"
 	[ -d "$APPDIR" ] || mkdir -p "$APPDIR" 2>/dev/null
 	{
-		printf '# pixel_tune - per-app pravidlo pro %s\n' "$1"
-		printf '# Generovano `pxtune app set`. Prazdna hodnota = NESAHAT.\n'
-		printf '# Soubor se NESOURCUJE (vlastni parser v bin/pxtune-perapp).\n'
+		printf '# pixel_tune - per-app rule for %s\n' "$1"
+		printf '# Generated by `pxtune app set`. An empty value = LEAVE IT ALONE.\n'
+		printf '# The file is NOT SOURCED (a dedicated parser in bin/pxtune-perapp).\n'
 		printf 'APP_PKG="%s"\n'        "$1"
 		printf 'APP_DESC="%s"\n'       "$R_APP_DESC"
 		printf 'APP_ENABLED="%s"\n'    "$R_APP_ENABLED"
-		printf '\n# --- vrstva 1: Android Game Mode (skutecne per-app) ---\n'
+		printf '\n# --- layer 1: Android Game Mode (genuinely per-app) ---\n'
 		printf 'GAME_MODE="%s"\n'      "$R_GAME_MODE"
 		printf 'GAME_FPS="%s"\n'       "$R_GAME_FPS"
 		printf 'GAME_DOWNSCALE="%s"\n' "$R_GAME_DOWNSCALE"
 		printf 'GAME_APPLY="%s"\n'     "$R_GAME_APPLY"
-		printf '\n# --- vrstva 2: pxtune profil (globalni, navrat zdarma) ---\n'
+		printf '\n# --- layer 2: pxtune profile (global, restore is free) ---\n'
 		printf 'APP_PROFILE="%s"\n'    "$R_APP_PROFILE"
 		for _sk in $R_OVERLAY_KEYS; do
 			eval "_sv=\$R_$_sk"
 			printf '%s="%s"\n' "$_sk" "$_sv"
 		done
-		printf '\n# --- vrstva 3: refresh / rozliseni (globalni, MUSI SE VRATIT) ---\n'
+		printf '\n# --- layer 3: refresh / resolution (global, MUST BE RESTORED) ---\n'
 		printf 'APP_REFRESH_MIN="%s"\n'  "$R_APP_REFRESH_MIN"
 		printf 'APP_REFRESH_PEAK="%s"\n' "$R_APP_REFRESH_PEAK"
 		printf 'APP_RES="%s"\n'          "$R_APP_RES"
 		printf 'APP_RES_ENABLE="%s"\n'   "$R_APP_RES_ENABLE"
-		printf '\n# --- anti-flapping / priorita ---\n'
+		printf '\n# --- anti-flapping / priority ---\n'
 		printf 'APP_MIN_FG_SEC="%s"\n'  "$R_APP_MIN_FG_SEC"
 		printf 'APP_STICKY_SEC="%s"\n'  "$R_APP_STICKY_SEC"
 		printf 'APP_THERMAL_CAP="%s"\n' "$R_APP_THERMAL_CAP"
@@ -970,10 +989,10 @@ rule_save() {
 cmd_set() {
 	_sp="$1"
 	shift
-	valid_pkg "$_sp" || die 1 "neplatny balicek: '$_sp'"
-	[ "$#" -ge 1 ] || die 1 "pouziti: pxtune app set <pkg> KLIC=HODNOTA [KLIC=HODNOTA...]"
+	valid_pkg "$_sp" || die 1 "invalid package: '$_sp'"
+	[ "$#" -ge 1 ] || die 1 "usage: pxtune app set <pkg> KEY=VALUE [KEY=VALUE...]"
 
-	rule_load "$_sp"          # kdyz neexistuje, R_* zustanou prazdne = novy soubor
+	rule_load "$_sp"          # when it does not exist, R_* stay empty = a new file
 	rule_defaults
 	_snew=0
 	[ "$RL_OK" = "1" ] || _snew=1
@@ -983,13 +1002,13 @@ cmd_set() {
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 			*=*) ;;
-			*) warn "pxtune app: '$1' neni ve tvaru KLIC=HODNOTA"; _serr=1; shift; continue ;;
+			*) warn "pxtune app: '$1' is not in the form KEY=VALUE"; _serr=1; shift; continue ;;
 		esac
 		_sk="${1%%=*}"
 		_sv="${1#*=}"
 		shift
 		case "$_sk" in
-			*[!A-Za-z0-9_]*) warn "pxtune app: neplatny klic '$_sk'"; _serr=1; continue ;;
+			*[!A-Za-z0-9_]*) warn "pxtune app: invalid key '$_sk'"; _serr=1; continue ;;
 		esac
 		if ! validate_key "$_sk" "$_sv"; then
 			warn "pxtune app: $_sk='$_sv' - $VERR"
@@ -1002,72 +1021,72 @@ cmd_set() {
 				R_OVERLAY_KEYS="${R_OVERLAY_KEYS# }"
 				;;
 			GAME_MODE|GAME_FPS|GAME_DOWNSCALE) _sgame=1 ;;
-			APP_PKG) [ "$_sv" = "$_sp" ] || { warn "pxtune app: APP_PKG musi byt '$_sp'"; _serr=1; continue; } ;;
+			APP_PKG) [ "$_sv" = "$_sp" ] || { warn "pxtune app: APP_PKG must be '$_sp'"; _serr=1; continue; } ;;
 		esac
 		eval "R_$_sk=\$_sv"
 	done
 
-	[ "$_serr" = "0" ] || die 1 "nic se neulozilo (oprav chyby vyse)"
+	[ "$_serr" = "0" ] || die 1 "nothing was saved (fix the errors above)"
 
 	rule_defaults
-	rule_save "$_sp" || die 2 "zapis $APPDIR/$_sp.conf selhal"
+	rule_save "$_sp" || die 2 "writing $APPDIR/$_sp.conf failed"
 	if [ "$_snew" = "1" ]; then
-		log INFO "vytvoreno pravidlo $APPDIR/$_sp.conf"
-		msg "Vytvoreno pravidlo pro $_sp."
+		log INFO "created rule $APPDIR/$_sp.conf"
+		msg "Created a rule for $_sp."
 	else
-		log INFO "upraveno pravidlo $APPDIR/$_sp.conf"
-		msg "Pravidlo pro $_sp upraveno."
+		log INFO "edited rule $APPDIR/$_sp.conf"
+		msg "The rule for $_sp has been edited."
 	fi
 
-	# Vrstva 1 se zapisuje JEN odsud a z `app sync` (nikdy z demona).
+	# Layer 1 is written ONLY from here and from `app sync` (never from the daemon).
 	if [ "$_sgame" = "1" ]; then
 		if game_apply "$_sp"; then
 			game_stamp "$_sp"
-			msg "Vrstva 1 (Game Mode) nasazena pres 'cmd game'. Overit: pxtune app sync $_sp"
+			msg "Layer 1 (Game Mode) deployed via 'cmd game'. Verify with: pxtune app sync $_sp"
 		else
-			msg "POZOR: vrstva 1 (Game Mode) se NENASADILA - viz log. GAME_* klice jsou ulozene,"
-			msg "       zkus je nasadit znovu: pxtune app sync $_sp"
+			msg "CAUTION: layer 1 (Game Mode) was NOT DEPLOYED - see the log. The GAME_* keys are saved,"
+			msg "         try deploying them again: pxtune app sync $_sp"
 		fi
 	fi
 
-	# Kdyz je pravidlo prave aktivni, zmena vrstvy 3 se projevi az pri dalsim
-	# vstupu. Rikame to nahlas, at uzivatel necaka zazrak.
+	# When the rule is currently active, a layer 3 change only takes effect on the
+	# next entry. We say so out loud so the user does not expect a miracle.
 	appmode_read
 	if [ "$AM_PKG" = "$_sp" ]; then
-		msg "POZNAMKA: vrstva 3 je prave nasazena se STARYMI hodnotami."
-		msg "          Projevi se az po odchodu a novem vstupu do aplikace."
+		msg "NOTE: layer 3 is currently deployed with the OLD values."
+		msg "      It will take effect after leaving and re-entering the app."
 	fi
 	if [ -n "$R_APP_RES" ] && [ "$R_APP_RES_ENABLE" != "1" ]; then
-		msg "POZOR: APP_RES='$R_APP_RES' se IGNORUJE (APP_RES_ENABLE=0, vychozi hodnota je 0 primo v kodu)."
+		msg "CAUTION: APP_RES='$R_APP_RES' is IGNORED (APP_RES_ENABLE=0; the default is 0 in the code itself)."
 	fi
 	if [ -n "$R_APP_REFRESH_MIN$R_APP_REFRESH_PEAK" ] && [ "$REFRESH_VERIFIED" != "1" ]; then
-		msg "POZOR: APP_REFRESH_* se IGNORUJE - jmena klicu refresh rate nejsou na Androidu 16 overena."
-		msg "       Viz REFRESH_VERIFIED v bin/pxtune-perapp a overovaci prikazy v dokumentaci."
+		msg "CAUTION: APP_REFRESH_* is IGNORED - the refresh rate key names are not verified on Android 16."
+		msg "         See REFRESH_VERIFIED in bin/pxtune-perapp and the verification commands in the docs."
 	fi
 	return 0
 }
 
 cmd_rm() {
-	valid_pkg "$1" || die 1 "neplatny balicek: '$1'"
+	valid_pkg "$1" || die 1 "invalid package: '$1'"
 	_rf="$APPDIR/$1.conf"
 	if [ ! -f "$_rf" ]; then
-		warn "pxtune app: pravidlo pro '$1' neexistuje"
+		warn "pxtune app: no rule for '$1'"
 		return 2
 	fi
 	appmode_read
-	[ "$AM_PKG" = "$1" ] && cmd_leave      # nejdriv sundat vrstvu 3, pak mazat
+	[ "$AM_PKG" = "$1" ] && cmd_leave      # take layer 3 down first, then delete
 	rm -f "$_rf" 2>/dev/null
-	log INFO "smazano pravidlo $_rf"
-	msg "Pravidlo pro $1 smazano."
-	msg "POZNAMKA: vrstva 1 (Game Mode) zustava nastavena v systemu - drzi si ji Android."
-	msg "          Vratis ji: pxtune game $1 standard   (a 'cmd game set --fps 0 --downscale disable $1')"
+	log INFO "deleted rule $_rf"
+	msg "The rule for $1 has been deleted."
+	msg "NOTE: layer 1 (Game Mode) stays set in the system - Android keeps it."
+	msg "      Restore it with: pxtune game $1 standard   (and 'cmd game set --fps 0 --downscale disable $1')"
 	return 0
 }
 
 cmd_sync() {
-	valid_pkg "$1" || die 1 "neplatny balicek: '$1'"
+	valid_pkg "$1" || die 1 "invalid package: '$1'"
 	if ! rule_load "$1"; then
-		warn "pxtune app: pravidlo pro '$1' neexistuje"
+		warn "pxtune app: no rule for '$1'"
 		return 2
 	fi
 	rule_defaults
@@ -1078,22 +1097,22 @@ cmd_sync() {
 	msg "--- list-configs $1 ---"
 	gamecmd list-configs "$1"
 	msg ""
-	msg "Zkontroluj, ze vypis odpovida GAME_MODE=$R_GAME_MODE GAME_FPS=$R_GAME_FPS GAME_DOWNSCALE=$R_GAME_DOWNSCALE."
-	msg "Kdyz GameManager tuhle aplikaci NEBERE jako hru, vrstva 1 pro ni nefunguje a zbyvaji vrstvy 2 a 3."
+	msg "Check that the output matches GAME_MODE=$R_GAME_MODE GAME_FPS=$R_GAME_FPS GAME_DOWNSCALE=$R_GAME_DOWNSCALE."
+	msg "When the GameManager does NOT consider this app a game, layer 1 does not work for it and layers 2 and 3 remain."
 	return 0
 }
 
 # --- json ------------------------------------------------------------------
-# Vychozi rezim cte VYHRADNE soubory - zadny binder, WebUI ho smi volat
-# v polling smycce. `--live` navic sahne na `cmd game` (binder, timeout 10)
-# a je urceny pro rucni kontrolu, ne pro polling.
+# The default mode reads FILES ONLY - no binder, so the WebUI may call it in a
+# polling loop. `--live` additionally touches `cmd game` (binder, timeout 10) and
+# is meant for manual checking, not for polling.
 cmd_json() {
-	# VYKON: cely vystup se akumuluje do $J a vypise JEDNIM `print`.
-	# Duvod je merenim dolozeny: `printf` je na Androidu /system/bin/printf,
-	# tedy fork za ~17 ms, a kazde `$(jstr ...)` byl dalsi fork navic.
-	# Puvodni verze delala pri jednom pravidle pres 40 forku a `app json`
-	# trvalo 2790 ms - WebUI kvuli tomu zamrzalo pri otevreni zalozky.
-	# jstr/jnum/jbool proto nic nevypisuji, jen pripojuji do $J.
+	# PERFORMANCE: the whole output is accumulated into $J and printed with a
+	# SINGLE `print`. The reason is backed by measurement: `printf` on Android is
+	# /system/bin/printf, i.e. a fork of ~17 ms, and every `$(jstr ...)` was
+	# another fork on top. The original version made over 40 forks for a single
+	# rule and `app json` took 2790 ms - which made the WebUI freeze when the tab
+	# was opened. jstr/jnum/jbool therefore print nothing, they only append to $J.
 	_jlive=0
 	[ "$1" = "--live" ] && _jlive=1
 
@@ -1127,7 +1146,7 @@ cmd_json() {
 		jstr "$AM_DENS"
 		J="$J}},"
 	elif [ "$_jar" = "2" ]; then
-		J="$J{\"pkg\":null,\"error\":\"appmode.active je poskozeny\"},"
+		J="$J{\"pkg\":null,\"error\":\"appmode.active is corrupted\"},"
 	else
 		J="${J}null,"
 	fi
@@ -1215,36 +1234,38 @@ cmd_json() {
 }
 
 # ===========================================================================
-# cmd_preset - hotove sablony pro bezne kategorie aplikaci (nejen PoGO)
+# cmd_preset - ready-made templates for common app categories (not just PoGO)
 #
-# Preset jen sestavi rozumnou sadu KLIC=HODNOTA a preda ji cmd_set (stejna
-# validace i zapis). Uzivatel muze potom doladit `pxtune app set`em.
+# A preset just assembles a sensible set of KEY=VALUE pairs and hands it to
+# cmd_set (the same validation and the same write). The user can then fine-tune
+# it with `pxtune app set`.
 #
-# POCTIVE: skutecne per-app je jen vrstva 1 (Game Mode - a ta plati jen na to,
-# co GameManager bere jako hru). APP_PROFILE je GLOBALNI profil, ktery se jen
-# prepne po dobu, co je aplikace v popredi, a vrati se pri odchodu. Refresh
-# rate je zatim vypnuty (REFRESH_VERIFIED=0), takze presety s nim nepocitaji.
+# TO BE HONEST: the only genuinely per-app layer is layer 1 (Game Mode - and
+# that only applies to what the GameManager considers a game). APP_PROFILE is a
+# GLOBAL profile that is merely switched for as long as the app is in the
+# foreground and restored on exit. The refresh rate is disabled for now
+# (REFRESH_VERIFIED=0), so the presets do not count on it.
 # ===========================================================================
 cmd_preset() {
 	_pp="$1"; [ "$#" -ge 1 ] && shift
 	case "$_pp" in
 		''|-h|--help|help)
-			msg "pxtune app preset <pkg> <druh> [APP_DESC=\"...\"]"
-			msg "  druh: game | game-max | video | social | saver"
+			msg "pxtune app preset <pkg> <kind> [APP_DESC=\"...\"]"
+			msg "  kind: game | game-max | video | social | saver"
 			msg ""
-			msg "  game      3D hra, vykon se stropem na teplo (jako PoGO)"
-			msg "  game-max  plny vykon bez downscale (kratke relace/benchmark)"
-			msg "  video     streamovani - vyvazeny profil, bez zbytecneho boostu"
-			msg "  social    scrollovaci appky - registrace + balanced"
-			msg "  saver     priskrceni zrouta na pozadi (powersave ve popredi)"
+			msg "  game      a 3D game, performance with a thermal cap (like PoGO)"
+			msg "  game-max  full performance without downscaling (short sessions/benchmarks)"
+			msg "  video     streaming - a balanced profile, no pointless boost"
+			msg "  social    scrolling apps - registration + balanced"
+			msg "  saver     throttling a power hog in the foreground (powersave)"
 			msg ""
-			msg "  Priklad: pxtune app preset com.instagram.android saver"
+			msg "  Example: pxtune app preset com.instagram.android saver"
 			return 0 ;;
 	esac
-	valid_pkg "$_pp" || die 1 "neplatny balicek: '$_pp'"
+	valid_pkg "$_pp" || die 1 "invalid package: '$_pp'"
 	_pk="$1"; [ "$#" -ge 1 ] && shift
 
-	# volitelny APP_DESC="..." jako dalsi argument
+	# an optional APP_DESC="..." as a further argument
 	_pdesc=""
 	while [ "$#" -gt 0 ]; do
 		case "$1" in APP_DESC=*) _pdesc="$1" ;; esac
@@ -1253,57 +1274,57 @@ cmd_preset() {
 
 	case "$_pk" in
 		game)
-			# 3D hry na delsi hrani (PoGO, Genshin, CoD): vykon se stropem na teplo.
+			# 3D games for longer sessions (PoGO, Genshin, CoD): performance with a thermal cap.
 			set -- APP_ENABLED=1 APP_PROFILE=game GAME_MODE=performance \
 				GAME_FPS=60 GAME_DOWNSCALE=0.7 APP_THERMAL_CAP=1 \
 				APP_PRIORITY=90 APP_STICKY_SEC=25 APP_MIN_FG_SEC=8
-			[ -n "$_pdesc" ] || _pdesc="APP_DESC=hra (preset game)"
+			[ -n "$_pdesc" ] || _pdesc="APP_DESC=game (preset game)"
 			;;
 		game-max)
-			# kratke narocne relace / benchmark: plny vykon, bez downscale.
+			# short demanding sessions / benchmarks: full performance, no downscaling.
 			set -- APP_ENABLED=1 APP_PROFILE=performance GAME_MODE=performance \
 				GAME_FPS=0 GAME_DOWNSCALE=disable APP_THERMAL_CAP=1 \
 				APP_PRIORITY=95 APP_STICKY_SEC=20 APP_MIN_FG_SEC=8
-			[ -n "$_pdesc" ] || _pdesc="APP_DESC=hra naplno (preset game-max)"
+			[ -n "$_pdesc" ] || _pdesc="APP_DESC=game at full tilt (preset game-max)"
 			;;
 		video)
-			# streamovani (YouTube, Netflix): dekodovani je HW, boost netreba.
-			# Nejvetsi uspora by byla 60 Hz - ceka na overeni refresh klicu.
+			# streaming (YouTube, Netflix): decoding is HW, no boost needed.
+			# The biggest saving would be 60 Hz - waiting on the refresh key verification.
 			set -- APP_ENABLED=1 APP_PROFILE=balanced \
 				APP_PRIORITY=50 APP_STICKY_SEC=20 APP_MIN_FG_SEC=8
 			[ -n "$_pdesc" ] || _pdesc="APP_DESC=video/stream (preset video)"
 			;;
 		social)
-			# scrollovaci appky (Instagram, Chrome, TikTok): jen registrace +
-			# vyvazeny profil. Paky jsou tu omezene, viz poznamka nahore.
+			# scrolling apps (Instagram, Chrome, TikTok): just registration + a
+			# balanced profile. The levers are limited here, see the note above.
 			set -- APP_ENABLED=1 APP_PROFILE=balanced \
 				APP_PRIORITY=40 APP_STICKY_SEC=20
 			[ -n "$_pdesc" ] || _pdesc="APP_DESC=social/scroll (preset social)"
 			;;
 		saver)
-			# zrouti na pozadi, ktere chces ve popredi PRISKRTIT (powersave profil).
+			# power hogs you want THROTTLED in the foreground (the powersave profile).
 			set -- APP_ENABLED=1 APP_PROFILE=powersave \
 				APP_PRIORITY=30 APP_STICKY_SEC=15
-			[ -n "$_pdesc" ] || _pdesc="APP_DESC=setric (preset saver)"
+			[ -n "$_pdesc" ] || _pdesc="APP_DESC=saver (preset saver)"
 			;;
 		''|-h|--help)
-			msg "pxtune app preset <pkg> <druh> [APP_DESC=\"...\"]"
-			msg "  druh: game | game-max | video | social | saver"
+			msg "pxtune app preset <pkg> <kind> [APP_DESC=\"...\"]"
+			msg "  kind: game | game-max | video | social | saver"
 			msg ""
-			msg "  game      3D hra, vykon se stropem na teplo (jako PoGO)"
-			msg "  game-max  plny vykon bez downscale (kratke relace/benchmark)"
-			msg "  video     streamovani - vyvazeny profil, bez zbytecneho boostu"
-			msg "  social    scrollovaci appky - registrace + balanced"
-			msg "  saver     priskrceni zrouta na pozadi (powersave ve popredi)"
+			msg "  game      a 3D game, performance with a thermal cap (like PoGO)"
+			msg "  game-max  full performance without downscaling (short sessions/benchmarks)"
+			msg "  video     streaming - a balanced profile, no pointless boost"
+			msg "  social    scrolling apps - registration + balanced"
+			msg "  saver     throttling a power hog in the foreground (powersave)"
 			return 0
 			;;
 		*)
-			die 1 "neznamy preset '$_pk' (game|game-max|video|social|saver)"
+			die 1 "unknown preset '$_pk' (game|game-max|video|social|saver)"
 			;;
 	esac
 
 	set -- "$@" "$_pdesc"
-	msg "Nasazuji preset '$_pk' na $_pp ..."
+	msg "Applying preset '$_pk' to $_pp ..."
 	cmd_set "$_pp" "$@"
 }
 
@@ -1312,28 +1333,28 @@ cmd_preset() {
 # ===========================================================================
 usage() {
 	cat <<EOF
-pxtune app - per-app profily (pxtune-perapp $PERAPP_VERSION)
+pxtune app - per-app profiles (pxtune-perapp $PERAPP_VERSION)
 
-  pxtune app list                     seznam pravidel
-  pxtune app show <pkg>               podrobnosti jednoho pravidla
-  pxtune app set <pkg> KLIC=HOD ...   vytvorit/upravit pravidlo (+ nasadit vrstvu 1)
-  pxtune app preset <pkg> <druh>      hotova sablona: game|game-max|video|social|saver
-  pxtune app rm <pkg>                 smazat pravidlo (predtim sundat vrstvu 3)
-  pxtune app sync <pkg>               znovu nasadit vrstvu 1 a vypsat, co system hlasi
-  pxtune app json [--live]            strojovy vystup pro WebUI (bez --live zadny binder)
+  pxtune app list                     list the rules
+  pxtune app show <pkg>               details of a single rule
+  pxtune app set <pkg> KEY=VAL ...    create/edit a rule (+ deploy layer 1)
+  pxtune app preset <pkg> <kind>      ready-made template: game|game-max|video|social|saver
+  pxtune app rm <pkg>                 delete a rule (taking layer 3 down first)
+  pxtune app sync <pkg>               redeploy layer 1 and print what the system reports
+  pxtune app json [--live]            machine output for the WebUI (no binder without --live)
 
-  pxtune app enter <pkg>              INTERNI - vola demon
-  pxtune app leave                    INTERNI - idempotentni, smi ho volat kdokoli naslepo
+  pxtune app enter <pkg>              INTERNAL - called by the daemon
+  pxtune app leave                    INTERNAL - idempotent, anyone may call it blindly
 
-Klice pravidla:
+Rule keys:
   APP_PKG APP_DESC APP_ENABLED
   GAME_MODE GAME_FPS GAME_DOWNSCALE GAME_APPLY(once|enter)
-  APP_PROFILE APP_OVERLAY_<klic profilu>
+  APP_PROFILE APP_OVERLAY_<profile key>
   APP_REFRESH_MIN APP_REFRESH_PEAK APP_RES APP_RES_ENABLE
   APP_MIN_FG_SEC APP_STICKY_SEC APP_THERMAL_CAP APP_PRIORITY
 
-Pravidla: $APPDIR/<package>.conf
-Stav v3 : $APPMODE
+Rules  : $APPDIR/<package>.conf
+L3 state: $APPMODE
 EOF
 }
 
@@ -1346,16 +1367,16 @@ main() {
 	[ "$#" -ge 1 ] && shift
 	case "$_c" in
 		list)  cmd_list "$@" ;;
-		show)  [ -n "$1" ] || die 1 "pouziti: pxtune app show <pkg>"; cmd_show "$1" ;;
-		set)   [ -n "$1" ] || die 1 "pouziti: pxtune app set <pkg> KLIC=HODNOTA..."; cmd_set "$@" ;;
+		show)  [ -n "$1" ] || die 1 "usage: pxtune app show <pkg>"; cmd_show "$1" ;;
+		set)   [ -n "$1" ] || die 1 "usage: pxtune app set <pkg> KEY=VALUE..."; cmd_set "$@" ;;
 		preset) cmd_preset "$@" ;;
-		rm)    [ -n "$1" ] || die 1 "pouziti: pxtune app rm <pkg>"; cmd_rm "$1" ;;
-		sync)  [ -n "$1" ] || die 1 "pouziti: pxtune app sync <pkg>"; cmd_sync "$1" ;;
-		enter) [ -n "$1" ] || die 1 "pouziti: pxtune app enter <pkg>"; cmd_enter "$1" ;;
+		rm)    [ -n "$1" ] || die 1 "usage: pxtune app rm <pkg>"; cmd_rm "$1" ;;
+		sync)  [ -n "$1" ] || die 1 "usage: pxtune app sync <pkg>"; cmd_sync "$1" ;;
+		enter) [ -n "$1" ] || die 1 "usage: pxtune app enter <pkg>"; cmd_enter "$1" ;;
 		leave) cmd_leave ;;
 		json)  cmd_json "$@" ;;
 		-h|--help|help|"") usage; [ -z "$_c" ] && exit 1; exit 0 ;;
-		*)     warn "pxtune app: neznamy podprikaz '$_c'"; usage >&2; exit 1 ;;
+		*)     warn "pxtune app: unknown subcommand '$_c'"; usage >&2; exit 1 ;;
 	esac
 }
 

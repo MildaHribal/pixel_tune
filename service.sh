@@ -2,20 +2,21 @@
 #
 # pixel_tune / service.sh
 #
-# POZDNÍ FÁZE (late_start service). Podle dokumentace KernelSU je NEBLOKUJÍCÍ —
-# běží paralelně se zbytkem bootu. Chyba tady tedy nemůže způsobit bootloop,
-# proto sem patří VŠECHNO ostatní kromě zramu.
+# LATE PHASE (late_start service). Per the KernelSU docs this is NON-BLOCKING —
+# it runs in parallel with the rest of the boot. A failure here therefore cannot
+# cause a bootloop, which is why EVERYTHING except zram belongs here.
 #
-# Zodpovědnosti:
-#   - DISABLE check
-#   - počkat na ustálení systému
-#   - jednorázově vytvořit backup/stock.conf (delegováno na `pxtune`)
-#   - aplikovat aktivní profil
-#   - vyřešit rozlišení (nepotvrzená změna / perzistentní nastavení)
-#   - nastartovat adaptivní démona, pokud je zapnutý
-#   - NA KONCI vynulovat boot_count = "boot doběhl v pořádku"
+# Responsibilities:
+#   - the DISABLE check
+#   - wait for the system to settle
+#   - create backup/stock.conf once (delegated to `pxtune`)
+#   - apply the active profile
+#   - deal with the resolution (unconfirmed change / persistent setting)
+#   - start the adaptive daemon if it is enabled
+#   - AT THE END zero boot_count = "the boot completed fine"
 #
-# Skript NIKDY neskončí nenulovým kódem, nepoužívá `set -e` a je idempotentní.
+# The script NEVER exits with a non-zero code, does not use `set -e` and is
+# idempotent.
 
 MODDIR=${0%/*}
 case "$MODDIR" in
@@ -34,27 +35,32 @@ LOG_MAX=524288
 
 BACKUP="$STATE/backup/stock.conf"
 
-# Čekání na ustálení systému — ZDŮVODNĚNÍ:
+# Waiting for the system to settle — THE REASONING:
 #
-#  a) BOOT_WAIT_MAX: aktivně čekáme na `sys.boot_completed=1` místo slepého
-#     sleepu. Do té doby neběží system_server, takže `settings put` a `cmd game`
-#     (SPEC: rozlišení, Game Mode) by tiše selhaly. Strop 180 s je horní pojistka
-#     pro pomalý první boot po OTA/wipe; při běžném bootu Pixelu 8a se smyčka
-#     ukončí mnohem dřív a nic se nezdrží.
+#  a) BOOT_WAIT_MAX: we actively wait for `sys.boot_completed=1` instead of a
+#     blind sleep. Until then system_server is not running, so `settings put`
+#     and `cmd game` (SPEC: resolution, Game Mode) would fail silently. The
+#     180 s ceiling is an upper safeguard for a slow first boot after an
+#     OTA/wipe; on a normal Pixel 8a boot the loop ends far sooner and nothing
+#     is delayed.
 #
-#  b) SETTLE: po boot_completed ještě 20 s. Důvod z naměřených dat ve SPEC:
-#     - thermal HAL přepisuje cooling devices v cyklu ~7 s a sám si nastavuje
-#       `vendor.thermal.<SENZOR>.profile` (při probu byl už na `camera`),
-#     - Googlí power-service.pixel-libperfmgr sahá na uclamp boost při startu.
-#     Kdybychom psali dřív, HAL by naše hodnoty přepsal a profil by "nezabral".
-#     20 s ~= 3 cykly HAL = konzervativní rezerva. Přesná doba doběhu HALů
-#     ve SPEC naměřená NENÍ (viz OTEVŘENÉ OTÁZKY) — je to volená, nikoli
-#     odvozená konstanta. Zdržení nikomu nevadí: skript je neblokující.
+#  b) SETTLE: another 20 s after boot_completed. The reason comes from the
+#     measured data in the SPEC:
+#     - the thermal HAL rewrites the cooling devices on a ~7 s cycle and sets
+#       `vendor.thermal.<SENSOR>.profile` itself (during the probe it was
+#       already on `camera`),
+#     - Google power-service.pixel-libperfmgr touches the uclamp boost at
+#       startup.
+#     If we wrote sooner, the HAL would overwrite our values and the profile
+#     would appear not to take. 20 s ~= 3 HAL cycles = a conservative margin.
+#     The exact settling time of the HALs is NOT measured in the SPEC (see OPEN
+#     QUESTIONS) — it is a chosen constant, not a derived one. The delay bothers
+#     nobody: the script is non-blocking.
 BOOT_WAIT_MAX=180
 SETTLE=20
 
 # ---------------------------------------------------------------------------
-# log — formát dle SPEC (inline, ať skript nezávisí na dalších souborech)
+# log — format per the SPEC (inline, so the script does not depend on other files)
 # ---------------------------------------------------------------------------
 log() {
 	_lvl="$1"
@@ -71,14 +77,14 @@ log() {
 	return 0
 }
 
-# wr <cesta> <hodnota> — zápis do souboru bez úniku chybové hlášky na stderr.
-# Redirekce se vyhodnocují zleva doprava, takže `echo x >soubor 2>/dev/null`
-# hlášku "Permission denied" nepotlačí; proto se obaluje celý blok.
+# wr <path> <value> — write to a file without leaking an error message to stderr.
+# Redirections are evaluated left to right, so `echo x >file 2>/dev/null` does
+# not suppress the "Permission denied" message; hence the whole block is wrapped.
 wr() {
 	{ echo "$2" >"$1"; } 2>/dev/null
 }
 
-# vynulování počítadla bootloop ochrany. Volá se právě na jednom místě na konci.
+# zeroing the bootloop protection counter. Called from exactly one place at the end.
 clear_boot_count() {
 	wr "$STATE/boot_count" 0
 	sync 2>/dev/null
@@ -87,27 +93,28 @@ clear_boot_count() {
 mkdir -p "$STATE" "$STATE/backup" "$STATE/profiles" 2>/dev/null
 
 # ---------------------------------------------------------------------------
-# Úklid běhových značek po předchozím bootu.
+# Cleaning up runtime markers from the previous boot.
 #
-# `pxtune-auto.exiting` je značka "démon má skončit / watchdog ho nesmí
-# restartovat". Leží ale v /data/adb, což reboot PŘEŽIJE — takže když se démon
-# zastavil před restartem, po bootu se sice nastartoval, hned uviděl značku
-# a zase se ukončil. Naměřeno: démon naběhl v 07:35:58 a v 07:36:23 skončil.
-# Značka platí jen pro běh, ve kterém vznikla.
+# `pxtune-auto.exiting` is the "the daemon should stop / the watchdog must not
+# restart it" marker. It lives in /data/adb though, which SURVIVES a reboot — so
+# when the daemon was stopped before a restart, after the boot it did start, saw
+# the marker immediately and quit again. Measured: the daemon came up at
+# 07:35:58 and was gone at 07:36:23. The marker only applies to the run it was
+# created in.
 #
-# `pxtune-auto.pid` po tvrdém vypnutí ukazuje na neexistující proces a mohl by
-# zmást kontrolu "už běží".
+# After a hard shutdown `pxtune-auto.pid` points at a non-existent process and
+# could confuse the "already running" check.
 rm -f "$STATE/pxtune-auto.exiting" "$STATE/pxtune-auto.pid" \
       "$STATE/pxtune-auto.fifo" 2>/dev/null
 rmdir "$STATE/pxtune-auto.lock" 2>/dev/null
 
 # ---------------------------------------------------------------------------
-# 0) Doplnění profilů z modulu.
-# Bez tohoto by čerstvá instalace neměla ŽÁDNÉ profily (CLI umí vytvořit jen
-# prázdný balanced.conf) a démon by při každé události selhával na
-# "profil neexistuje". Kopírují se JEN chybějící soubory — uživatelovy úpravy
-# existujících profilů se nikdy nepřepisují. Zápis přes .tmp + mv, aby
-# přerušený boot nenechal rozepsaný soubor.
+# 0) Seeding profiles from the module.
+# Without this a fresh install would have NO profiles at all (the CLI can only
+# create an empty balanced.conf) and the daemon would fail on every event with
+# "profile does not exist". ONLY missing files are copied — the user's edits to
+# existing profiles are never overwritten. Written via .tmp + mv so an
+# interrupted boot does not leave a half-written file.
 # ---------------------------------------------------------------------------
 if [ -d "$MODDIR/profiles" ]; then
 	for _src in "$MODDIR/profiles"/*.conf; do
@@ -116,7 +123,7 @@ if [ -d "$MODDIR/profiles" ]; then
 		if [ ! -f "$_dst" ]; then
 			cp "$_src" "$_dst.tmp" 2>/dev/null \
 				&& mv "$_dst.tmp" "$_dst" 2>/dev/null \
-				&& log INFO "service: profil ${_src##*/} doplněn z modulu"
+				&& log INFO "service: profile ${_src##*/} seeded from the module"
 		fi
 	done
 fi
@@ -124,16 +131,17 @@ fi
 # ---------------------------------------------------------------------------
 # 1) DISABLE
 #
-# Pozor: boot_count se tu ZÁMĚRNĚ nenuluje. Když je modul vypnutý, nedělá nic,
-# a post-fs-data.sh se stejně ukončí dřív, takže počítadlo neroste.
+# Note: boot_count is DELIBERATELY not zeroed here. When the module is off it
+# does nothing, and post-fs-data.sh exits earlier anyway, so the counter does
+# not grow.
 # ---------------------------------------------------------------------------
 if [ -f "$STATE/DISABLE" ]; then
-	log INFO "service: existuje DISABLE, nic se neaplikuje"
+	log INFO "service: DISABLE exists, nothing is applied"
 	exit 0
 fi
 
 # ---------------------------------------------------------------------------
-# 2) Čekání na ustálení systému
+# 2) Waiting for the system to settle
 # ---------------------------------------------------------------------------
 i=0
 while [ "$i" -lt "$BOOT_WAIT_MAX" ]; do
@@ -143,105 +151,108 @@ while [ "$i" -lt "$BOOT_WAIT_MAX" ]; do
 done
 
 if [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; then
-	# Boot doslova doběhl → ochrana proti bootloopu splnila účel, nulujeme TEĎ.
-	# Kdybychom čekali až na konec skriptu (SETTLE + profil + settings = desítky
-	# sekund), tři restarty uživatele v tom okně by modul vypnuly, přestože
-	# systém pokaždé nabootoval v pořádku. Počítadlo má hlídat bootloop,
-	# ne rychlost uživatele. Volání na konci skriptu zůstává (je idempotentní
-	# a pokrývá i větev, kde boot_completed nepřišlo).
+	# The boot literally completed → the bootloop protection has served its
+	# purpose, so we zero it NOW. If we waited until the end of the script
+	# (SETTLE + profile + settings = tens of seconds), three user restarts in that
+	# window would disable the module even though the system booted fine every
+	# time. The counter is there to catch a bootloop, not the user's speed. The
+	# call at the end of the script stays (it is idempotent and also covers the
+	# branch where boot_completed never arrived).
 	clear_boot_count
-	log INFO "service: sys.boot_completed po ${i}s, boot_count vynulován, čekám dalších ${SETTLE}s na doběh HALů"
+	log INFO "service: sys.boot_completed after ${i}s, boot_count zeroed, waiting another ${SETTLE}s for the HALs to settle"
 else
-	log WARN "service: sys.boot_completed nepřišlo do ${BOOT_WAIT_MAX}s, pokračuji opatrně"
+	log WARN "service: sys.boot_completed did not arrive within ${BOOT_WAIT_MAX}s, continuing carefully"
 fi
 sleep "$SETTLE"
 
-# DISABLE mohl vzniknout během čekání (uživatel / WebUI). Zkontrolovat znovu.
+# DISABLE may have appeared while waiting (user / WebUI). Check again.
 if [ -f "$STATE/DISABLE" ]; then
-	log INFO "service: DISABLE vzniklo během čekání, končím bez zásahu"
+	log INFO "service: DISABLE appeared while waiting, exiting without intervening"
 	exit 0
 fi
 
 if [ ! -x "$PXTUNE" ]; then
-	log ERROR "service: $PXTUNE neexistuje nebo není spustitelný — nic neaplikuji"
-	# boot ale proběhl v pořádku, počítadlo patří vynulovat
+	log ERROR "service: $PXTUNE does not exist or is not executable — applying nothing"
+	# the boot itself went fine though, so the counter should be zeroed
 	clear_boot_count
 	exit 0
 fi
 
 # ---------------------------------------------------------------------------
-# 3) backup/stock.conf — jednorázově, delegováno na `pxtune`
+# 3) backup/stock.conf — once, delegated to `pxtune`
 #
-# Snapshot stock hodnot smí umět jen jedno místo (CLI zná všechny cesty
-# a jejich formát), tady se logika NEDUPLIKUJE.
+# Only one place may know how to snapshot the stock values (the CLI knows all
+# the paths and their formats); the logic is NOT DUPLICATED here.
 #
-# Jak se to deleguje: `bin/pxtune` volá ve svém `main()` bezpodmínečně
-# `snapshot_stock` + `seed_profiles` PŘED rozskokem na podpříkaz, a
-# `snapshot_stock` je idempotentní ("vytvori se JEDNOU, nikdy neprepisuje").
-# Stačí tedy spustit libovolný neškodný podpříkaz. Používáme
-# `profile current`, což jen vypíše jméno aktivního profilu a nic nemění.
-# (Samostatný podpříkaz `pxtune backup` v CLI NEEXISTUJE — viz OTEVŘENÉ OTÁZKY.)
+# How the delegation works: `bin/pxtune` unconditionally calls `snapshot_stock`
+# + `seed_profiles` in its `main()` BEFORE dispatching to a subcommand, and
+# `snapshot_stock` is idempotent ("created ONCE, never overwritten"). Running
+# any harmless subcommand is therefore enough. We use `profile current`, which
+# only prints the name of the active profile and changes nothing.
+# (There is NO separate `pxtune backup` subcommand in the CLI — see OPEN
+# QUESTIONS.)
 #
-# TVRDÉ OMEZENÍ č. 5 ze SPEC: "vše musí být reversibilní a zálohované".
-# Když se záloha nepodaří vytvořit, profil ZÁMĚRNĚ NEAPLIKUJEME — jinak by
-# vznikl stav, ze kterého `pxtune revert` neumí zpátky.
+# HARD CONSTRAINT #5 from the SPEC: "everything must be reversible and backed
+# up". When the backup cannot be created, we DELIBERATELY DO NOT APPLY the
+# profile — otherwise we would create a state `pxtune revert` cannot undo.
 # ---------------------------------------------------------------------------
 APPLY_OK=1
 if [ ! -s "$BACKUP" ]; then
-	log INFO "service: backup/stock.conf chybí, nechávám ho vytvořit CLI (pxtune profile current)"
+	log INFO "service: backup/stock.conf is missing, letting the CLI create it (pxtune profile current)"
 	"$PXTUNE" profile current >/dev/null 2>&1
 	if [ ! -s "$BACKUP" ]; then
 		APPLY_OK=0
-		log ERROR "service: nevznikl $BACKUP — profil se NEAPLIKUJE (bez zálohy není revert)"
+		log ERROR "service: $BACKUP was not created — the profile is NOT APPLIED (no revert without a backup)"
 	else
-		log INFO "service: backup/stock.conf vytvořen"
+		log INFO "service: backup/stock.conf created"
 	fi
 fi
 
 # ---------------------------------------------------------------------------
-# 4) Aktivní profil
+# 4) The active profile
 #
-# POZOR na kontrakt CLI: `pxtune profile <name>` podle SPEC (a podle skutečné
-# implementace v bin/pxtune, funkce profile_apply) nastavuje `manual_override`.
-# Při bootu je to nežádoucí vedlejší efekt — uživatel, který běží v režimu
-# `auto`, by se po každém rebootu ocitl v ručním režimu a automat by se už
-# nikdy nechytl. Proto si stav manual_override před voláním zapamatujeme
-# a po aplikaci ho vrátíme přesně do původní podoby.
+# MIND the CLI contract: per the SPEC (and per the actual implementation in
+# bin/pxtune, function profile_apply) `pxtune profile <name>` sets
+# `manual_override`. During a boot that is an undesirable side effect — a user
+# running in `auto` mode would end up in manual mode after every reboot and the
+# daemon would never take over again. We therefore remember the manual_override
+# state before the call and restore it exactly afterwards.
 #
-# Proč ne `pxtune profile <name> --auto` (příznak, který si žádá pxtune-auto):
-#   1. v bin/pxtune zatím NENÍ implementovaný (viz hlavička pxtune-auto:
-#      "CO JE POTREBA DOPLNIT DO bin/pxtune (jeste to tam neni)"),
-#   2. i až bude, jeho kontrakt je "když manual_override existuje, neudělej nic"
-#      — což je pro boot špatně: aktivní profil se má obnovit VŽDY, i v ručním
-#      režimu. Uložit a vrátit příznak je tedy správnější řešení i do budoucna.
+# Why not `pxtune profile <name> --auto` (the flag pxtune-auto asks for):
+#   1. it is not implemented in bin/pxtune yet (see the pxtune-auto header:
+#      "WHAT NEEDS TO BE ADDED TO bin/pxtune (not there yet)"),
+#   2. and even once it is, its contract is "when manual_override exists, do
+#      nothing" — which is wrong for a boot: the active profile should ALWAYS be
+#      restored, including in manual mode. Saving and restoring the flag is
+#      therefore the better solution going forward as well.
 # ---------------------------------------------------------------------------
 if [ "$APPLY_OK" = "1" ]; then
 	ACTIVE=$(cat "$STATE/active" 2>/dev/null | tr -d ' \t\r\n')
 
 	if [ -z "$ACTIVE" ]; then
-		# SPEC popisuje 'balanced' jako "Vyvážený — stock chování", takže je to
-		# bezpečný default pro čerstvou instalaci. Nastavíme ho jen když profil
-		# opravdu existuje; nic si nevymýšlíme.
+		# The SPEC describes 'balanced' as "Balanced — stock behaviour", so it is a
+		# safe default for a fresh install. We set it only when the profile really
+		# exists; we do not invent anything.
 		if [ -f "$STATE/profiles/balanced.conf" ]; then
 			ACTIVE=balanced
 			wr "$STATE/active" "$ACTIVE"
-			log INFO "service: 'active' chybělo, nastaven default profil balanced"
+			log INFO "service: 'active' was missing, default profile balanced set"
 		else
-			log WARN "service: 'active' chybí a profiles/balanced.conf neexistuje — neaplikuji žádný profil"
+			log WARN "service: 'active' is missing and profiles/balanced.conf does not exist — applying no profile"
 		fi
 	fi
 
-	# sanitizace jména (soubor je uživatelsky zapisovatelný, jde do argumentu)
+	# sanitise the name (the file is user-writable and goes into an argument)
 	case "$ACTIVE" in
 	'') ;;
 	*[!A-Za-z0-9_-]*)
-		log ERROR "service: neplatné jméno profilu '$ACTIVE' v $STATE/active, ignoruji"
+		log ERROR "service: invalid profile name '$ACTIVE' in $STATE/active, ignoring"
 		ACTIVE=''
 		;;
 	esac
 
 	if [ -n "$ACTIVE" ] && [ ! -f "$STATE/profiles/$ACTIVE.conf" ]; then
-		log ERROR "service: profil '$ACTIVE' neexistuje ($STATE/profiles/$ACTIVE.conf), neaplikuji"
+		log ERROR "service: profile '$ACTIVE' does not exist ($STATE/profiles/$ACTIVE.conf), not applying"
 		ACTIVE=''
 	fi
 
@@ -252,7 +263,7 @@ if [ "$APPLY_OK" = "1" ]; then
 		"$PXTUNE" profile "$ACTIVE" >/dev/null 2>&1
 		RC=$?
 
-		# obnovení původního stavu manual_override (viz komentář výše)
+		# restore the original manual_override state (see the comment above)
 		if [ "$HAD_OVERRIDE" = "0" ]; then
 			rm -f "$STATE/manual_override" 2>/dev/null
 		else
@@ -260,162 +271,170 @@ if [ "$APPLY_OK" = "1" ]; then
 		fi
 
 		if [ "$RC" = "0" ]; then
-			log INFO "service: aplikován profil '$ACTIVE' (manual_override=$HAD_OVERRIDE zachován)"
+			log INFO "service: applied profile '$ACTIVE' (manual_override=$HAD_OVERRIDE preserved)"
 		else
-			log ERROR "service: 'pxtune profile $ACTIVE' skončil s kódem $RC"
+			log ERROR "service: 'pxtune profile $ACTIVE' exited with code $RC"
 		fi
 	fi
 fi
 
 # ---------------------------------------------------------------------------
-# 4b) Per-app: vrstva 3 z minulého běhu
+# 4b) Per-app: layer 3 from the previous run
 #
-# `appmode.active` leží v /data, takže reboot přežije — ale nastavení, které
-# popisuje (refresh rate, display_size_forced, display_density_forced), si
-# Android načetl ze svého vlastního úložiště ještě před tímto skriptem.
-# Stav a skutečnost se proto musí srovnat: uložené „staré" hodnoty jsou
-# přesně to, co má platit, když žádná aplikace s pravidlem neběží.
+# `appmode.active` lives in /data, so it survives a reboot — but the settings it
+# describes (refresh rate, display_size_forced, display_density_forced) were
+# loaded by Android from its own storage before this script even ran. State and
+# reality therefore have to be reconciled: the stored "old" values are exactly
+# what should apply when no app with a rule is running.
 #
-# Tohle je 5. ze ŠESTI nezávislých cest, které musí volat `app leave`
-# (výčet a důvody jsou u cmd_leave() v bin/pxtune-perapp). Bez ní by
-# uživatel po pádu telefonu uprostřed hry zůstal zamčený na 60 Hz nebo
-# na cizím rozlišení a reboot by mu nepomohl.
+# This is the 5th of the SIX independent paths that must call `app leave` (the
+# list and the reasons are at cmd_leave() in bin/pxtune-perapp). Without it, a
+# user whose phone crashed mid-game would stay locked at 60 Hz or at someone
+# else's resolution, and a reboot would not help them.
 #
-# `app leave` je IDEMPOTENTNÍ — když nic nasazeno není, tiše skončí s kódem 0,
-# takže se sem smí volat naslepo. Musí to být PŘED sekcí 5 (rozlišení):
-# leave zapisuje uložený displej, takže by jinak přepsal to, co udělá
-# `pxtune res reset`.
+# `app leave` is IDEMPOTENT — when nothing is deployed it quietly exits with
+# code 0, so it may be called blindly here. It must come BEFORE section 5
+# (resolution): leave writes the stored display values, so it would otherwise
+# overwrite what `pxtune res reset` does.
 # ---------------------------------------------------------------------------
 if [ -f "$STATE/appmode.active" ]; then
-	log WARN "service: nalezen appmode.active z minulého běhu — vracím vrstvu 3 per-app pravidla"
+	log WARN "service: appmode.active found from the previous run — restoring layer 3 of the per-app rule"
 fi
 "$PXTUNE" app leave >/dev/null 2>&1 ||
-	log ERROR "service: 'pxtune app leave' selhal — refresh rate / rozlišení může zůstat po per-app pravidle"
+	log ERROR "service: 'pxtune app leave' failed — the refresh rate / resolution may be left over from a per-app rule"
 
 # ---------------------------------------------------------------------------
-# 4c) Tweaky
+# 4c) Tweaks
 #
-# Většina tweaků žije v sysfs/procfs, což reboot NEPŘEŽIJE — musí se nasadit
-# znovu při každém startu. Nasazují se AŽ TADY (po boot_completed + SETTLE),
-# protože některé mají mechanismus `prop` a ty by dřív nezabraly.
-# Tweaky s mechanismem `settings` se záměrně přeskakují — ty si Android drží
-# sám a volat kvůli nim binder při bootu je zbytečné riziko.
+# Most tweaks live in sysfs/procfs, which DOES NOT SURVIVE a reboot — they have
+# to be deployed again on every start. They are deployed ONLY HERE (after
+# boot_completed + SETTLE), because some use the `prop` mechanism and would not
+# take earlier.
+# Tweaks with the `settings` mechanism are deliberately skipped — Android keeps
+# those itself and calling into binder for them during a boot is a needless
+# risk.
 #
-# Pořadí je důležité: až PO aplikaci profilu. Profil totiž volá
-# restore_stock_values(), které vrací i klíče, na které sahají tweaky
-# (readahead, charge levels, vm.*). Kdyby se tweaky nasadily dřív, profil
-# by je přepsal.
+# The order matters: only AFTER the profile is applied. The profile calls
+# restore_stock_values(), which also restores keys that tweaks touch
+# (readahead, charge levels, vm.*). If tweaks were deployed earlier, the
+# profile would overwrite them.
 # ---------------------------------------------------------------------------
 if [ -s "$STATE/tweaks.conf" ]; then
 	if "$PXTUNE" tweak apply-boot >/dev/null 2>&1; then
-		log INFO "service: tweaky nasazeny (tweak apply-boot)"
+		log INFO "service: tweaks deployed (tweak apply-boot)"
 	else
-		log ERROR "service: 'pxtune tweak apply-boot' selhal"
+		log ERROR "service: 'pxtune tweak apply-boot' failed"
 	fi
 else
-	log INFO "service: žádné tweaky k nasazení"
+	log INFO "service: no tweaks to deploy"
 fi
 
 # ---------------------------------------------------------------------------
-# 5) Rozlišení
+# 5) Resolution
 #
-#  a) existuje `res_pending` => minulá změna rozlišení nebyla potvrzena přes
-#     `pxtune res confirm` a zařízení se mezitím rebootovalo. To je přesně ten
-#     scénář, proti kterému watchdog na rozlišení je (uživatel neviděl obraz;
-#     watchdog v CLI je `sleep 60` v procesu, který reboot nepřežije).
-#     => tvrdý návrat na nativní přes `pxtune res reset`.
+#  a) `res_pending` exists => the last resolution change was not confirmed via
+#     `pxtune res confirm` and the device rebooted in the meantime. That is
+#     exactly the scenario the resolution watchdog is for (the user could not
+#     see the screen; the watchdog in the CLI is a `sleep 60` in a process that
+#     does not survive a reboot).
+#     => a hard return to native via `pxtune res reset`.
 #
-#  b) jinak: perzistentní rozlišení obnovovat NENÍ potřeba a záměrně se
-#     nepřepisuje. `pxtune res` ho ukládá do `settings put global
-#     display_size_forced` / `settings put secure display_density_forced`
-#     (SPEC, sekce "Displej") a to je perzistentní úložiště Androidu —
-#     WindowManager ho aplikuje sám při startu system_serveru, dřív než sem
-#     service.sh vůbec dojde. Jakýkoli náš zápis by byl buď no-op, nebo by
-#     přepsal uživatelovu pozdější změnu. Stav proto jen zalogujeme.
-#     (Podpříkaz `pxtune res restore` v CLI NEEXISTUJE — viz OTEVŘENÉ OTÁZKY.)
+#  b) otherwise: a persistent resolution does NOT need restoring and is
+#     deliberately not overwritten. `pxtune res` stores it in `settings put
+#     global display_size_forced` / `settings put secure display_density_forced`
+#     (SPEC, section "Display") and that is Android persistent storage —
+#     WindowManager applies it itself when system_server starts, long before
+#     service.sh gets here. Any write of ours would either be a no-op or would
+#     overwrite the user's later change. We therefore only log the state.
+#     (There is NO `pxtune res restore` subcommand in the CLI — see OPEN
+#     QUESTIONS.)
 # ---------------------------------------------------------------------------
 if [ -f "$STATE/res_pending" ]; then
-	log WARN "service: nalezen res_pending — nepotvrzená změna rozlišení přežila reboot, vracím nativní"
+	log WARN "service: res_pending found — an unconfirmed resolution change survived a reboot, returning to native"
 	"$PXTUNE" res reset >/dev/null 2>&1 ||
-		log ERROR "service: 'pxtune res reset' selhal"
+		log ERROR "service: 'pxtune res reset' failed"
 	rm -f "$STATE/res_pending" 2>/dev/null
 else
-	# POZOR: `settings` je binder. Bez timeoutu by zatuhly system_server zasekl
-	# service.sh a NIKDY by se nedoslo na clear_boot_count -> tri takove boty
-	# a bootloop ochrana modul vypne, ackoli se nic nepokazilo.
+	# CAUTION: `settings` is binder. Without a timeout, a hung system_server would
+	# stall service.sh and clear_boot_count would NEVER be reached -> three such
+	# boots and the bootloop protection disables the module even though nothing
+	# actually went wrong.
 	RES_NOW=$(timeout 10 settings get global display_size_forced 2>/dev/null | tr -d ' \t\r\n')
 	DPI_NOW=$(timeout 10 settings get secure display_density_forced 2>/dev/null | tr -d ' \t\r\n')
-	case "$RES_NOW" in null | '') RES_NOW='(nativní)' ;; esac
-	case "$DPI_NOW" in null | '') DPI_NOW='(výchozí)' ;; esac
-	log INFO "service: perzistentní rozlišení drží Android sám — display_size_forced=$RES_NOW, display_density_forced=$DPI_NOW"
+	case "$RES_NOW" in null | '') RES_NOW='(native)' ;; esac
+	case "$DPI_NOW" in null | '') DPI_NOW='(default)' ;; esac
+	log INFO "service: the persistent resolution is kept by Android itself — display_size_forced=$RES_NOW, display_density_forced=$DPI_NOW"
 fi
 
 # ---------------------------------------------------------------------------
-# 6) Adaptivní démon
+# 6) The adaptive daemon
 #
-# Stav se čte z `$STATE/auto`, ať je zdroj pravdy jen jeden. Sémantiku
-# ZRCADLÍME z funkce `auto_state()` v bin/pxtune: 'off'/'OFF'/'0'/'false'
-# znamená vypnuto, cokoli jiného VČETNĚ CHYBĚJÍCÍHO SOUBORU znamená zapnuto.
+# The state is read from `$STATE/auto` so that there is a single source of
+# truth. We MIRROR the semantics of `auto_state()` in bin/pxtune:
+# 'off'/'OFF'/'0'/'false' mean off, anything else INCLUDING A MISSING FILE
+# means on.
 #
-# Start se deleguje na `pxtune-auto start` — démon se sám odpojí přes setsid,
-# sám si vede `$STATE/pxtune-auto.pid` a jeho `do_start()` už obsahuje kontrolu
-# "uz bezi (pid N)". Idempotence je tedy jeho, service.sh ji neduplikuje
-# a žádný vlastní pidfile nedrží.
+# Starting is delegated to `pxtune-auto start` — the daemon detaches itself via
+# setsid, keeps its own `$STATE/pxtune-auto.pid` and its `do_start()` already
+# contains an "already running (pid N)" check. Idempotence is therefore its
+# job; service.sh does not duplicate it and keeps no pidfile of its own.
 # ---------------------------------------------------------------------------
 AUTO_STATE=$(cat "$STATE/auto" 2>/dev/null | tr -d ' \t\r\n')
 case "$AUTO_STATE" in
 off | OFF | 0 | false)
-	log INFO "service: adaptivní démon vypnutý ($STATE/auto='$AUTO_STATE')"
+	log INFO "service: adaptive daemon disabled ($STATE/auto='$AUTO_STATE')"
 	;;
 *)
 	if [ ! -x "$AUTOD" ]; then
-		log WARN "service: auto je zapnuté, ale $AUTOD neexistuje nebo není spustitelný — démon nespuštěn"
+		log WARN "service: auto is enabled, but $AUTOD does not exist or is not executable — daemon not started"
 	else
 		"$AUTOD" start >/dev/null 2>&1
 		RC=$?
 		AUTO_PID=$(cat "$STATE/pxtune-auto.pid" 2>/dev/null | tr -dc '0-9')
 		if [ -n "$AUTO_PID" ] && [ -d "/proc/$AUTO_PID" ]; then
-			log INFO "service: pxtune-auto běží (pid $AUTO_PID)"
+			log INFO "service: pxtune-auto is running (pid $AUTO_PID)"
 		else
-			log ERROR "service: 'pxtune-auto start' skončil s kódem $RC a démon neběží"
+			log ERROR "service: 'pxtune-auto start' exited with code $RC and the daemon is not running"
 		fi
 	fi
 	;;
 esac
 
 # ---------------------------------------------------------------------------
-# 6b) Vzorkovač metrik (baterie / příkon / teploty).
+# 6b) The metrics sampler (battery / power draw / temperatures).
 #
-# Spouští se JEN když si ho uživatel zapnul (`pxtune metrics start` založí
-# $STATE/metrics.on). Bez toho se nespustí vůbec — je to diagnostický nástroj,
-# ne součást běžného provozu, a nemá smysl, aby něco vzorkoval každému pořád.
+# Started ONLY when the user enabled it (`pxtune metrics start` creates
+# $STATE/metrics.on). Without that it does not start at all — it is a
+# diagnostic tool, not part of normal operation, and there is no point in it
+# sampling for everyone all the time.
 #
-# Selhání je NEFATÁLNÍ a záměrně se jen zaloguje: sběr dat nesmí ohrozit boot.
+# A failure is NON-FATAL and deliberately only logged: data collection must not
+# endanger the boot.
 # ---------------------------------------------------------------------------
 METRICSD="$BIN/pxtune-metrics"
 if [ -f "$STATE/metrics.on" ]; then
 	if [ ! -x "$METRICSD" ]; then
-		log WARN "service: metrics.on existuje, ale $METRICSD není spustitelný — vzorkovač nespuštěn"
+		log WARN "service: metrics.on exists, but $METRICSD is not executable — sampler not started"
 	else
 		"$METRICSD" start >/dev/null 2>&1
 		MET_PID=$(cat "$STATE/pxtune-metrics.pid" 2>/dev/null | tr -dc '0-9')
 		if [ -n "$MET_PID" ] && [ -d "/proc/$MET_PID" ]; then
-			log INFO "service: pxtune-metrics běží (pid $MET_PID)"
+			log INFO "service: pxtune-metrics is running (pid $MET_PID)"
 		else
-			log WARN "service: vzorkovač metrik se nepodařilo spustit"
+			log WARN "service: the metrics sampler could not be started"
 		fi
 	fi
 fi
 
 # ---------------------------------------------------------------------------
-# 7) Boot doběhl v pořádku -> vynulovat počítadlo.
+# 7) The boot completed fine -> zero the counter.
 #
-# Nuluje se ZÁMĚRNĚ i tehdy, když některý krok výše selhal. Počítadlo hlídá
-# bootloop, ne úspěšnost profilu: pokud jsme se dostali až sem, systém
-# nabootoval. Kdyby ho selhaný krok nenuloval, tři "jen" neúspěšné aplikace
-# profilu by modul zbytečně vypnuly.
+# It is DELIBERATELY zeroed even when one of the steps above failed. The counter
+# watches for a bootloop, not for the success of a profile: if we got this far,
+# the system booted. If a failed step did not zero it, three merely
+# unsuccessful profile applications would disable the module for no reason.
 # ---------------------------------------------------------------------------
 clear_boot_count
-log INFO "service: hotovo, boot_count vynulován"
+log INFO "service: done, boot_count zeroed"
 
 exit 0

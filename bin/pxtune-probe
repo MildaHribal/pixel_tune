@@ -1,28 +1,29 @@
 #!/system/bin/sh
 #
-# pxtune-probe - ZJISTOVACI skript pro pixel_tune v2
+# pxtune-probe - DISCOVERY script for pixel_tune v2
 #                Google Pixel 8a "akita" / Tensor G3 "zuma" / Android 16 / KernelSU-Next
 #
-# NIC NEMENI. Jen cte, meri prava a vypisuje. Spust ho DRIV, nez cokoli z v2
-# nasadis - vsechny nove paky nize pochazeji z Googlich zdroju pro akitu
-# (powerhint-akita.json, thermal_info_config_akita.json), NE z tvoho zarizeni.
-# Az vystup tohohle skriptu se smi zapsat do SPEC.md jako overeny fakt.
+# CHANGES NOTHING. It only reads, measures permissions and prints. Run it
+# BEFORE deploying anything from v2 - all the new levers below come from
+# Google's sources for akita (powerhint-akita.json,
+# thermal_info_config_akita.json), NOT from your device. Only the output of
+# this script may be written into SPEC.md as a verified fact.
 #
-# Pouziti:
+# Usage:
 #     adb push pxtune-probe /data/local/tmp/
 #     adb shell 'su -c "sh /data/local/tmp/pxtune-probe"' > probe.txt
 #
-# Vystup je zamerne strojove citelny: "SEKCE | cesta | prava | hodnota"
+# The output is deliberately machine readable: "SECTION | path | perms | value"
 #
-# POZOR na pasti ze SPEC.md sekce 11:
-#   - cteni z /proc/sys/* pres `read` vraci jen prvni bajt -> vsude head -n1
-#   - indexy thermal_zoneN / cooling_deviceN nejsou stabilni -> jen *-by-name
+# MIND the traps from SPEC.md section 11:
+#   - reading /proc/sys/* via `read` returns only the first byte -> head -n1 everywhere
+#   - thermal_zoneN / cooling_deviceN indices are not stable -> only *-by-name
 #
 
 PROBE_VERSION="1.0.0"
 
 # ---------------------------------------------------------------------------
-# helpery (bez zbytecnych forku tady nezalezi - tohle neni horka cesta)
+# helpers (pointless forks do not matter here - this is not a hot path)
 # ---------------------------------------------------------------------------
 
 hdr() {
@@ -32,11 +33,11 @@ hdr() {
 	echo "==========================================================="
 }
 
-# p <cesta> - vypise prava, vlastnika a prvni radek obsahu
+# p <path> - print the permissions, the owner and the first line of the content
 p() {
 	_pp="$1"
 	if [ ! -e "$_pp" ]; then
-		echo "CHYBI    | $_pp"
+		echo "MISSING  | $_pp"
 		return 1
 	fi
 	_pm=$(stat -c '%a %U:%G' "$_pp" 2>/dev/null)
@@ -46,56 +47,56 @@ p() {
 	return 0
 }
 
-# ptest <cesta> <testovaci hodnota> - ZAPISE, precte zpet, VRATI puvodni.
-# Pouziva se jen tam, kde je test bezpecny a okamzite vratitelny.
+# ptest <path> <test value> - WRITES, reads back, RESTORES the original.
+# Used only where the test is safe and immediately reversible.
 ptest() {
 	_tp="$1"; _tv="$2"
-	[ -e "$_tp" ] || { echo "CHYBI    | $_tp"; return 1; }
+	[ -e "$_tp" ] || { echo "MISSING  | $_tp"; return 1; }
 	_old=$(head -n1 "$_tp" 2>/dev/null)
 	if ! { echo "$_tv" > "$_tp"; } 2>/dev/null; then
-		echo "ZAPIS-NE | $_tp | stock=$_old | zapis selhal"
+		echo "WRITE-NO | $_tp | stock=$_old | the write failed"
 		return 1
 	fi
 	_new=$(head -n1 "$_tp" 2>/dev/null)
 	{ echo "$_old" > "$_tp"; } 2>/dev/null
 	_back=$(head -n1 "$_tp" 2>/dev/null)
 	if [ "$_new" = "$_tv" ]; then
-		echo "ZAPIS-OK | $_tp | stock=$_old | zapsano=$_new | vraceno=$_back"
+		echo "WRITE-OK | $_tp | stock=$_old | written=$_new | restored=$_back"
 	else
-		echo "ZAPIS-?? | $_tp | stock=$_old | chtel=$_tv | dostal=$_new | vraceno=$_back"
+		echo "WRITE-?? | $_tp | stock=$_old | wanted=$_tv | got=$_new | restored=$_back"
 	fi
 }
 
 # ---------------------------------------------------------------------------
 
 echo "pxtune-probe $PROBE_VERSION"
-echo "datum: $(date '+%Y-%m-%d %H:%M:%S')"
+echo "date:   $(date '+%Y-%m-%d %H:%M:%S')"
 echo "kernel: $(uname -r)"
 echo "build:  $(getprop ro.build.fingerprint)"
 echo "selinux: $(getenforce)"
 
 # ===========================================================================
-hdr "1. /proc/vendor_sched - VENDOR PLANOVAC (SPEC.md ho VUBEC NEZNA)"
+hdr "1. /proc/vendor_sched - THE VENDOR SCHEDULER (SPEC.md DOES NOT KNOW IT AT ALL)"
 # ===========================================================================
 #
-# Zdroj: device/google/akita/powerhint-akita.json. Google tudy ridi uclamp
-# pro skupiny procesu, DVFS headroom a umistovani uloh. Pokud tohle existuje
-# a je zapisovatelne, je to VETSI paka nez /dev/cpuctl - protoze vendor
-# hodnota a cpuctl hodnota se agreguji a plati ta PRISNEJSI.
+# Source: device/google/akita/powerhint-akita.json. This is how Google drives
+# uclamp for process groups, the DVFS headroom and task placement. If this
+# exists and is writable, it is a BIGGER lever than /dev/cpuctl - because the
+# vendor value and the cpuctl value are aggregated and the STRICTER one applies.
 #
-# KLICOVA HYPOTEZA K OVERENI:
-#   groups/bg/uclamp_max je podle powerhintu stock 130 (ze skaly 0-1024),
-#   coz je 12,7 % - tedy UZ TED pod prahem Little (182/1024 = 17,8 %).
-#   Kdyz to plati, pak UCLAMP_BG_MAX=30 v powersave a =17 v night
-#   NEDELAJI NIC, protoze 130 < 174 < 307. Chces-li pozadi utahnout vic,
-#   musis snizit tuhle hodnotu, ne cpuctl.
+# THE KEY HYPOTHESIS TO VERIFY:
+#   per the powerhint, groups/bg/uclamp_max is stock 130 (on the 0-1024 scale),
+#   i.e. 12.7 % - therefore ALREADY below the Little threshold
+#   (182/1024 = 17.8 %). If that holds, then UCLAMP_BG_MAX=30 in powersave and
+#   =17 in night DO NOTHING, because 130 < 174 < 307. To tighten the background
+#   further you have to lower this value, not the cpuctl one.
 
 if [ -d /proc/vendor_sched ]; then
-	echo "-- korenove uzly --"
+	echo "-- root nodes --"
 	for f in /proc/vendor_sched/*; do
 		[ -f "$f" ] && p "$f"
 	done
-	echo "-- skupiny (jmena skupin jsou to, co potrebuju znat) --"
+	echo "-- groups (the group names are what I need to know) --"
 	for g in /proc/vendor_sched/groups/*; do
 		[ -d "$g" ] || continue
 		echo "GROUP    | $g"
@@ -103,30 +104,30 @@ if [ -d /proc/vendor_sched ]; then
 			[ -f "$f" ] && p "$f"
 		done
 	done
-	echo "-- bezpecne zapisove testy --"
-	# dvfs_headroom: stock 1100 dle powerhintu (DefaultIndex 1). 1024 = zadny
-	# headroom = governor voli presne potrebnou frekvenci = chladneji.
+	echo "-- safe write tests --"
+	# dvfs_headroom: stock 1100 per the powerhint (DefaultIndex 1). 1024 = no
+	# headroom = the governor picks exactly the frequency needed = cooler.
 	ptest /proc/vendor_sched/dvfs_headroom 1100
 	ptest /proc/vendor_sched/groups/bg/uclamp_max 130
 else
-	echo "CHYBI    | /proc/vendor_sched  -- cely oddil 1 neplati, preskoc ho"
+	echo "MISSING  | /proc/vendor_sched  -- all of section 1 is void, skip it"
 fi
 
 # ===========================================================================
-hdr "2. sched_pixel - TUNABLES GOVERNORU (vcetne limit_frequency!)"
+hdr "2. sched_pixel - GOVERNOR TUNABLES (including limit_frequency!)"
 # ===========================================================================
 #
-# Zdroj: powerhint-akita.json uzly PMU_LIT/MID/BIG_LIMIT_FREQ a
+# Source: powerhint-akita.json, the nodes PMU_LIT/MID/BIG_LIMIT_FREQ and
 # CPU*ClusterDownRateLimitUs.
 #
-# TOHLE JE NEJDULEZITEJSI POLOZKA CELEHO PROBU:
-# SPEC.md tvrdi "strop CPU frekvence nastavit NEJDE, scaling_max_freq je 0444".
-# Jenze powerHAL Googlu zapisuje do
+# THIS IS THE MOST IMPORTANT ITEM OF THE WHOLE PROBE:
+# SPEC.md claims "the CPU frequency cap CANNOT be set, scaling_max_freq is
+# 0444". Except Google's powerHAL writes into
 #   /sys/devices/system/cpu/cpufreq/policyN/sched_pixel/limit_frequency
-# a to je taky strop frekvence. Kdyz je tenhle uzel zapisovatelny, ma
-# pixel_tune poprve PRIMOU paku na strop taktu - ne obchazku pres uclamp.
+# and that is a frequency cap too. If this node is writable, pixel_tune has a
+# DIRECT lever on the clock cap for the first time - not a detour via uclamp.
 #
-# Stock hodnoty dle powerhintu (DefaultIndex 0):
+# Stock values per the powerhint (DefaultIndex 0):
 #   policy0 limit_frequency = 1328000
 #   policy4 limit_frequency = 1836000
 #   policy8 limit_frequency = 2363000
@@ -143,27 +144,27 @@ for pol in policy0 policy4 policy8; do
 			[ -f "$f" ] && p "$f"
 		done
 	else
-		echo "CHYBI    | $B/sched_pixel"
+		echo "MISSING  | $B/sched_pixel"
 	fi
 done
-echo "-- bezpecne zapisove testy (zapisuji STOCK hodnotu, tedy no-op) --"
+echo "-- safe write tests (writing the STOCK value, i.e. a no-op) --"
 ptest /sys/devices/system/cpu/cpufreq/policy8/sched_pixel/limit_frequency 2363000
 ptest /sys/devices/system/cpu/cpufreq/policy4/sched_pixel/down_rate_limit_us 20000
-# a jeste kontrola, jestli je scaling_max_freq opravdu 0444 i pres cestu cpuN
+# and a check of whether scaling_max_freq really is 0444 via the cpuN path too
 p /sys/devices/system/cpu/cpu8/cpufreq/scaling_max_freq
 
 # ===========================================================================
-hdr "3. THERMAL - cdev by-name, user_vote_bypass, Tj offsety"
+hdr "3. THERMAL - cdev by-name, user_vote_bypass, Tj offsets"
 # ===========================================================================
 #
-# user_vote_bypass: powerhint ho zna jako CPU_{LITTLE,MID,BIG}_TSKIN_BYPASS.
-# Kdyz plati domnenka, ze 1 = ignoruj hlasovani thermal HALu, je to JEDINY
-# runtime zpusob, jak sundat skin-driven CPU skrceni bez zasahu do /vendor.
-# RIZIKO 3: telefon se pak opravdu ohreje. Nikdy nenasazovat natrvalo.
+# user_vote_bypass: the powerhint knows it as CPU_{LITTLE,MID,BIG}_TSKIN_BYPASS.
+# If the assumption that 1 = ignore the thermal HAL votes holds, it is the ONLY
+# runtime way to remove skin-driven CPU throttling without touching /vendor.
+# RISK 3: the phone really will get hot then. Never deploy permanently.
 #
-# Tj offset (100a0000.BIG/offset_enabled): posun junction teploty. Take riziko 3.
+# Tj offset (100a0000.BIG/offset_enabled): a junction temperature offset. Also risk 3.
 
-echo "-- cooling devices podle jmena (stabilni cesty) --"
+echo "-- cooling devices by name (stable paths) --"
 for c in /dev/thermal/cdev-by-name/*; do
 	[ -d "$c" ] || continue
 	echo "CDEV     | $c"
@@ -171,13 +172,13 @@ for c in /dev/thermal/cdev-by-name/*; do
 	p "$c/max_state"
 	p "$c/user_vote_bypass"
 done
-echo "-- thermal zony podle jmena --"
+echo "-- thermal zones by name --"
 for z in /dev/thermal/tz-by-name/*; do
 	[ -d "$z" ] || continue
 	_zt=$(head -n1 "$z/temp" 2>/dev/null || head -n1 "$z/tz_temp" 2>/dev/null)
 	echo "TZ       | $z | $_zt"
 done
-echo "-- Tj offset uzly --"
+echo "-- Tj offset nodes --"
 for t in BIG MID LITTLE; do
 	p "/sys/devices/platform/100a0000.$t/offset_enabled"
 	p "/sys/devices/platform/100a0000.$t/offset"
@@ -185,29 +186,29 @@ done
 for t in G3D TPU AUR; do
 	p "/sys/devices/platform/100b0000.$t/offset_enabled"
 done
-echo "-- thermal profily (props) --"
+echo "-- thermal profiles (props) --"
 for s in VIRTUAL-SKIN-CPU-MID VIRTUAL-SKIN-CPU-HIGH VIRTUAL-SKIN VIRTUAL-SKIN-GPU; do
 	echo "PROP     | vendor.thermal.$s.profile = [$(getprop "vendor.thermal.$s.profile")]"
 done
-echo "-- realny thermal config na zarizeni (kvuli PollingDelay) --"
+echo "-- the real thermal config on the device (for PollingDelay) --"
 if [ -r /vendor/etc/thermal_info_config.json ]; then
 	echo "grep PollingDelay:"
 	grep -o '"PollingDelay":[0-9]*' /vendor/etc/thermal_info_config.json | sort | uniq -c
-	echo "grep jmen VIRTUAL-SKIN:"
+	echo "grep VIRTUAL-SKIN names:"
 	grep -o '"VIRTUAL-SKIN[^"]*"' /vendor/etc/thermal_info_config.json | sort -u
-	echo "soc_therm blok (to je TriggerSensor, ktery ve skutecnosti rozhoduje):"
+	echo "the soc_therm block (that is the TriggerSensor which actually decides):"
 	grep -A 8 '"Name":"soc_therm"' /vendor/etc/thermal_info_config.json
 else
-	echo "CHYBI    | /vendor/etc/thermal_info_config.json"
+	echo "MISSING  | /vendor/etc/thermal_info_config.json"
 fi
 
 # ===========================================================================
-hdr "4. DEVFREQ - MIF / INT / DSU / BCI  (zdroj tepla, o kterem SPEC mlci)"
+hdr "4. DEVFREQ - MIF / INT / DSU / BCI  (a heat source the SPEC is silent about)"
 # ===========================================================================
 #
-# DSU (sdilena cache clusteru) a MIF (pamet) jsou na Tensoru vyznamna cast
-# klidove i zatezove spotreby. powerHAL je pri LAUNCH vytahuje na maximum.
-# Strop nebo target_load na MIF je legitimni chladici paka.
+# The DSU (the clusters' shared cache) and MIF (memory) are a significant part
+# of both idle and load power draw on Tensor. The powerHAL pulls them to maximum
+# on LAUNCH. A cap or target_load on MIF is a legitimate cooling lever.
 
 for d in /sys/class/devfreq/*; do
 	[ -d "$d" ] || continue
@@ -219,21 +220,21 @@ for d in /sys/class/devfreq/*; do
 	p "$d/governor"
 	[ -f "$d/interactive/target_load" ] && p "$d/interactive/target_load"
 done
-echo "-- bezpecny zapisovy test na MIF min_freq (zapis stocku) --"
+echo "-- a safe write test on MIF min_freq (writing the stock value) --"
 _mif=/sys/devices/platform/17000010.devfreq_mif/devfreq/17000010.devfreq_mif
 [ -d "$_mif" ] && ptest "$_mif/min_freq" "$(head -n1 "$_mif/min_freq" 2>/dev/null)"
 
 # ===========================================================================
-hdr "5. CPUIDLE / CPUPM - kdy se cluster odpoji od napajeni"
+hdr "5. CPUIDLE / CPUPM - when a cluster is disconnected from power"
 # ===========================================================================
 # powerhint: cpd_cl1_target_residency / cpd_cl2_target_residency, stock 750000.
-# Nizsi hodnota = cluster se uspava driv = mensi klidova spotreba,
-# cenou je vyssi latence probuzeni.
+# A lower value = the cluster sleeps sooner = lower idle power draw, at the cost
+# of higher wakeup latency.
 
 for f in /sys/devices/platform/cpupm/cpupm/*; do
 	[ -f "$f" ] && p "$f"
 done
-echo "-- cpuidle stavy --"
+echo "-- cpuidle states --"
 for s in /sys/devices/system/cpu/cpu0/cpuidle/state*; do
 	[ -d "$s" ] || continue
 	echo "IDLE     | $s | name=$(head -n1 "$s/name" 2>/dev/null) | disable=$(head -n1 "$s/disable" 2>/dev/null)"
@@ -243,20 +244,20 @@ p /dev/cpu_dma_latency
 # ===========================================================================
 hdr "6. PIXEL ENERGY MODEL - /sys/kernel/pixel_em"
 # ===========================================================================
-# SPEC.md tvrdi "energy model v debugfs neni dostupny". Podle powerhintu ale
-# existuje /sys/kernel/pixel_em/active_profile s profily default/cam1/cam2.
-# Kdyz tam je i moznost nahrat vlastni profil, je to nejblizsi vec
-# undervoltingu, ktera na Tensoru vubec existuje - meni se model spotreby,
-# podle ktereho EAS umistuje ulohy. RIZIKO 3, NEOVERENO.
+# SPEC.md claims "the energy model in debugfs is not available". Per the
+# powerhint, however, /sys/kernel/pixel_em/active_profile exists with the
+# profiles default/cam1/cam2. If it also allows loading a custom profile, it is
+# the closest thing to undervolting that exists on Tensor at all - it changes
+# the power model EAS places tasks by. RISK 3, UNVERIFIED.
 
 if [ -d /sys/kernel/pixel_em ]; then
 	for f in /sys/kernel/pixel_em/*; do
 		[ -f "$f" ] && p "$f"
 	done
 else
-	echo "CHYBI    | /sys/kernel/pixel_em"
+	echo "MISSING  | /sys/kernel/pixel_em"
 fi
-echo "-- klasicky energy model v sysfs (kdyz existuje, da se spocitat efektivita) --"
+echo "-- the classic sysfs energy model (when present, efficiency can be computed) --"
 for e in /sys/devices/system/cpu/cpu0/cpu_capacity \
          /sys/devices/system/cpu/cpu4/cpu_capacity \
          /sys/devices/system/cpu/cpu8/cpu_capacity; do
@@ -264,12 +265,13 @@ for e in /sys/devices/system/cpu/cpu0/cpu_capacity \
 done
 
 # ===========================================================================
-hdr "7. GPU Mali - obe cesty (class/misc i platform)"
+hdr "7. Mali GPU - both paths (class/misc and platform)"
 # ===========================================================================
-# SPEC zna /sys/class/misc/mali0/device/. powerhint pouziva
-# /sys/devices/platform/1f000000.mali/ a zna uzly hint_min_freq, hint_power_on
-# a dvfs_period, ktere SPEC nezna. dvfs_period 10 vs 20 ms je paka na to,
-# jak rychle GPU reaguje - 20 ms je uspornejsi, 10 ms svizneji.
+# The SPEC knows /sys/class/misc/mali0/device/. The powerhint uses
+# /sys/devices/platform/1f000000.mali/ and knows the nodes hint_min_freq,
+# hint_power_on and dvfs_period, which the SPEC does not. dvfs_period 10 vs
+# 20 ms is a lever on how fast the GPU reacts - 20 ms is more economical, 10 ms
+# snappier.
 
 for b in /sys/class/misc/mali0/device /sys/devices/platform/1f000000.mali; do
 	echo "MALI     | $b"
@@ -280,14 +282,14 @@ for b in /sys/class/misc/mali0/device /sys/devices/platform/1f000000.mali; do
 done
 
 # ===========================================================================
-hdr "8. PAMET - MGLRU, zram writeback, vm"
+hdr "8. MEMORY - MGLRU, zram writeback, vm"
 # ===========================================================================
-# MGLRU je na android14-6.1 GKI zapnuta by default. min_ttl_ms=0 znamena
-# zadna ochrana pracovni mnoziny; 1000 ms je doporuceni z kernel dokumentace
-# a znatelne omezuje "thrashing" (seky pri prepinani aplikaci) - cenou je
-# vyssi sance OOM zabiti.
-# zram backing_dev = loop50 (dle registry.def) => writeback nevyuzitych stranek
-# na disk je REALNA cesta, jak uvolnit RAM bez zvetsovani zramu.
+# MGLRU is enabled by default on the android14-6.1 GKI. min_ttl_ms=0 means no
+# working set protection; 1000 ms is the recommendation from the kernel
+# documentation and noticeably reduces thrashing (stalls when switching apps) -
+# at the cost of a higher chance of an OOM kill.
+# zram backing_dev = loop50 (per registry.def) => writing unused pages back to
+# disk is a REAL way to free RAM without growing zram.
 
 for f in /sys/kernel/mm/lru_gen/enabled /sys/kernel/mm/lru_gen/min_ttl_ms; do
 	p "$f"
@@ -296,7 +298,7 @@ for f in disksize comp_algorithm mm_stat backing_dev idle writeback \
          writeback_limit writeback_limit_enable bd_stat; do
 	p "/sys/block/zram0/$f"
 done
-echo "-- vm (POZOR: head -n1, ne read) --"
+echo "-- vm (CAUTION: head -n1, not read) --"
 for f in swappiness dirty_ratio dirty_background_ratio vfs_cache_pressure \
          page-cluster min_free_kbytes watermark_scale_factor \
          compaction_proactiveness extfrag_threshold; do
@@ -305,41 +307,42 @@ done
 p /sys/kernel/mm/transparent_hugepage/enabled
 
 # ===========================================================================
-hdr "9. cpuset - kam vubec smi ktera skupina"
+hdr "9. cpuset - where each group is even allowed to run"
 # ===========================================================================
-# POZOR: powerhint zapisuje do /dev/cpuset/foreground/cpus (0-5 vs 0-7)
-# a do vsech camera-daemon* cpusetu. Tyhle uzly tedy VLASTNI powerHAL
-# a plati u nich stejna vyhrada jako u cooling devices - muze je prepsat.
-# top-app/cpus v powerhintu NENI => je pravdepodobne bezpecny.
+# CAUTION: the powerhint writes into /dev/cpuset/foreground/cpus (0-5 vs 0-7)
+# and into all the camera-daemon* cpusets. Those nodes are therefore OWNED by
+# the powerHAL and the same caveat applies to them as to the cooling devices -
+# it can overwrite them. top-app/cpus is NOT in the powerhint => it is probably
+# safe.
 
 for c in /dev/cpuset/*/; do
 	[ -f "$c/cpus" ] || continue
-	echo "CPUSET   | $c | cpus=$(head -n1 "$c/cpus") | prava=$(stat -c '%a %U:%G' "$c/cpus" 2>/dev/null)"
+	echo "CPUSET   | $c | cpus=$(head -n1 "$c/cpus") | perms=$(stat -c '%a %U:%G' "$c/cpus" 2>/dev/null)"
 done
-echo "-- cpuctl uclamp (to, co pixel_tune uz umi) --"
+echo "-- cpuctl uclamp (what pixel_tune already does) --"
 for c in /dev/cpuctl/*/; do
 	[ -f "$c/cpu.uclamp.max" ] || continue
 	echo "CPUCTL   | $c | min=$(head -n1 "$c/cpu.uclamp.min") | max=$(head -n1 "$c/cpu.uclamp.max") | shares=$(head -n1 "$c/cpu.shares" 2>/dev/null)"
 done
 
 # ===========================================================================
-hdr "10. GAME MODE - co o Pokemon GO opravdu vi GameManager"
+hdr "10. GAME MODE - what the GameManager really knows about Pokemon GO"
 # ===========================================================================
 PKG="com.nianticlabs.pokemongo"
-echo "-- je balicek nainstalovany? --"
-pm path "$PKG" 2>/dev/null || echo "NENAINSTALOVANO: $PKG"
+echo "-- is the package installed? --"
+pm path "$PKG" 2>/dev/null || echo "NOT INSTALLED: $PKG"
 echo "-- list-modes --"
 timeout 10 cmd game list-modes "$PKG" 2>&1
 echo "-- list-configs --"
 timeout 10 cmd game list-configs "$PKG" 2>&1
 echo "-- device_config game_overlay --"
 timeout 10 device_config get game_overlay "$PKG" 2>&1
-echo "-- refresh rate klice --"
+echo "-- refresh rate keys --"
 echo "system/min_refresh_rate  = $(timeout 10 settings get system min_refresh_rate)"
 echo "system/peak_refresh_rate = $(timeout 10 settings get system peak_refresh_rate)"
 echo "global/min_refresh_rate  = $(timeout 10 settings get global min_refresh_rate)"
 echo "global/peak_refresh_rate = $(timeout 10 settings get global peak_refresh_rate)"
 
-hdr "HOTOVO. Nic nebylo zmeneno natrvalo."
-echo "Vsechny radky ZAPIS-OK znamenaji: uzel je zapisovatelny a hodnota drzi."
-echo "Vsechny radky ZAPIS-NE znamenaji: uzel je jen ke cteni -> patri do registru jako mech=ro."
+hdr "DONE. Nothing was changed permanently."
+echo "Every WRITE-OK line means: the node is writable and the value holds."
+echo "Every WRITE-NO line means: the node is read only -> it belongs in the registry as mech=ro."

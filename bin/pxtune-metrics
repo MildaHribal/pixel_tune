@@ -1,32 +1,37 @@
 #!/system/bin/sh
 # =============================================================================
-# pxtune-metrics - vzorkovac baterie, prikonu a teplot
+# pxtune-metrics - a sampler for battery, power draw and temperatures
 #
-# Samostatny program (jako pxtune-auto), NE knihovna. `pxtune metrics ...` na
-# nej jen preda rizeni pres exec.
+# A standalone program (like pxtune-auto), NOT a library. `pxtune metrics ...`
+# only hands control over to it via exec.
 #
-# PROC EXISTUJE: profily modulu byly navrzene z namerenych HW faktu, ale jejich
-# EFEKT (o kolik nizsi skin, o kolik pomalejsi ubytek baterie) nikdo nemeril.
-# Tenhle sampler sbira data, ze kterych to jde spocitat zpetne - bez nej se o
-# "optimalizaci" da jen mluvit, ne ji dolozit.
+# WHY IT EXISTS: the module's profiles were designed from measured HW facts, but
+# nobody measured their EFFECT (how much lower the skin gets, how much slower
+# the battery drains). This sampler collects the data needed to work that out
+# afterwards - without it, optimisation is something you can talk about but not
+# demonstrate.
 #
-# CO SE UKLADA: jeden radek CSV za interval do $STATE/metrics/m-RRRRMMDD.csv.
-# Nic se nikam neposila, soubory jsou jen na telefonu.
+# WHAT IS STORED: one CSV line per interval into $STATE/metrics/m-YYYYMMDD.csv.
+# Nothing is sent anywhere, the files stay on the phone.
 #
-# NAROCNOST: jeden pruchod = ~20 cteni ze sysfs pres `read` (builtin, bez forku)
-# + jeden `date` a jeden `sleep`. Pri vychozich 60 s je to nemeritelne. Zapis je
-# radove 150 B/vzorek, tj. ~210 kB/den; drzi se KEEP_DAYS dni (vychozi 7).
+# COST: one pass = ~20 sysfs reads via `read` (a builtin, no forks) plus one
+# `date` and one `sleep`. At the default 60 s that is unmeasurable. The write is
+# on the order of 150 B/sample, i.e. ~210 kB/day; kept for KEEP_DAYS days
+# (default 7).
 #
-# ZNAMENKO PROUDU - CTI, NEZ BUDES CISLA INTERPRETOVAT:
-# Overeno je jen to, ze pri NABIJENI je `current_now` KLADNY (+1,3 A na akita).
-# Ze je pri vybijeni zaporny, je bezna konvence Androidu, ale NA TOMHLE KUSU TO
-# ZATIM NIKDO NEVIDEL - nabijeni nejde pres adb vypnout (uzel charge_disable
-# telefon nema a charge_stop_level pod aktualni stav baterie vybijeni nevynuti).
-# Prvni bezici relace na baterii to ukaze; do te doby se znamenkem neargumentuj.
+# THE SIGN OF THE CURRENT - READ THIS BEFORE INTERPRETING THE NUMBERS:
+# All that is verified is that while CHARGING `current_now` is POSITIVE (+1.3 A
+# on akita). That it is negative while discharging is the usual Android
+# convention, but NOBODY HAS SEEN IT ON THIS UNIT YET - charging cannot be
+# disabled over adb (the phone has no charge_disable node and a
+# charge_stop_level below the current battery level does not force a discharge).
+# The first running session on battery will show it; until then, do not argue
+# from the sign.
 #
-# Souhrn (`summary`) je proto ZAMERNE na znamenku nezavisly: ubytek pocita
-# z charge_counter, ktery pri vybijeni monotonne klesa at je proud znamenkovany
-# jakkoli, a rezim rozlisuje podle pole `stav`, ne podle znamenka proudu.
+# The summary is therefore DELIBERATELY sign independent: the drain is computed
+# from charge_counter, which falls monotonically while discharging however the
+# current is signed, and the mode is distinguished by the `status` field, not by
+# the sign of the current.
 # =============================================================================
 
 PXTUNE_METRICS_VERSION="1.0.0"
@@ -34,7 +39,7 @@ PXTUNE_METRICS_VERSION="1.0.0"
 STATE_DIR="/data/adb/pixel_tune"
 MDIR="$STATE_DIR/metrics"
 PIDF="$STATE_DIR/pxtune-metrics.pid"
-ONF="$STATE_DIR/metrics.on"           # existuje = vzorkovat i po rebootu
+ONF="$STATE_DIR/metrics.on"           # exists = keep sampling after a reboot
 CONF="$STATE_DIR/metrics.conf"
 LOG_FILE="$STATE_DIR/pxtune.log"
 SELF="$0"
@@ -52,13 +57,13 @@ CPUFREQ="/sys/devices/system/cpu/cpufreq"
 MALI="/sys/class/misc/mali0/device"
 BL="/sys/class/backlight/panel0-backlight/brightness"
 
-CSV_HEADER="ts_epoch,cas,profil,podsviceni,stav,baterie_pct,proud_ua,napeti_uv,prikon_mw,charge_counter_uah,baterie_dc,skin_mc,big_mc,mid_mc,little_mc,g3d_mc,cd_cpu0,cd_cpu1,cd_cpu2,cd_gpu,f_little,f_big,f_prime,f_gpu,perapp"
+CSV_HEADER="ts_epoch,time,profile,backlight,status,battery_pct,current_ua,voltage_uv,power_mw,charge_counter_uah,battery_dc,skin_mc,big_mc,mid_mc,little_mc,g3d_mc,cd_cpu0,cd_cpu1,cd_cpu2,cd_gpu,f_little,f_big,f_prime,f_gpu,perapp"
 
 # ---------------------------------------------------------------------------
-# Pomocne funkce
+# Helper functions
 # ---------------------------------------------------------------------------
 
-# rd <cesta> -> R. Builtin `read`, zadny fork. Chybejici uzel = prazdno.
+# rd <path> -> R. The `read` builtin, no fork. A missing node = empty.
 rd() {
 	R=""
 	[ -r "$1" ] || return 0
@@ -74,8 +79,8 @@ log() {
 
 warn() { print -r -- "$*" >&2; }
 
-# Konfigurace se NESOURCUJE (syntakticka chyba v datech by shodila cely
-# skript) - ctou se jen dva znami klice pres whitelist.
+# The configuration is NOT SOURCED (a syntax error in the data would take down
+# the whole script) - only two known keys are read, via a whitelist.
 load_conf() {
 	INTERVAL=$DEF_INTERVAL
 	KEEP_DAYS=$DEF_KEEP_DAYS
@@ -96,10 +101,10 @@ load_conf() {
 }
 
 # ---------------------------------------------------------------------------
-# Jeden vzorek
+# One sample
 # ---------------------------------------------------------------------------
 sample() {
-	# Jediny fork na vzorek krome sleepu. Epoch i citelny cas z jednoho volani.
+	# The only fork per sample besides the sleep. Epoch and readable time in one call.
 	_now=$(date '+%s,%Y-%m-%d %H:%M:%S' 2>/dev/null)
 	_epoch="${_now%%,*}"
 	[ -n "$_epoch" ] || return 0
@@ -119,8 +124,8 @@ sample() {
 	rd "$BATT/temp";           _btemp=$R
 	rd "$BATT/status";         _st=$R
 
-	# Prikon v mW. Deli se PRED nasobenim, aby se do 64bit aritmetiky veslo
-	# i pri nabijeni (1,5 A x 4,3 V by jinak delalo ~6,5e12).
+	# Power in mW. The division happens BEFORE the multiplication so that even
+	# charging fits into 64-bit arithmetic (1.5 A x 4.3 V would otherwise be ~6.5e12).
 	_pw=""
 	case "$_cur$_vol" in
 		''|*[!0-9-]*) ;;
@@ -146,10 +151,10 @@ sample() {
 	rd "$BL"; _bl=$R
 	rd "$STATE_DIR/active"; _prof=$R
 
-	# Balicek, na ktery je PRAVE nasazena per-app vrstva (prazdne = zadny).
-	# Zamerne appmode.active, NE appmode.gamestamp: gamestamp je jen rate-limit
-	# pro GAME_APPLY=enter a zustava v nem posledni hra i dlouho po odchodu
-	# z ni (overeno - do CSV se pak lepil pogo i kdyz zadne pravidlo nebezelo).
+	# The package layer 3 is CURRENTLY deployed for (empty = none).
+	# Deliberately appmode.active, NOT appmode.gamestamp: gamestamp is only a rate
+	# limit for GAME_APPLY=enter and keeps the last game in it long after leaving
+	# it (verified - pogo then stuck to the CSV even when no rule was running).
 	_pkg=""
 	if [ -f "$STATE_DIR/appmode.active" ]; then
 		rd "$STATE_DIR/appmode.active"
@@ -162,8 +167,8 @@ sample() {
 	return 0
 }
 
-# Smaze soubory starsi nez KEEP_DAYS. Vola se jen pri zalozeni noveho dne,
-# tedy nejvyse jednou za 24 h - `find` je fork, ale bezvyznamny.
+# Deletes files older than KEEP_DAYS. Called only when a new day is started,
+# i.e. at most once every 24 h - `find` is a fork, but an insignificant one.
 purge_old() {
 	[ -d "$MDIR" ] || return 0
 	find "$MDIR" -name 'm-*.csv' -mtime "+$KEEP_DAYS" -delete 2>/dev/null
@@ -171,7 +176,7 @@ purge_old() {
 }
 
 # ---------------------------------------------------------------------------
-# Rezim demona
+# Daemon mode
 # ---------------------------------------------------------------------------
 cleanup() {
 	rm -f "$PIDF" 2>/dev/null
@@ -184,11 +189,11 @@ do_run() {
 	chmod 0700 "$MDIR" 2>/dev/null
 	{ print -r -- "$$" > "$PIDF"; } 2>/dev/null
 	trap cleanup TERM INT HUP
-	log INFO "[metrics] start (pid $$, interval ${INTERVAL}s, drzim ${KEEP_DAYS} dni)"
+	log INFO "[metrics] start (pid $$, interval ${INTERVAL}s, keeping ${KEEP_DAYS} days)"
 	while :; do
 		sample
 		sleep "$INTERVAL"
-		# Konfigurace se ctee znovu, aby sla zmenit intervalu bez restartu.
+		# The configuration is re-read so the interval can be changed without a restart.
 		load_conf
 	done
 }
@@ -197,16 +202,17 @@ do_start() {
 	if [ -f "$PIDF" ]; then
 		read -r _op < "$PIDF" 2>/dev/null
 		if [ -n "$_op" ] && [ -d "/proc/$_op" ]; then
-			echo "uz bezi (pid $_op)"
+			echo "already running (pid $_op)"
 			return 0
 		fi
 	fi
-	# Osirele instance po padu/zabiti - stejny problem i reseni jako u
-	# pxtune-auto: hledat podle prikazove radky, ne podle pidfile.
-	# VYKON: naivni verze forkovala `tr` na KAZDY proces v /proc (~1000 forku).
-	# Na bootu to trvalo 33 s a service.sh o tu dobu zdrzelo. Predfiltr pres
-	# /proc/PID/comm je builtin `read` (bez forku) a projde jich jen par -
-	# demon bezi jako `sh`, takze cokoli jineho muzeme zahodit rovnou.
+	# Orphaned instances after a crash/kill - the same problem and the same
+	# solution as in pxtune-auto: search by command line, not by pidfile.
+	# PERFORMANCE: the naive version forked `tr` for EVERY process in /proc (~1000
+	# forks). At boot that took 33 s and delayed service.sh by that much. The
+	# prefilter via /proc/PID/comm is the `read` builtin (no fork) and only a
+	# handful get through - the daemon runs as `sh`, so anything else can be
+	# discarded straight away.
 	_self=$$
 	for _p in /proc/[0-9]*; do
 		_pp="${_p##*/}"
@@ -217,9 +223,9 @@ do_start() {
 			sh|mksh|busybox) ;;
 			*) continue ;;
 		esac
-		# Zavorka je nutna: kdyz proces zmizi mezi globem a ctenim, selze uz
-		# SAMA REDIREKCE a hlasku vypisuje shell, ne `tr` - `2>/dev/null` az
-		# za prikazem by ji tedy nechytilo.
+		# The braces are necessary: when a process disappears between the glob and
+		# the read, THE REDIRECTION ITSELF fails and the message is printed by the
+		# shell, not by `tr` - so a `2>/dev/null` after the command would not catch it.
 		{ _cl=$(tr '\0' ' ' < "$_p/cmdline"); } 2>/dev/null || continue
 		case "$_cl" in
 			*pxtune-metrics*run*) kill -KILL "$_pp" 2>/dev/null ;;
@@ -227,7 +233,7 @@ do_start() {
 	done
 	rm -f "$PIDF" 2>/dev/null
 
-	{ print -r -- "zapnuto $(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" > "$ONF"; } 2>/dev/null
+	{ print -r -- "enabled $(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" > "$ONF"; } 2>/dev/null
 	if command -v setsid >/dev/null 2>&1; then
 		setsid "$SELF" run >/dev/null 2>&1 &
 	else
@@ -249,8 +255,8 @@ do_stop() {
 		fi
 	fi
 	rm -f "$PIDF" 2>/dev/null
-	log INFO "[metrics] zastaveno"
-	echo "vzorkovani zastaveno (data zustavaji v $MDIR)"
+	log INFO "[metrics] stopped"
+	echo "sampling stopped (the data stays in $MDIR)"
 	return 0
 }
 
@@ -259,33 +265,33 @@ do_status() {
 	_pid=""
 	[ -f "$PIDF" ] && read -r _pid < "$PIDF" 2>/dev/null
 	if [ -n "$_pid" ] && [ -d "/proc/$_pid" ]; then
-		echo "vzorkovani BEZI (pid $_pid, interval ${INTERVAL}s, drzim ${KEEP_DAYS} dni)"
+		echo "sampling RUNNING (pid $_pid, interval ${INTERVAL}s, keeping ${KEEP_DAYS} days)"
 	else
-		echo "vzorkovani NEBEZI"
+		echo "sampling NOT RUNNING"
 	fi
-	echo "po rebootu se spusti: $([ -f "$ONF" ] && echo ano || echo ne)"
+	echo "starts after a reboot: $([ -f "$ONF" ] && echo yes || echo no)"
 	echo "data: $MDIR"
 	if [ -d "$MDIR" ]; then
 		for _f in "$MDIR"/m-*.csv; do
 			[ -f "$_f" ] || continue
 			_n=$(wc -l < "$_f" 2>/dev/null)
 			_sz=$(stat -c %s "$_f" 2>/dev/null)
-			echo "  ${_f##*/}  ${_n:-0} radku  ${_sz:-0} B"
+			echo "  ${_f##*/}  ${_n:-0} lines  ${_sz:-0} B"
 		done
 	fi
 	echo
-	echo "ZNAMENKO: pri nabijeni je current_now KLADNY (overeno). Ze je pri"
-	echo "          vybijeni zaporny, je konvence Androidu, ale na tomhle kusu"
-	echo "          zatim neoverena - ukaze to prvni relace na baterii."
-	echo "          'summary' je na znamenku nezavisly (pocita z charge_counter)."
+	echo "SIGN: while charging current_now is POSITIVE (verified). That it is"
+	echo "      negative while discharging is the Android convention, but on this"
+	echo "      unit it is not verified yet - the first session on battery will show it."
+	echo "      'summary' is sign independent (it computes from charge_counter)."
 	return 0
 }
 
 # ---------------------------------------------------------------------------
-# Vypis dat
+# Printing the data
 # ---------------------------------------------------------------------------
 do_dump() {
-	[ -d "$MDIR" ] || { warn "zadna data ($MDIR neexistuje)"; return 1; }
+	[ -d "$MDIR" ] || { warn "no data ($MDIR does not exist)"; return 1; }
 	_any=0
 	for _f in "$MDIR"/m-*.csv; do
 		[ -f "$_f" ] || continue
@@ -293,28 +299,29 @@ do_dump() {
 			cat "$_f"
 			_any=1
 		else
-			# hlavicku uz mame
+			# we already have the header
 			sed -n '2,$p' "$_f"
 		fi
 	done
-	[ "$_any" = "1" ] || { warn "zadna data"; return 1; }
+	[ "$_any" = "1" ] || { warn "no data"; return 1; }
 	return 0
 }
 
-# Souhrn po profilech: odber, ubytek baterie za hodinu, teploty.
+# A per-profile summary: drain, battery loss per hour, temperatures.
 #
-# Pocita se JEN z radku, kde telefon nebyl na nabijecce - jinak by "spotreba"
-# merila nabijecku. Odber se bere z charge_counter (uAh), ktery pri vybijeni
-# monotonne klesa; je to jednotka, ktera nezavisi na znamenku current_now
-# (viz hlavicka souboru) ani na okamzitem sumu.
+# Computed ONLY from lines where the phone was off the charger - otherwise
+# "consumption" would be measuring the charger. The drain is taken from
+# charge_counter (uAh), which falls monotonically while discharging; it is a
+# unit that depends neither on the sign of current_now (see the file header) nor
+# on instantaneous noise.
 do_summary() {
-	[ -d "$MDIR" ] || { warn "zadna data"; return 1; }
-	command -v awk >/dev/null 2>&1 || { warn "awk neni k dispozici"; return 1; }
+	[ -d "$MDIR" ] || { warn "no data"; return 1; }
+	command -v awk >/dev/null 2>&1 || { warn "awk is not available"; return 1; }
 	do_dump | awk -F, '
 	NR==1 { next }
 	$1=="" { next }
 	{
-		prof=$3; if (prof=="") prof="(zadny)"
+		prof=$3; if (prof=="") prof="(none)"
 		st=$5
 		if (st != "Discharging" && st != "Not charging") { skipped++; next }
 		n[prof]++
@@ -327,12 +334,12 @@ do_summary() {
 	}
 	END {
 		if (length(n)==0) {
-			print "Zadna data z vybijeni - vsech " skipped " vzorku je z nabijecky."
-			print "Odpoj telefon a nech vzorkovat aspon hodinu."
+				print "No discharge data - all " skipped " samples are from the charger."
+				print "Unplug the phone and let it sample for at least an hour."
 			exit
 		}
 		printf "%-12s %6s %8s %9s %9s %9s %9s %9s\n", \
-			"profil","vzorku","minut","odber_mA","%/hod","skin_prum","skin_max","BIG_prum"
+				"profile","samples","minutes","drain_mA","%/hour","skin_avg","skin_max","BIG_avg"
 		for (p in n) {
 			dt = last[p] - first[p]
 			rate = (dt>0) ? (fpct[p]-lpct[p])*3600.0/dt : 0
@@ -341,42 +348,42 @@ do_summary() {
 				p, n[p], dt/60.0, ma, rate, skin[p]/n[p]/1000, maxskin[p]/1000, big[p]/n[p]/1000
 		}
 		print ""
-		print "odber_mA: z ubytku charge_counter za cas (nezavisle na znamenku proudu)."
-		print "%/hod   : ubytek procent baterie za hodinu."
-		print "Teploty ve stupnich C. Vzorku z nabijecky vynechano: " skipped+0 "."
-		print ""
-		print "POZOR: cisla davaji smysl jen pri SROVNATELNE zatezi. Hodina cteni"
-		print "na powersave a hodina hrani na game se porovnat neda."
+			print "drain_mA: from the charge_counter drop over time (independent of the current sign)."
+			print "%/hour  : battery percent lost per hour."
+			print "Temperatures in degrees C. Samples from the charger skipped: " skipped+0 "."
+			print ""
+			print "CAUTION: the numbers only make sense under COMPARABLE load. An hour of"
+			print "reading on powersave and an hour of gaming on game cannot be compared."
 	}'
 	return 0
 }
 
 usage() {
 	cat <<EOF
-pxtune metrics - vzorkovani baterie, prikonu a teplot ($PXTUNE_METRICS_VERSION)
+pxtune metrics - sampling of battery, power draw and temperatures ($PXTUNE_METRICS_VERSION)
 
-  pxtune metrics start            zapnout vzorkovani (prezije reboot)
-  pxtune metrics stop             vypnout (data zustanou)
-  pxtune metrics status           bezi? kolik dat?
-  pxtune metrics dump             vypsat vsechna data jako CSV (na stdout)
-  pxtune metrics summary          souhrn po profilech (jen z vybijeni)
-  pxtune metrics purge            smazat vsechna nasbirana data
+  pxtune metrics start            start sampling (survives a reboot)
+  pxtune metrics stop             stop it (the data stays)
+  pxtune metrics status           running? how much data?
+  pxtune metrics dump             print all data as CSV (to stdout)
+  pxtune metrics summary          a per-profile summary (from discharge only)
+  pxtune metrics purge            delete all collected data
 
-  pxtune metrics run              INTERNI - samotna smycka
+  pxtune metrics run              INTERNAL - the sampling loop itself
 
-Nastaveni: $CONF
-  INTERVAL_SEC=60                 jak casto vzorkovat ($MIN_INTERVAL-$MAX_INTERVAL)
-  KEEP_DAYS=7                     kolik dni dat drzet
+Settings: $CONF
+  INTERVAL_SEC=60                 how often to sample ($MIN_INTERVAL-$MAX_INTERVAL)
+  KEEP_DAYS=7                     how many days of data to keep
 
-Data: $MDIR/m-RRRRMMDD.csv
-Stazeni do pocitace:
+Data: $MDIR/m-YYYYMMDD.csv
+Downloading to a computer:
   adb shell 'su -c "pxtune metrics dump"' > metrics.csv
 EOF
 }
 
 do_purge() {
 	rm -f "$MDIR"/m-*.csv 2>/dev/null
-	echo "data smazana"
+	echo "data deleted"
 	return 0
 }
 
@@ -391,6 +398,6 @@ case "$_c" in
 	summary) do_summary ;;
 	purge)   do_purge ;;
 	-h|--help|help|"") usage; [ -z "$_c" ] && exit 1; exit 0 ;;
-	*) warn "pxtune metrics: neznamy podprikaz '$_c'"; usage >&2; exit 1 ;;
+	*) warn "pxtune metrics: unknown subcommand '$_c'"; usage >&2; exit 1 ;;
 esac
 exit $?

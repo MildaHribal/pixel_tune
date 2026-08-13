@@ -1,21 +1,22 @@
 #!/system/bin/sh
 #
-# install-widget.sh - nainstaluje zastupce na plochu pro prepinani profilu.
+# install-widget.sh - installs home screen shortcuts for switching profiles.
 #
-# Pouziti (jako root):
+# Usage (as root):
 #   su -c "sh /data/adb/modules/pixel_tune/widget/install-widget.sh"
 #
-# CO TO POTREBUJE
-#   Aplikaci "Termux:Widget" z F-Droidu (stejny podpis jako Termux).
-#   Bez ni to nema kam zastupce dat.
+# WHAT IT NEEDS
+#   The "Termux:Widget" app from F-Droid (same signature as Termux).
+#   Without it there is nowhere to put the shortcuts.
 #
-# JAK TO FUNGUJE
-#   Termux:Widget zobrazuje na plose skripty z ~/.shortcuts/ uvnitr Termuxu.
-#   Kazdy skript = jedna ikona. Skript zavola `su -c pxtune profile <jmeno>`.
+# HOW IT WORKS
+#   Termux:Widget shows scripts from ~/.shortcuts/ inside Termux on the home
+#   screen. Each script = one icon. The script calls
+#   `su -c pxtune profile <name>`.
 #
-# POZOR NA ROOT PROMPT
-#   Prvni spusteni z Termuxu vyvola dotaz KernelSU na povoleni rootu pro Termux.
-#   Musis ho odklepnout, jinak zastupci nic neudelaji.
+# MIND THE ROOT PROMPT
+#   The first run from Termux triggers a KernelSU prompt to grant root to
+#   Termux. You have to confirm it, otherwise the shortcuts will do nothing.
 
 set -u
 
@@ -23,68 +24,68 @@ TERMUX_HOME=/data/data/com.termux/files/home
 SHORTCUTS="$TERMUX_HOME/.shortcuts"
 PX=/data/adb/modules/pixel_tune/bin/pxtune
 
-# UID Termuxu - zastupci musi patrit jemu, jinak je Termux neprecte
+# The Termux UID - the shortcuts must belong to it, otherwise Termux cannot read them
 TERMUX_UID=$(stat -c %u "$TERMUX_HOME" 2>/dev/null)
 
 if [ ! -d "$TERMUX_HOME" ]; then
-	echo "CHYBA: Termux nenalezen ($TERMUX_HOME)."
-	echo "       Nainstaluj Termux + Termux:Widget z F-Droidu a spust ho aspon jednou."
+	echo "ERROR: Termux not found ($TERMUX_HOME)."
+	echo "       Install Termux + Termux:Widget from F-Droid and run it at least once."
 	exit 1
 fi
 if [ -z "$TERMUX_UID" ]; then
-	echo "CHYBA: nepodarilo se zjistit UID Termuxu."
+	echo "ERROR: could not determine the Termux UID."
 	exit 1
 fi
 
 mkdir -p "$SHORTCUTS" 2>/dev/null
 
 mk() {
-	# mk <soubor> <telo>
+	# mk <file> <body>
 	_f="$SHORTCUTS/$1"
-	printf '%s\n' "$2" > "$_f" 2>/dev/null || { echo "  CHYBA zapisu: $_f"; return 1; }
+	printf '%s\n' "$2" > "$_f" 2>/dev/null || { echo "  WRITE ERROR: $_f"; return 1; }
 	chmod 0700 "$_f" 2>/dev/null
 	chown "$TERMUX_UID:$TERMUX_UID" "$_f" 2>/dev/null
-	echo "  vytvoreno: $1"
+	echo "  created: $1"
 }
 
-echo "Instaluji zastupce do $SHORTCUTS"
+echo "Installing shortcuts into $SHORTCUTS"
 
 for p in powersave balanced performance game night; do
 	case "$p" in
-		powersave)   nazev="1-Usporny"    ;;
-		balanced)    nazev="2-Vyvazeny"   ;;
-		performance) nazev="3-Vykon"      ;;
-		game)        nazev="4-Hry"        ;;
-		night)       nazev="5-Nocni"      ;;
+		powersave)   name="1-Powersave"   ;;
+		balanced)    name="2-Balanced"    ;;
+		performance) name="3-Performance" ;;
+		game)        name="4-Game"        ;;
+		night)       name="5-Night"       ;;
 	esac
-	mk "$nazev" "#!/data/data/com.termux/files/usr/bin/sh
+	mk "$name" "#!/data/data/com.termux/files/usr/bin/sh
 OUT=\$(su -c '$PX profile $p' 2>&1)
 echo \"\$OUT\"
-# kratka zpetna vazba primo na plose
-su -c 'cmd notification post -S bigtext -t \"pixel_tune\" px \"Profil: $p\"' >/dev/null 2>&1
+# quick feedback right on the home screen
+su -c 'cmd notification post -S bigtext -t \"pixel_tune\" px \"Profile: $p\"' >/dev/null 2>&1
 sleep 1"
 done
 
-# Navrat rizeni automatu
-mk "6-Automat" "#!/data/data/com.termux/files/usr/bin/sh
+# Handing control back to the daemon
+mk "6-Auto" "#!/data/data/com.termux/files/usr/bin/sh
 su -c '$PX profile auto'
-su -c 'cmd notification post -S bigtext -t \"pixel_tune\" px \"Profil ridi automat\"' >/dev/null 2>&1
+su -c 'cmd notification post -S bigtext -t \"pixel_tune\" px \"The daemon is in charge of the profile\"' >/dev/null 2>&1
 sleep 1"
 
-# Rychly stav
-mk "7-Stav" "#!/data/data/com.termux/files/usr/bin/sh
+# Quick status
+mk "7-Status" "#!/data/data/com.termux/files/usr/bin/sh
 su -c '$PX status' | head -40
 echo
-echo '(zavri klepnutim)'
+echo '(tap to close)'
 read _"
 
 chown "$TERMUX_UID:$TERMUX_UID" "$SHORTCUTS" 2>/dev/null
 
 echo
-echo "Hotovo. Ted:"
-echo "  1) Na plose dlouze podrz prst -> Widgety -> Termux:Widget"
-echo "  2) Pretahni widget na plochu, vyber si zastupce"
-echo "  3) Pri prvnim klepnuti povol KernelSU root pro Termux"
+echo "Done. Now:"
+echo "  1) Long-press on the home screen -> Widgets -> Termux:Widget"
+echo "  2) Drag the widget onto the home screen, pick a shortcut"
+echo "  3) On the first tap, grant KernelSU root to Termux"
 echo
-echo "Zastupci:"
+echo "Shortcuts:"
 ls -1 "$SHORTCUTS" 2>/dev/null | sed 's/^/  /'
