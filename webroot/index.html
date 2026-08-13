@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="cs">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -7,8 +7,8 @@
 <title>pixel_tune</title>
 <style>
 /* ============================================================
-   pixel_tune WebUI — vše inline. Žádné CDN, fonty ani obrázky.
-   Zařízení nemusí mít síť a je to bezpečnostní požadavek.
+   pixel_tune WebUI — everything inline. No CDNs, fonts or images.
+   The device may have no network, and it is a security requirement.
    ============================================================ */
 :root{
   --bg:#f3f4f7; --card:#ffffff; --card2:#f8f9fb;
@@ -87,7 +87,7 @@ label.fld > .lbl{display:block;font-size:12.5px;font-weight:600;margin-bottom:4p
 label.fld > .hint{display:block;font-size:11.5px;color:var(--muted);margin-top:3px}
 label.fld select,label.fld input{width:100%}
 
-/* --- profily --- */
+/* --- profiles --- */
 .profiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 @media (max-width:359px){.profiles{grid-template-columns:repeat(2,1fr)}}
 .prof{
@@ -119,7 +119,7 @@ label.fld select,label.fld input{width:100%}
 .seg.cur{background:var(--accent);border-radius:8px 0 0 8px}
 .clu .lg{display:flex;justify-content:space-between;font-size:11.5px;color:var(--muted);margin-top:4px}
 
-/* --- teploty --- */
+/* --- temperatures --- */
 .tgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 @media (max-width:399px){.tgrid{grid-template-columns:repeat(2,1fr)}}
 .t{border-radius:11px;padding:9px 8px;text-align:center;border:1px solid var(--line);background:var(--card2)}
@@ -131,7 +131,7 @@ label.fld select,label.fld input{width:100%}
 .t.hot{background:var(--hot-bg);border-color:transparent} .t.hot .vl{color:var(--hot)}
 .t.crit{background:var(--crit-bg);border-color:transparent} .t.crit .vl{color:var(--crit)}
 
-/* --- řádky klíč/hodnota --- */
+/* --- key/value rows --- */
 .kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--line);font-size:14px}
 .kv:last-child{border-bottom:0}
 .kv .k{color:var(--muted)}
@@ -165,7 +165,7 @@ input[type=range]{width:100%;accent-color:var(--accent);height:30px}
 .badge.mut{color:var(--muted)}
 .badge.fill{border-color:transparent;color:var(--accent-fg);background:var(--accent)}
 
-/* --- tweaky --- */
+/* --- tweaks --- */
 .tw{padding:12px 0;border-bottom:1px solid var(--line)}
 .tw:last-child{border-bottom:0}
 .tw .hd{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap}
@@ -210,49 +210,49 @@ input[type=range]{width:100%;accent-color:var(--accent);height:30px}
   <header>
     <div class="grow">
       <h1>pixel_tune</h1>
-      <div class="sub"><span class="dot" id="statDot"></span> <span id="statTxt">načítám…</span></div>
+      <div class="sub"><span class="dot" id="statDot"></span> <span id="statTxt">loading…</span></div>
     </div>
-    <button class="btn-sm" id="btnRefresh" title="Obnovit">⟳</button>
-    <button class="btn-sm" id="btnAuto" aria-pressed="true" title="Automatické obnovování">⏱ 5 s</button>
+    <button class="btn-sm" id="btnRefresh" title="Refresh">⟳</button>
+    <button class="btn-sm" id="btnAuto" aria-pressed="true" title="Automatic refresh">⏱ 5 s</button>
   </header>
 
   <nav class="tabs" id="tabs">
-    <button data-tab="over"   aria-selected="true">Přehled</button>
-    <button data-tab="tweaks" aria-selected="false">Tweaky</button>
-    <button data-tab="apps"   aria-selected="false">Aplikace</button>
-    <button data-tab="daemon" aria-selected="false">Démon</button>
+    <button data-tab="over"   aria-selected="true">Overview</button>
+    <button data-tab="tweaks" aria-selected="false">Tweaks</button>
+    <button data-tab="apps"   aria-selected="false">Apps</button>
+    <button data-tab="daemon" aria-selected="false">Daemon</button>
   </nav>
 
-  <!-- PRŮBĚH AKCE (nikdy neblokuje UI) -->
+  <!-- ACTION IN PROGRESS (never blocks the UI) -->
   <div id="pendBar" class="hide">
     <span class="spin"></span>
     <span class="grow" id="pendTxt" style="flex:1">…</span>
-    <button class="btn-sm" id="pendCancel">Přestat čekat</button>
+    <button class="btn-sm" id="pendCancel">Stop waiting</button>
   </div>
 
-  <!-- vlastní slot, aby DEMO hláška nepřepisovala chybové bannery -->
+  <!-- a slot of its own, so the DEMO notice does not overwrite error banners -->
   <div id="demoNote" class="hide"></div>
 
   <div id="banners"></div>
 
-  <!-- POTVRZENÍ ROZLIŠENÍ -->
+  <!-- RESOLUTION CONFIRMATION -->
   <div class="banner hide" id="resBanner">
-    <div class="ttl">⚠ Změna rozlišení čeká na potvrzení</div>
+    <div class="ttl">⚠ A resolution change is waiting for confirmation</div>
     <div style="display:flex;align-items:center;gap:14px;margin:8px 0 10px">
       <div><span id="resCount">60</span><span style="font-size:14px;color:var(--warn)"> s</span></div>
-      <div style="font-size:13px;color:var(--fg)">Pokud nepotvrdíš, rozlišení se <b>samo vrátí</b> na nativní.</div>
+      <div style="font-size:13px;color:var(--fg)">If you do not confirm, the resolution <b>reverts by itself</b> to native.</div>
     </div>
     <div class="btn-row">
-      <button class="btn-p" id="btnResConfirm">✓ Potvrdit</button>
-      <button id="btnResRevert">Vrátit hned</button>
+      <button class="btn-p" id="btnResConfirm">✓ Confirm</button>
+      <button id="btnResRevert">Revert now</button>
     </div>
   </div>
 
-  <!-- ================= TAB: PŘEHLED ================= -->
+  <!-- ================= TAB: OVERVIEW ================= -->
   <section id="tab-over">
 
     <div class="card">
-      <h2>Profil</h2>
+      <h2>Profile</h2>
       <div class="profiles" id="profiles"></div>
       <div class="btn-row" style="margin-top:10px">
         <button id="btnProfAuto" style="flex:1">🤖 Auto <span class="sub" id="autoState"></span></button>
@@ -260,12 +260,12 @@ input[type=range]{width:100%;accent-color:var(--accent);height:30px}
     </div>
 
     <div class="card">
-      <h2>CPU — přiškrcení <span class="sub" style="text-transform:none;letter-spacing:0">(aktuální strop vs. HW maximum)</span></h2>
+      <h2>CPU — throttling <span class="sub" style="text-transform:none;letter-spacing:0">(current cap vs. HW maximum)</span></h2>
       <div id="clusters"><div class="sub">…</div></div>
     </div>
 
     <div class="card">
-      <h2>Teploty</h2>
+      <h2>Temperatures</h2>
       <div class="tgrid" id="temps"><div class="sub">…</div></div>
       <div class="tgrid" id="temps2" style="margin-top:8px"></div>
     </div>
@@ -276,126 +276,128 @@ input[type=range]{width:100%;accent-color:var(--accent);height:30px}
     </div>
 
     <div class="card">
-      <h2>Paměť</h2>
+      <h2>Memory</h2>
       <div id="mem"><div class="sub">…</div></div>
     </div>
 
     <div class="card">
-      <h2>Baterie</h2>
+      <h2>Battery</h2>
       <div id="bat"><div class="sub">…</div></div>
       <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
         <div style="display:flex;justify-content:space-between;font-size:14px">
-          <span style="color:var(--muted)">Nastavit strop na</span>
+          <span style="color:var(--muted)">Set the cap to</span>
           <span style="font-weight:700"><span id="chgVal" class="mono">—</span> %</span>
         </div>
         <input type="range" id="chgSlider" min="50" max="100" step="5" value="100">
         <div class="btn-row">
-          <button class="btn-sm btn-p" id="btnChgApply" disabled>Nastavit</button>
-          <button class="btn-sm" id="btnChgOff">Vypnout limit (100 %)</button>
+          <button class="btn-sm btn-p" id="btnChgApply" disabled>Apply</button>
+          <button class="btn-sm" id="btnChgOff">Disable the limit (100 %)</button>
         </div>
-        <div class="sub" style="margin-top:6px">Stock = 100 %. Nižší strop šetří životnost článku.</div>
+        <div class="sub" style="margin-top:6px">Stock = 100 %. A lower cap extends the life of the cell.</div>
       </div>
     </div>
 
     <div class="card">
-      <h2>Rozlišení</h2>
+      <h2>Resolution</h2>
       <div id="disp"><div class="sub">…</div></div>
       <div class="banner warn" style="margin:12px 0 8px">
-        <div class="ttl">⚠ Změna rozlišení je riziková</div>
+        <div class="ttl">⚠ Changing the resolution is risky</div>
         <div style="font-size:13px">
-          Nenativní rozlišení může rozhodit rozvržení systémových prvků a některých aplikací.
-          Po přepnutí běží <b>60s pojistka</b>: když do té doby nedáš <b>Potvrdit</b>,
-          systém se sám vrátí na nativní 1080 × 2400. Kdyby po změně nešlo UI ovládat,
-          <b>počkej minutu</b> a rozlišení se vrátí samo.
+          A non-native resolution can break the layout of system elements and of some apps.
+          After switching, a <b>60 s safeguard</b> runs: if you do not press <b>Confirm</b>
+          within that time, the system returns to native 1080 × 2400 by itself. If the UI
+          cannot be operated after the change, <b>wait a minute</b> and the resolution comes
+          back on its own.
         </div>
       </div>
       <div class="btn-row" id="resPresets"></div>
-      <button class="btn-p" id="btnResReset" style="width:100%;margin-top:10px;padding:13px">⤺ Reset na nativní (1080 × 2400)</button>
-      <div class="sub" style="margin-top:6px">Preset <code>native</code> se aplikuje bez pojistky. Reset nastaví DPI 420.</div>
+      <button class="btn-p" id="btnResReset" style="width:100%;margin-top:10px;padding:13px">⤺ Reset to native (1080 × 2400)</button>
+      <div class="sub" style="margin-top:6px">The <code>native</code> preset is applied without a safeguard. The reset sets DPI 420.</div>
     </div>
 
     <div class="card" style="border-color:var(--crit)">
-      <h2 style="color:var(--crit)">Nebezpečná zóna</h2>
-      <button class="btn-d" id="btnRevert" style="width:100%;padding:13px">↺ Vrátit vše na stock</button>
-      <div class="sub" style="margin-top:6px">Obnoví všechny hodnoty ze zálohy <code>backup/stock.conf</code>.</div>
+      <h2 style="color:var(--crit)">Danger zone</h2>
+      <button class="btn-d" id="btnRevert" style="width:100%;padding:13px">↺ Restore everything to stock</button>
+      <div class="sub" style="margin-top:6px">Restores all values from the backup in <code>backup/stock.conf</code>.</div>
     </div>
   </section>
 
-  <!-- ================= TAB: TWEAKY ================= -->
+  <!-- ================= TAB: TWEAKS ================= -->
   <section id="tab-tweaks" class="hide">
     <div class="card">
-      <h2>Tweaky</h2>
+      <h2>Tweaks</h2>
       <div class="sub" style="margin-bottom:10px">
-        Jednotlivé ladicí prvky nad rámec profilů. Každý má uvedené riziko a stock hodnotu,
-        na kterou se dá kdykoli vrátit.
+        Individual tuning knobs beyond the profiles. Each one states its risk and the stock
+        value it can be returned to at any time.
       </div>
       <div class="btn-row">
-        <label class="toggle"><input type="checkbox" id="twAdv"> Pokročilé</label>
-        <button class="btn-sm" id="btnTwReload" style="margin-left:auto">⟳ Načíst</button>
-        <button class="btn-sm btn-d" id="btnTwResetAll">Reset všech</button>
+        <label class="toggle"><input type="checkbox" id="twAdv"> Advanced</label>
+        <button class="btn-sm" id="btnTwReload" style="margin-left:auto">⟳ Load</button>
+        <button class="btn-sm btn-d" id="btnTwResetAll">Reset all</button>
       </div>
     </div>
-    <div id="tweaksHost"><div class="card"><div class="sub">Načítám…</div></div></div>
+    <div id="tweaksHost"><div class="card"><div class="sub">Loading…</div></div></div>
   </section>
 
-  <!-- ================= TAB: APLIKACE ================= -->
+  <!-- ================= TAB: APPS ================= -->
   <section id="tab-apps" class="hide">
     <div class="card">
-      <h2>Co je opravdu per-app</h2>
+      <h2>What is genuinely per-app</h2>
       <div style="font-size:13.5px;line-height:1.5">
         <p style="margin:0 0 10px">
-          <b><span class="scope app">PER-APP</span> FPS limit a downscale</b> — drží je
-          systémový Game Mode přímo u aplikace. Platí <b>vždy</b>, když ta aplikace běží,
-          a jiných aplikací se nedotknou. Tohle je skutečná izolace.
+          <b><span class="scope app">PER-APP</span> the FPS limit and downscale</b> — these
+          are held by the system Game Mode at the app itself. They apply <b>always</b> while
+          that app runs and do not touch any other app. This is real isolation.
         </p>
         <p style="margin:0 0 10px">
-          <b><span class="scope glob">GLOBÁLNÍ</span> výkonový profil, GPU a rozlišení</b> —
-          tyhle věci telefon umí mít nastavené jen <b>jednou pro celý systém</b>.
-          pixel_tune je proto při vstupu do aplikace jen <b>přepne</b> a při odchodu
-          <b>vrátí zpátky</b>. Po dobu, co je aplikace v popředí, ovlivňují celý systém
-          včetně všeho, co běží na pozadí.
+          <b><span class="scope glob">GLOBAL</span> the performance profile, GPU and resolution</b> —
+          the phone can only have these set <b>once for the whole system</b>.
+          pixel_tune therefore merely <b>switches</b> them when you enter an app and
+          <b>switches them back</b> when you leave. While the app is in the foreground they
+          affect the entire system, including everything running in the background.
         </p>
         <p style="margin:0;color:var(--muted)">
-          Neočekávej tedy izolaci, která neexistuje: souběh dvou aplikací se dvěma
-          různými profily nejde. Vyhrává ta v popředí a při rychlém přepínání může
-          přepnutí chvíli zaostávat.
+          So do not expect isolation that does not exist: two apps running with two
+          different profiles at once is not possible. The one in the foreground wins, and
+          with fast switching the change may lag a little behind.
         </p>
       </div>
     </div>
 
     <div class="card">
       <div class="btn-row">
-        <button class="btn-p" id="btnAppAdd">+ Přidat pravidlo</button>
-        <button class="btn-sm" id="btnAppReload" style="margin-left:auto">⟳ Načíst</button>
+        <button class="btn-p" id="btnAppAdd">+ Add a rule</button>
+        <button class="btn-sm" id="btnAppReload" style="margin-left:auto">⟳ Load</button>
       </div>
       <div class="sub" style="margin-top:8px" id="appResState">…</div>
     </div>
 
-    <div id="appsHost"><div class="card"><div class="sub">Načítám…</div></div></div>
+    <div id="appsHost"><div class="card"><div class="sub">Loading…</div></div></div>
   </section>
 
-  <!-- ================= TAB: DÉMON ================= -->
+  <!-- ================= TAB: DAEMON ================= -->
   <section id="tab-daemon" class="hide">
     <div class="card">
-      <h2>Adaptivní démon</h2>
+      <h2>The adaptive daemon</h2>
       <div id="daemonBox"><div class="sub">…</div></div>
       <div class="btn-row" style="margin-top:12px">
         <button class="btn-p" id="btnDaemonToggle" style="flex:1">…</button>
-        <button class="btn-sm" id="btnDaemonReload">⟳ Načíst</button>
+        <button class="btn-sm" id="btnDaemonReload">⟳ Load</button>
       </div>
       <div class="sub" style="margin-top:8px">
-        <b>Démon: vyp</b> zakáže automatu přepínat profily.
-        <b>Profil auto</b> (v Přehledu) jen zruší ruční zámek a vrátí mu právo rozhodovat.
+        <b>Daemon: off</b> forbids the daemon to switch profiles.
+        <b>Profile auto</b> (in Overview) only clears the manual lock and gives it back the
+        right to decide.
       </div>
     </div>
     <div class="card">
-      <h2>Výstup <code>pxtune auto status</code></h2>
+      <h2>Output of <code>pxtune auto status</code></h2>
       <pre id="daemonRaw" style="white-space:pre-wrap;word-break:break-word;font-size:12px;margin:0;color:var(--muted)">…</pre>
     </div>
   </section>
 
   <div class="sub" style="text-align:center;margin-top:14px">
-    <span id="apiInfo">—</span> · poslední aktualizace <span id="lastUpd">—</span>
+    <span id="apiInfo">—</span> · last update <span id="lastUpd">—</span>
   </div>
 </div>
 
@@ -405,27 +407,28 @@ input[type=range]{width:100%;accent-color:var(--accent);height:30px}
 <script>
 "use strict";
 /* ==========================================================================
-   NEBLOKUJÍCÍ MODEL — proč je to takhle
+   THE NON-BLOCKING MODEL — why it is like this
    --------------------------------------------------------------------------
-   Naměřeno na zařízení: přepnutí profilu ~5 s, `status --json` 1,6–3 s.
-   Každé volání mostu zakládá nový root shell. Dřív se čekalo na dokončení
-   příkazu, takže WebView na několik vteřin ztuhl.
+   Measured on the device: a profile switch takes ~5 s, `status --json` 1.6-3 s.
+   Every bridge call creates a new root shell. Previously we waited for the
+   command to finish, so the WebView froze for several seconds.
 
-   Nově:
-   1) AKCE jsou fire-and-forget. Příkaz se pustí přes `nohup ... &`, most se
-      vrátí okamžitě (řádově desítky ms), protože shell hned skončí.
-      Výstup příkazu jde do souboru, takže se dá při chybě zobrazit.
-   2) Tlačítko se ihned přepne do stavu "pracuje" a UI OPTIMISTICKY ukáže
-      cílový stav.
-   3) Pak běží REKONCILIACE: čte se stav po ~1 s (další dotaz se plánuje až
-      PO dokončení předchozího, takže se nikdy nepřekrývají), dokud
-      predikát neřekne "hotovo", nejdéle 15 s.
-   4) Když se to nestihne, přijde srozumitelná chyba + "Zopakovat".
-   5) Všechna volání mostu jdou přes JEDNU frontu (Bridge.q) — nikdy neběží
-      dvě naráz, ani během čekání.
+   Now:
+   1) ACTIONS are fire-and-forget. The command is launched via `nohup ... &` and
+      the bridge returns immediately (tens of ms), because the shell exits at
+      once. The command's output goes into a file, so it can be shown on error.
+   2) The button switches to the "working" state immediately and the UI shows
+      the target state OPTIMISTICALLY.
+   3) Then RECONCILIATION runs: the state is read after ~1 s (the next query is
+      scheduled only AFTER the previous one finishes, so they never overlap)
+      until the predicate says "done", for at most 15 s.
+   4) When that does not happen in time, a comprehensible error arrives plus
+      "Retry".
+   5) All bridge calls go through ONE queue (Bridge.q) — two never run at once,
+      not even while waiting.
 
    ==========================================================================
-   KONTRAKT `pxtune status --json` — ověřeno proti bin/pxtune (status_json)
+   THE `pxtune status --json` CONTRACT — verified against bin/pxtune (status_json)
    --------------------------------------------------------------------------
    {
      "profile": {"active":"balanced","manual_override":false,
@@ -445,17 +448,17 @@ input[type=range]{width:100%;accent-color:var(--accent);height:30px}
                  "res_pending":false,"res_pending_seconds":0}
    }
 
-   Parser je záměrně TOLERANTNÍ (zkouší i alternativní názvy klíčů a
-   normalizuje jednotky), aby drobná změna CLI neshodila celé UI.
+   The parser is deliberately TOLERANT (it also tries alternative key names and
+   normalises units), so that a small CLI change does not take the whole UI down.
    ========================================================================== */
 
 var BIN = "/data/adb/modules/pixel_tune/bin/pxtune";
 var STATE_DIR = "/data/adb/pixel_tune";
-var OUT_LOG = STATE_DIR + "/webui_last.log";   /* sink pro fire-and-forget */
+var OUT_LOG = STATE_DIR + "/webui_last.log";   /* the sink for fire-and-forget */
 
-/* Ověřené HW tabulky ze SPEC.md — fallback, když status --json nepošle hw_max,
-   a pro převod cooling-device stavu na frekvenci
-   (cur_state = N  =>  index (počet-1-N) ve vzestupném seznamu). */
+/* Verified HW tables from SPEC.md — a fallback for when status --json does not
+   send hw_max, and for converting a cooling-device state into a frequency
+   (cur_state = N  =>  index (count-1-N) in the ascending list). */
 var FREQS = {
   policy0:[324000,610000,820000,955000,1098000,1197000,1328000,1425000,1548000,1704000],
   policy4:[402000,578000,697000,712000,910000,1065000,1221000,1328000,1418000,1572000,1836000,1945000,2130000,2245000,2367000],
@@ -470,108 +473,111 @@ var CLUSTERS = [
 ];
 
 var PROFILES = [
-  { id:"powersave",   ic:"🍃", nm:"Úsporný",  ds:"minimum tepla" },
-  { id:"balanced",    ic:"⚖️", nm:"Vyvážený", ds:"stock" },
-  { id:"performance", ic:"🚀", nm:"Výkon",    ds:"max svižnost" },
-  { id:"game",        ic:"🎮", nm:"Hry",      ds:"méně throttlingu" },
-  { id:"night",       ic:"🌙", nm:"Noční",    ds:"tichý běh" }
+  { id:"powersave",   ic:"🍃", nm:"Powersave",   ds:"minimum heat" },
+  { id:"balanced",    ic:"⚖️", nm:"Balanced",    ds:"stock" },
+  { id:"performance", ic:"🚀", nm:"Performance", ds:"max snappiness" },
+  { id:"game",        ic:"🎮", nm:"Game",        ds:"less throttling" },
+  { id:"night",       ic:"🌙", nm:"Night",       ds:"quiet running" }
 ];
 
-/* OPRAVA: dřív tu bylo 1080p/900p/720p — takové presety CLI nezná a skončilo to
-   chybou. Skutečná jména z bin/pxtune (RES_PRESETS). */
+/* FIX: this used to say 1080p/900p/720p — the CLI does not know such presets and
+   it ended in an error. These are the real names from bin/pxtune (RES_PRESETS). */
 var RES_FALLBACK = ["native","900x2000","810x1800","720x1600"];
 var RES_LABEL = {
-  "native":"Nativní · 1080 × 2400 · 420 dpi",
+  "native":"Native · 1080 × 2400 · 420 dpi",
   "900x2000":"900 × 2000 · 350 dpi",
   "810x1800":"810 × 1800 · 315 dpi",
   "720x1600":"720 × 1600 · 280 dpi"
 };
 
-/* Riziko 0–3 */
+/* Risk 0-3 */
 var RISK = [
-  { lb:"bezpečné",       cls:"ok",   ds:"Vratné, bez známého dopadu na stabilitu." },
-  { lb:"nízké riziko",   cls:"warn", ds:"Může se drobně projevit na výdrži nebo plynulosti." },
-  { lb:"zvýšené riziko", cls:"hot",  ds:"Může znatelně změnit chování systému. Otestuj po jednom." },
-  { lb:"vysoké riziko",  cls:"crit", ds:"Může způsobit záseky, přehřívání nebo pád aplikací." }
+  { lb:"safe",          cls:"ok",   ds:"Reversible, with no known effect on stability." },
+  { lb:"low risk",      cls:"warn", ds:"May show slightly in battery life or smoothness." },
+  { lb:"elevated risk", cls:"hot",  ds:"May noticeably change system behaviour. Test one at a time." },
+  { lb:"high risk",     cls:"crit", ds:"May cause stalls, overheating or app crashes." }
 ];
 
-/* Per-app klíče: co telefon drží u aplikace a co jen přepíná globálně. */
+/* Per-app keys: what the phone holds at the app and what it only switches globally. */
 var APP_KEYS = [
-  { k:"GAME_MODE",       scope:"app",  nm:"Herní režim",
-    hint:"Systémový Game Mode dané aplikace. Drží se u ní.",
+  { k:"GAME_MODE",       scope:"app",  nm:"Game mode",
+    hint:"The system Game Mode of the given app. It stays with that app.",
     type:"enum", opts:["","standard","performance","battery","custom"],
-    optLb:{ "":"— nesahat —","standard":"Standardní","performance":"Výkon","battery":"Baterie","custom":"Vlastní" } },
-  { k:"GAME_FPS",        scope:"app",  nm:"Limit FPS",
-    hint:"Strop snímků za vteřinu jen pro tuhle aplikaci. Funguje s režimem „Vlastní“.",
+    optLb:{ "":"— leave alone —","standard":"Standard","performance":"Performance","battery":"Battery","custom":"Custom" } },
+  { k:"GAME_FPS",        scope:"app",  nm:"FPS limit",
+    hint:"A frames-per-second cap for this app only. Works with the Custom mode.",
     type:"enum", opts:["","0","30","40","45","60","90","120"],
-    optLb:{ "":"— nesahat —","0":"bez limitu" } },
+    optLb:{ "":"— leave alone —","0":"no limit" } },
   { k:"GAME_DOWNSCALE",  scope:"app",  nm:"Downscale",
-    hint:"Aplikace renderuje v nižším rozlišení a systém obraz roztáhne. Jen pro ni.",
+    hint:"The app renders at a lower resolution and the system upscales the image. For this app only.",
     type:"enum", opts:["","disable","0.9","0.8","0.7","0.6","0.5","0.4","0.3"],
-    optLb:{ "":"— nesahat —","disable":"vypnuto" } },
-  { k:"APP_PROFILE",     scope:"glob", nm:"Výkonový profil",
-    hint:"GLOBÁLNÍ. Přepne se při vstupu do aplikace a při odchodu vrátí zpět.",
+    optLb:{ "":"— leave alone —","disable":"off" } },
+  { k:"APP_PROFILE",     scope:"glob", nm:"Performance profile",
+    hint:"GLOBAL. Switched when you enter the app and switched back when you leave.",
     type:"profile" },
-  { k:"APP_REFRESH_MIN", scope:"glob", nm:"Minimální obnovovací frekvence",
-    hint:"GLOBÁLNÍ. Spodní hranice adaptivního rozsahu, dokud je aplikace v popředí.",
-    type:"enum", opts:["","60","90","120"], optLb:{ "":"— nesahat —" }, unit:" Hz" },
-  { k:"APP_REFRESH_PEAK",scope:"glob", nm:"Špičková obnovovací frekvence",
-    hint:"GLOBÁLNÍ. Horní hranice adaptivního rozsahu.",
-    type:"enum", opts:["","60","90","120"], optLb:{ "":"— nesahat —" }, unit:" Hz" },
-  { k:"APP_RES",         scope:"glob", nm:"Rozlišení displeje",
-    hint:"GLOBÁLNÍ a RIZIKOVÉ. Mění rozlišení celého systému, ne jen aplikace.",
+  { k:"APP_REFRESH_MIN", scope:"glob", nm:"Minimum refresh rate",
+    hint:"GLOBAL. The lower bound of the adaptive range while the app is in the foreground.",
+    type:"enum", opts:["","60","90","120"], optLb:{ "":"— leave alone —" }, unit:" Hz" },
+  { k:"APP_REFRESH_PEAK",scope:"glob", nm:"Peak refresh rate",
+    hint:"GLOBAL. The upper bound of the adaptive range.",
+    type:"enum", opts:["","60","90","120"], optLb:{ "":"— leave alone —" }, unit:" Hz" },
+  { k:"APP_RES",         scope:"glob", nm:"Display resolution",
+    hint:"GLOBAL and RISKY. It changes the resolution of the whole system, not just the app.",
     type:"res", risky:true },
-  { k:"APP_RES_ENABLE",  scope:"glob", nm:"Povolit přepínání rozlišení",
-    hint:"Defaultně VYPNUTO. Dokud je vypnuté, klíč APP_RES se ignoruje.",
+  { k:"APP_RES_ENABLE",  scope:"glob", nm:"Allow resolution switching",
+    hint:"OFF by default. While it is off, the APP_RES key is ignored.",
     type:"bool", risky:true }
 ];
 
 var DEMO = /[?&]demo=1/.test(location.search);
 
 /* ==========================================================================
-   1) MOST KE KERNELSU — detekce varianty + serializovaná fronta
+   1) THE KERNELSU BRIDGE — variant detection + a serialised queue
    --------------------------------------------------------------------------
-   Ověřeno proti zdrojáku balíčku `kernelsu` (npm, v3.0.2), který je tenkým
-   obalem nad globálním objektem `ksu`:
+   Verified against the source of the `kernelsu` package (npm, v3.0.2), which is
+   a thin wrapper around the global `ksu` object:
 
-     ksu.exec(cmd)                              -> synchronní, vrací stdout
+     ksu.exec(cmd)                              -> synchronous, returns stdout
      ksu.exec(cmd, callbackName)                -> window[cb](errno,stdout,stderr)
-     ksu.exec(cmd, optionsJSON, callbackName)   -> totéž + cwd/env
+     ksu.exec(cmd, optionsJSON, callbackName)   -> the same + cwd/env
      ksu.spawn(cmd, argsJSON, optionsJSON, cbName)
-         -> window[cbName] musí být objekt tvaru ChildProcess:
+         -> window[cbName] must be an object shaped like ChildProcess:
             { stdout:{emit(ev,data)}, stderr:{emit(ev,data)}, emit(ev,arg) }
-            nativní strana volá .stdout.emit("data", …) a .emit("exit", code)
+            the native side calls .stdout.emit("data", …) and .emit("exit", code)
 
-   `spawn` je STREAMOVANÝ a nedrží most po dobu běhu příkazu, proto ho
-   preferujeme pro ČTENÍ stavu. Feature-detekce, fallback funguje i bez něj.
+   `spawn` is STREAMED and does not hold the bridge for the duration of the
+   command, which is why we prefer it for READING state. Feature-detected; the
+   fallback works without it too.
    ========================================================================== */
-var API = { mode:"none", label:"nedetekováno", spawn:false };
+var API = { mode:"none", label:"not detected", spawn:false };
 var cbSeq = 0;
 function uniq(p){ return p + "_" + Date.now().toString(36) + "_" + (cbSeq++); }
 
 function detectApi(){
-  if (DEMO){ API = { mode:"demo", label:"DEMO (smyšlená data)", spawn:false }; return; }
+  if (DEMO){ API = { mode:"demo", label:"DEMO (made-up data)", spawn:false }; return; }
   var k = window.ksu;
-  if (!k){ API = { mode:"none", label:"most `ksu` není dostupný", spawn:false }; return; }
-  /* POZOR - OVERENO NA ZARIZENI (KernelSU-Next, ksud 3.3.0):
-     `ksu.spawn("sh", JSON.stringify(["-c", cmd]), ...)` NEFUNGUJE. Nativni
-     strana ten JSON retezec s argumenty nezpracuje tak, jak npm balicek
-     `kernelsu` predpoklada - do `sh -c` se dostane jen PRVNI token prikazu.
-     Prakticky to znamenalo, ze se spustilo `pxtune` bez argumentu a vratilo
-     napovedu misto JSONu; WebUI pak hlasilo "Nevalidni JSON ... position 2".
+  if (!k){ API = { mode:"none", label:"the `ksu` bridge is not available", spawn:false }; return; }
+  /* CAUTION - VERIFIED ON THE DEVICE (KernelSU-Next, ksud 3.3.0):
+     `ksu.spawn("sh", JSON.stringify(["-c", cmd]), ...)` DOES NOT WORK. The native
+     side does not process that JSON argument string the way the npm package
+     `kernelsu` assumes - only the FIRST token of the command reaches `sh -c`.
+     In practice that meant `pxtune` was run without arguments and returned the
+     help text instead of JSON; the WebUI then reported "Invalid JSON ...
+     position 2".
 
-     `ksu.exec` je overene funkcni. Jeho synchronnost uz nevadi: CLI bylo
-     zrychleno z 9,7 s na ~250 ms (status --json), takze se UI nezasekne.
-     Akce navic bezi pres `fire()` = `nohup ... &`, takze se most vraci hned.
+     `ksu.exec` is verified to work. Its synchronicity no longer matters: the CLI
+     was sped up from 9.7 s to ~250 ms (status --json), so the UI does not freeze.
+     Actions additionally run through `fire()` = `nohup ... &`, so the bridge
+     returns immediately.
 
-     spawn se necha jen jako nouzovy fallback, kdyby exec chybel. */
+     spawn is kept only as an emergency fallback in case exec were missing. */
   API.spawn = typeof k.spawn === "function";
   if (typeof k.exec === "function"){ API.mode = "cb3"; API.label = "ksu.exec(cmd, options, cb)"; }
-  else if (API.spawn){ API.mode = "spawn"; API.label = "ksu.spawn (nouzovy fallback)"; }
-  else { API.mode = "none"; API.label = "most `ksu` nemá exec ani spawn"; }
+  else if (API.spawn){ API.mode = "spawn"; API.label = "ksu.spawn (emergency fallback)"; }
+  else { API.mode = "none"; API.label = "the `ksu` bridge has neither exec nor spawn"; }
 }
 
-/* --- jednotlivé varianty; každá vrací Promise<{errno,stdout,stderr}> --- */
+/* --- the individual variants; each returns Promise<{errno,stdout,stderr}> --- */
 
 function viaSpawn(cmd, timeoutMs){
   return new Promise(function(resolve, reject){
@@ -592,7 +598,7 @@ function viaSpawn(cmd, timeoutMs){
     };
     timer = setTimeout(function(){
       if (done) return; done = true; fin();
-      reject(new Error("Časový limit " + Math.round(timeoutMs/1000) + " s vypršel.\nPříkaz: " + cmd));
+      reject(new Error("The time limit of " + Math.round(timeoutMs/1000) + " s expired.\nCommand: " + cmd));
     }, timeoutMs);
     window[name] = child;
     try { window.ksu.spawn("sh", JSON.stringify(["-c", cmd]), "{}", name); }
@@ -605,11 +611,11 @@ function viaExec(cmd, timeoutMs){
     var name = uniq("pxtCb"), done = false;
     var timer = setTimeout(function(){
       if (done) return; done = true; clean();
-      reject(new Error("Časový limit " + Math.round(timeoutMs/1000) + " s vypršel.\nPříkaz: " + cmd));
+      reject(new Error("The time limit of " + Math.round(timeoutMs/1000) + " s expired.\nCommand: " + cmd));
     }, timeoutMs);
     function clean(){ try{ delete window[name]; }catch(e){ window[name] = undefined; } }
-    /* Callback volá manager přes evaluateJavascript v globálním scope,
-       proto MUSÍ viset na window. */
+    /* The manager calls the callback via evaluateJavascript in the global scope,
+       so it MUST live on window. */
     window[name] = function(errno, stdout, stderr){
       if (done) return; done = true; clearTimeout(timer); clean();
       resolve({ errno:Number(errno), stdout:String(stdout == null ? "" : stdout), stderr:String(stderr == null ? "" : stderr) });
@@ -620,18 +626,18 @@ function viaExec(cmd, timeoutMs){
       else throw new Error("no async mode");
     } catch (e1){
       if (API.mode === "cb3"){
-        /* starší most bez 3arg varianty */
+        /* an older bridge without the 3-arg variant */
         try { API.mode = "cb2"; API.label = "ksu.exec(cmd, cb)"; window.ksu.exec(cmd, name); return; } catch(e2){}
       }
       done = true; clearTimeout(timer); clean();
-      /* Poslední možnost: synchronní exec(cmd) — vrací jen stdout, bez errno.
-         Tady most opravdu blokuje, proto je u akcí nasazený nohup. */
+      /* The last resort: the synchronous exec(cmd) — it returns only stdout, no
+         errno. Here the bridge really does block, which is why actions use nohup. */
       try {
         var o = window.ksu.exec(cmd);
-        API.mode = "sync"; API.label = "ksu.exec(cmd) — synchronní, bez errno";
+        API.mode = "sync"; API.label = "ksu.exec(cmd) — synchronous, no errno";
         resolve({ errno:0, stdout:String(o == null ? "" : o), stderr:"" });
       } catch (e3){
-        reject(new Error("Volání ksu.exec selhalo: " + (e3 && e3.message ? e3.message : e3)));
+        reject(new Error("The ksu.exec call failed: " + (e3 && e3.message ? e3.message : e3)));
       }
     }
   });
@@ -639,16 +645,16 @@ function viaExec(cmd, timeoutMs){
 
 function viaSync(cmd){
   try { return Promise.resolve({ errno:0, stdout:String(window.ksu.exec(cmd) || ""), stderr:"" }); }
-  catch (e){ return Promise.reject(new Error("Volání ksu.exec selhalo: " + (e && e.message ? e.message : e))); }
+  catch (e){ return Promise.reject(new Error("The ksu.exec call failed: " + (e && e.message ? e.message : e))); }
 }
 
-/* --- serializovaná fronta: nikdy neběží dvě volání mostu naráz --- */
+/* --- the serialised queue: two bridge calls never run at once --- */
 var Bridge = { q:[], running:false };
 
 function bridge(cmd, timeoutMs){
   timeoutMs = timeoutMs || 25000;
   if (API.mode === "none")
-    return Promise.reject(new Error("WebUI most `ksu` není dostupný.\nOtevři modul přes správce KernelSU (com.rifsxd.ksunext), ne v běžném prohlížeči."));
+    return Promise.reject(new Error("The WebUI `ksu` bridge is not available.\nOpen the module through the KernelSU manager (com.rifsxd.ksunext), not in an ordinary browser."));
   return new Promise(function(resolve, reject){
     Bridge.q.push({ cmd:cmd, t:timeoutMs, res:resolve, rej:reject });
     pump();
@@ -660,14 +666,14 @@ function pump(){
   var job = Bridge.q.shift();
   Bridge.running = true;
   var p;
-  if (API.mode === "demo")      p = demoExec(job.cmd);   /* i demo jde frontou, ať se testuje stejná cesta */
+  if (API.mode === "demo")      p = demoExec(job.cmd);   /* demo goes through the queue too, so the same path gets tested */
   else if (API.mode === "spawn")p = viaSpawn(job.cmd, job.t);
   else if (API.mode === "sync") p = viaSync(job.cmd);
   else                          p = viaExec(job.cmd, job.t);
   p.then(job.res, function(e){
-    /* spawn může na některých buildech chybět/házet — degraduj na exec */
+    /* spawn may be missing/throw on some builds — degrade to exec */
     if (API.mode === "spawn" && window.ksu && typeof window.ksu.exec === "function"){
-      API.mode = "cb3"; API.label = "ksu.exec(cmd, options, cb) — spawn selhal";
+      API.mode = "cb3"; API.label = "ksu.exec(cmd, options, cb) — spawn failed";
       $("apiInfo").textContent = "API: " + API.label;
       viaExec(job.cmd, job.t).then(job.res, job.rej);
       return;
@@ -677,17 +683,19 @@ function pump(){
           function(){ Bridge.running = false; setTimeout(pump, 0); });
 }
 
-/* Fire-and-forget: shell odpojí proces a hned skončí, most se vrátí v desítkách ms.
-   Výstup jde do OUT_LOG, aby šel při selhání zobrazit. */
+/* Fire-and-forget: the shell detaches the process and exits at once, so the
+   bridge returns within tens of ms. The output goes into OUT_LOG so it can be
+   shown on failure. */
 function fire(args, raw){
-  /* `exec >LOG 2>&1` přesměruje CELÝ vnitřní shell. Kdyby se redirect napsal
-     až za příkaz (`cmd >LOG`), u řetězených příkazů (`a && b >LOG`) by se
-     zachytil jen výstup toho posledního a chyba prvního by se ztratila. */
+  /* `exec >LOG 2>&1` redirects the ENTIRE inner shell. If the redirect were
+     written after the command (`cmd >LOG`), then for chained commands
+     (`a && b >LOG`) only the output of the last one would be captured and the
+     error of the first would be lost. */
   var inner = "exec >" + OUT_LOG + " 2>&1; " + (raw ? raw : BIN + " " + args);
   var cmd = "mkdir -p " + STATE_DIR + " 2>/dev/null; nohup sh -c " + shq(inner) + " </dev/null >/dev/null 2>&1 &";
   return bridge(cmd, 8000);
 }
-/* Uvozování pro sh. Argumenty jsou navíc předem whitelistované (safeTok). */
+/* Quoting for sh. The arguments are additionally whitelisted beforehand (safeTok). */
 function shq(s){ return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
 
 function toast(msg){
@@ -700,13 +708,13 @@ function toast(msg){
 }
 
 /* ==========================================================================
-   2) POMOCNÉ FUNKCE
+   2) HELPER FUNCTIONS
    ========================================================================== */
 function $(id){ return document.getElementById(id); }
 function el(tag, cls, txt){ var e = document.createElement(tag); if(cls) e.className = cls; if(txt != null) e.textContent = txt; return e; }
 function clear(n){ while (n && n.firstChild) n.removeChild(n.firstChild); return n; }
 
-/* Vybere první definovaný klíč z objektu (case-insensitive). */
+/* Picks the first defined key from an object (case-insensitive). */
 function pick(obj){
   if (!obj || typeof obj !== "object") return undefined;
   var lower = null;
@@ -732,15 +740,14 @@ function bool(v){
   if (s === "0" || s === "false" || s === "no" || s === "off" || s === "disabled") return false;
   return s === "1" || s === "true" || s === "yes" || s === "on" || s === "enabled";
 }
-/* Teplota: pxtune vrací °C, ale sysfs milicelsia — normalizuj obojí. */
+/* Temperature: pxtune returns °C, but sysfs uses millicelsius — normalise both. */
 function toC(v){ var n = num(v); if (n === null) return null; return Math.abs(n) > 200 ? n / 1000 : n; }
-/* Frekvence: kHz (sysfs) i MHz. Nejnižší reálná je 150000 kHz. */
-function toKHz(v){ var n = num(v); if (n === null) return null; return n > 0 && n < 20000 ? n * 1000 : n; }
-function mhz(kh){ return kh === null || kh === undefined ? "—" : Math.round(kh / 1000).toLocaleString("cs-CZ"); }
-function gib(b){ var n = num(b); return n === null ? "—" : (n / 1073741824).toFixed(2).replace(".", ",") + " GB"; }
-function fx(n, d){ return n === null || n === undefined ? "—" : n.toFixed(d === undefined ? 1 : d).replace(".", ","); }
+/* Frequency: both kHz (sysfs) and MHz. The lowest real one is 150000 kHz. */
+function mhz(kh){ return kh === null || kh === undefined ? "—" : Math.round(kh / 1000).toLocaleString("en-GB"); }
+function gib(b){ var n = num(b); return n === null ? "—" : (n / 1073741824).toFixed(2) + " GB"; }
+function fx(n, d){ return n === null || n === undefined ? "—" : n.toFixed(d === undefined ? 1 : d); }
 
-/* Barevné prahy. Junction (křemík) snese víc než skin (povrch v ruce). */
+/* Colour thresholds. The junction (silicon) tolerates more than the skin (the surface in your hand). */
 function tempClass(kind, c){
   if (c === null) return "";
   var th = kind === "junction" ? [55,70,85] : kind === "battery" ? [35,40,45] : [38,43,48];
@@ -749,15 +756,15 @@ function tempClass(kind, c){
 function throtClass(p){ return p === null ? "" : p >= 90 ? "ok" : p >= 70 ? "warn" : p >= 50 ? "hot" : "crit"; }
 function throtColor(p){ var c = throtClass(p); return c ? "var(--" + c + ")" : "var(--fg)"; }
 
-/* Whitelist proti injektáži do shellu. Tokeny jdou přímo do příkazové řádky. */
+/* A whitelist against shell injection. The tokens go straight onto the command line. */
 function safeTok(s){ return /^[A-Za-z0-9_.\-]{1,32}$/.test(String(s)); }
-/* Stejná znaková třída, jen delší — id tweaků jdou až na 41 znaků
-   (např. power.adaptive_battery_management_enabled), takže na ně
-   32znakový limit nestačí. */
+/* The same character class, only longer — tweak ids reach 41 characters
+   (e.g. power.adaptive_battery_management_enabled), so a 32-character limit is
+   not enough for them. */
 function safeId(s){ return /^[A-Za-z0-9_.\-]{1,64}$/.test(String(s)); }
-/* Hodnoty tweaků: čísla, výčtové položky (mq-deadline, 0.25, always…). */
+/* Tweak values: numbers, enum items (mq-deadline, 0.25, always…). */
 function safeVal(s){ return /^[A-Za-z0-9_.\-]{1,64}$/.test(String(s)); }
-/* Názvy balíčků jsou delší než 32 znaků, ale znakově ještě přísnější. */
+/* Package names are longer than 32 characters, but stricter character-wise. */
 function safePkg(s){ return /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/.test(String(s)) && String(s).length <= 128; }
 
 function kv(k, v){
@@ -773,23 +780,23 @@ function badge(cls, txt, title){
   return b;
 }
 
-/* Tolerantní parse JSON z výstupu příkazu. Nikdy nepustí bílou stránku dál. */
+/* A tolerant JSON parse of a command's output. It never lets a blank page through. */
 function parseJson(r, what){
   var raw = (r.stdout || "").trim();
   if (!raw && r.errno !== 0)
-    throw new Error(what + " skončil s kódem " + r.errno + (r.stderr ? "\n" + r.stderr : ""));
+    throw new Error(what + " exited with code " + r.errno + (r.stderr ? "\n" + r.stderr : ""));
   var i = raw.indexOf("{"), j = raw.lastIndexOf("}");
   if (i < 0 || j <= i){
     var a = raw.indexOf("["), b = raw.lastIndexOf("]");
     if (a >= 0 && b > a){ i = a; j = b; }
-    else throw new Error("Výstup `" + what + "` není JSON.\n\n" + raw.slice(0, 400));
+    else throw new Error("The output of `" + what + "` is not JSON.\n\n" + raw.slice(0, 400));
   }
   try { return JSON.parse(raw.slice(i, j + 1)); }
-  catch (e){ throw new Error("Nevalidní JSON z `" + what + "`:\n" + e.message + "\n\n" + raw.slice(0, 400)); }
+  catch (e){ throw new Error("Invalid JSON from `" + what + "`:\n" + e.message + "\n\n" + raw.slice(0, 400)); }
 }
 
 /* ==========================================================================
-   3) STAV
+   3) STATE
    ========================================================================== */
 var S = {
   data:null, err:null, inFlight:false, sticky:false,
@@ -801,12 +808,12 @@ var S = {
   daemonRaw:null, daemonLoaded:false
 };
 
-/* Normální interval 5 s: thermal HAL přepisuje cooling devices ~každých 7 s
-   (SPEC), takže rychleji se nic nového nedozvíme — jen bychom zbytečně
-   zakládali root shelly, a jedno čtení stojí 1,6–3 s.
-   Během rekonciliace se přepíná na 1 s (viz PEND_POLL_MS). */
+/* The normal interval is 5 s: the thermal HAL rewrites the cooling devices every
+   ~7 s (SPEC), so polling faster tells us nothing new — we would only create root
+   shells for nothing, and one read costs 1.6-3 s.
+   During reconciliation it switches to 1 s (see PEND_POLL_MS). */
 var INTERVALS = [
-  { ms:0,     lb:"vyp" },
+  { ms:0,     lb:"off" },
   { ms:2000,  lb:"2 s" },
   { ms:5000,  lb:"5 s" },
   { ms:10000, lb:"10 s" },
@@ -814,24 +821,24 @@ var INTERVALS = [
 ];
 var intervalIdx = 2;
 
-var PEND_POLL_MS = 1000;   /* prodleva PO dokončení čtení, ne pevný interval */
-var PEND_TIMEOUT = 15000;  /* přepnutí profilu trvá ~5 s -> 3× rezerva */
+var PEND_POLL_MS = 1000;   /* the delay AFTER a read completes, not a fixed interval */
+var PEND_TIMEOUT = 15000;  /* a profile switch takes ~5 s -> 3x margin */
 
 /* ==========================================================================
-   4) REKONCILIACE — jádro neblokujícího modelu
+   4) RECONCILIATION — the core of the non-blocking model
    --------------------------------------------------------------------------
    PEND = { label, deadline, poll(), retry(), onDone(ok) }
-   poll() vrací Promise<bool> = "už je to hotové?"
+   poll() returns Promise<bool> = "is it done yet?"
    ========================================================================== */
 var PEND = null;
 
 function startAction(o){
   /* o: { args | raw, label, kind, target, poll, timeout }
-     - args  = argumenty pro `pxtune <args>`
-     - raw   = celý příkaz (pro řetězení více `pxtune` volání v jednom shellu)
-     - kind/target = pro optimistické vykreslení
-     - poll  = Promise<bool> "už je to hotové?" */
-  if (PEND){ toast("Počkej, běží: " + PEND.label); return Promise.resolve(false); }
+     - args  = the arguments for `pxtune <args>`
+     - raw   = the whole command (for chaining several `pxtune` calls in one shell)
+     - kind/target = for the optimistic render
+     - poll  = Promise<bool> "is it done yet?" */
+  if (PEND){ toast("Please wait, running: " + PEND.label); return Promise.resolve(false); }
   S.sticky = false; banner(null);
   PEND = {
     label: o.label,
@@ -843,9 +850,9 @@ function startAction(o){
     started: Date.now()
   };
   showPend(true);
-  renderAll();                       /* optimistické překreslení */
+  renderAll();                       /* the optimistic re-render */
   return fire(o.args, o.raw).then(function(){
-    scheduleLoop(400);               /* první kontrola dřív, ať to působí svižně */
+    scheduleLoop(400);               /* the first check sooner, so it feels snappy */
     return true;
   }).catch(function(e){
     PEND = null; showPend(false);
@@ -857,51 +864,51 @@ function startAction(o){
 
 function showPend(on){
   $("pendBar").classList.toggle("hide", !on);
-  if (on) $("pendTxt").textContent = PEND.label + " — čekám na potvrzení ze systému…";
+  if (on) $("pendTxt").textContent = PEND.label + " — waiting for confirmation from the system…";
 }
 
 function finishPending(ok, err){
   var pe = PEND; PEND = null; showPend(false);
   if (!pe) return;
-  /* Nejdřív překreslit (zahodí optimistický stav), teprve pak případná hláška —
-     jinak by ji renderAll() hned smazal. */
+  /* Re-render first (which drops the optimistic state), and only then show any
+     message — otherwise renderAll() would wipe it straight away. */
   renderAll();
   if (ok){
     S.fails = 0; S.sticky = false; banner(null);
-    toast(pe.label + " — hotovo");
+    toast(pe.label + " — done");
   } else {
     failAction(pe.label, pe.args,
-      "Systém do " + Math.round((Date.now() - pe.started)/1000) + " s nepotvrdil změnu." +
+      "The system did not confirm the change within " + Math.round((Date.now() - pe.started)/1000) + " s." +
       (err ? "\n" + err : ""));
   }
   scheduleLoop();
 }
 
 function failAction(label, args, detail){
-  S.sticky = true;   /* tuhle hlášku nesmí smazat běžné překreslení */
-  banner("err", "Nepodařilo se: " + label,
-    "Příkaz `pxtune " + args + "` buď selhal, nebo trvá déle, než je obvyklé.",
+  S.sticky = true;   /* an ordinary re-render must not wipe this message */
+  banner("err", "Failed: " + label,
+    "The command `pxtune " + args + "` either failed or is taking longer than usual.",
     detail,
-    [{ lb:"Zopakovat", cls:"btn-p", fn:function(){ S.sticky = false; banner(null); rerun(); } },
-     { lb:"Zobrazit výstup", cls:"", fn:showLastOutput },
-     { lb:"Zavřít", cls:"", fn:function(){ S.sticky = false; banner(null); } }]);
-  toast("Akce selhala");
+    [{ lb:"Retry", cls:"btn-p", fn:function(){ S.sticky = false; banner(null); rerun(); } },
+     { lb:"Show output", cls:"", fn:showLastOutput },
+     { lb:"Close", cls:"", fn:function(){ S.sticky = false; banner(null); } }]);
+  toast("The action failed");
 }
 
-/* Zopakování si musí znovu vytvořit predikát — držíme si ho u akce. */
+/* A retry has to recreate the predicate — we keep it with the action. */
 var LAST_ACTION = null;
 function rerun(){ if (LAST_ACTION) LAST_ACTION(); }
 
 function showLastOutput(){
-  bridge("tail -n 40 " + OUT_LOG + " 2>/dev/null || echo '(log je prázdný)'", 10000)
+  bridge("tail -n 40 " + OUT_LOG + " 2>/dev/null || echo '(the log is empty)'", 10000)
     .then(function(r){
-      dialog("Výstup posledního příkazu", (r.stdout || "").trim() || "(prázdné)", true);
+      dialog("Output of the last command", (r.stdout || "").trim() || "(empty)", true);
     })
-    .catch(function(e){ toast("Log se nepodařilo přečíst"); });
+    .catch(function(e){ toast("The log could not be read"); });
 }
 
 /* ==========================================================================
-   5) SMYČKA — jeden setTimeout, nikdy dvě čtení naráz
+   5) THE LOOP — one setTimeout, never two reads at once
    ========================================================================== */
 function scheduleLoop(delay){
   clearTimeout(S.loopT); S.loopT = null;
@@ -911,7 +918,7 @@ function scheduleLoop(delay){
     else {
       d = INTERVALS[intervalIdx].ms;
       if (!d) return;
-      /* backoff po opakovaných chybách: 2×, 3×, max 4× */
+      /* backoff after repeated errors: 2x, 3x, at most 4x */
       if (S.fails >= 3) d = d * Math.min(4, S.fails - 1);
     }
   }
@@ -921,7 +928,7 @@ function scheduleLoop(delay){
 function tick(){
   if (S.inFlight){ scheduleLoop(200); return; }
   if (PEND){ pollPending().then(function(){ scheduleLoop(); }); return; }
-  if (document.hidden){ scheduleLoop(); return; }   /* skrytá stránka = nepollovat */
+  if (document.hidden){ scheduleLoop(); return; }   /* a hidden page = do not poll */
   refresh().then(function(){ scheduleLoop(); });
 }
 
@@ -929,7 +936,7 @@ function pollPending(){
   var pe = PEND;
   if (!pe) return Promise.resolve();
   var left = Math.max(0, Math.ceil((pe.deadline - Date.now()) / 1000));
-  $("pendTxt").textContent = pe.label + " — čekám na potvrzení ze systému… (" + left + " s)";
+  $("pendTxt").textContent = pe.label + " — waiting for confirmation from the system… (" + left + " s)";
   return Promise.resolve().then(pe.poll).then(function(done){
     if (PEND !== pe) return;
     if (done) finishPending(true);
@@ -941,25 +948,25 @@ function pollPending(){
 }
 
 /* ==========================================================================
-   6) ČTENÍ STAVU
+   6) READING THE STATE
    ========================================================================== */
 function refresh(manual){
   if (S.inFlight) return Promise.resolve();
   S.inFlight = true;
-  setStatus("busy", "načítám…");
+  setStatus("busy", "loading…");
   return bridge(BIN + " status --json", 20000).then(function(r){
     var obj = parseJson(r, "pxtune status --json");
     S.data = obj; S.err = null; S.fails = 0;
-    setStatus("ok", PEND ? "pracuji…" : "OK");
+    setStatus("ok", PEND ? "working…" : "OK");
     renderAll();
-    $("lastUpd").textContent = new Date().toLocaleTimeString("cs-CZ");
+    $("lastUpd").textContent = new Date().toLocaleTimeString("en-GB");
     return obj;
   }).catch(function(e){
     S.fails++;
     S.err = e && e.message ? e.message : String(e);
-    setStatus("err", "chyba");
+    setStatus("err", "error");
     if (!PEND) renderStatusError(S.err);
-    if (manual) toast("Načtení selhalo");
+    if (manual) toast("Loading failed");
     throw e;
   }).then(function(v){ S.inFlight = false; return v; },
           function(e){ S.inFlight = false; return null; });
@@ -970,7 +977,7 @@ function setStatus(kind, txt){
   $("statTxt").textContent = txt;
 }
 
-/* --- univerzální banner --- */
+/* --- the universal banner --- */
 function banner(kind, title, text, detail, actions){
   var b = clear($("banners"));
   if (!kind) return;
@@ -991,14 +998,14 @@ function banner(kind, title, text, detail, actions){
 }
 
 function renderStatusError(msg){
-  banner("err", "Nepodařilo se získat stav",
-    "Zkontroluj, že modul pixel_tune běží a že " + BIN + " je spustitelný.",
+  banner("err", "Could not read the state",
+    "Check that the pixel_tune module is running and that " + BIN + " is executable.",
     msg,
-    [{ lb:"Zkusit znovu", cls:"btn-p", fn:function(){ refresh(true); } }]);
+    [{ lb:"Try again", cls:"btn-p", fn:function(){ refresh(true); } }]);
 }
 
 /* ==========================================================================
-   7) VYKRESLENÍ — PŘEHLED
+   7) RENDERING — THE OVERVIEW
    ========================================================================== */
 function renderAll(){
   try {
@@ -1017,9 +1024,9 @@ function renderAll(){
     if (S.tab === "tweaks") renderTweaks();
     if (S.tab === "apps")   renderApps();
   } catch (e){
-    /* Chyba vykreslení nikdy nesmí nechat prázdnou stránku. */
-    banner("err", "Chyba při vykreslování", "UI se nepodařilo sestavit z přijatých dat.",
-      (e && e.stack) || String(e), [{ lb:"Zkusit znovu", cls:"btn-p", fn:function(){ refresh(true); } }]);
+    /* A rendering error must never leave a blank page. */
+    banner("err", "Rendering error", "The UI could not be built from the received data.",
+      (e && e.stack) || String(e), [{ lb:"Try again", cls:"btn-p", fn:function(){ refresh(true); } }]);
   }
 }
 
@@ -1046,20 +1053,20 @@ function renderProfiles(d){
   ids.forEach(function(id){
     var meta = PROFILES.filter(function(x){ return x.id === id; })[0] || { ic:"•", nm:id, ds:"" };
     var b = el("button", "prof");
-    /* OPTIMISTICKY: dokud běží přepnutí, tvař se, že cílový profil už platí. */
+    /* OPTIMISTICALLY: while a switch is running, pretend the target profile already applies. */
     var shown = target || active;
     b.setAttribute("aria-pressed", String(id === shown));
     if (target === id) b.className += " pending";
     b.appendChild(el("div", "ic", meta.ic));
     b.appendChild(el("div", "nm", meta.nm));
-    if (target === id) b.appendChild(el("div", "ds", "přepínám…"));
+    if (target === id) b.appendChild(el("div", "ds", "switching…"));
     else if (meta.ds)  b.appendChild(el("div", "ds", meta.ds));
     b.disabled = !!PEND;
     b.onclick = function(){ switchProfile(id, meta.nm); };
     host.appendChild(b);
   });
 
-  $("autoState").textContent = manual === true ? "(vypnuto — ruční profil)" : manual === false ? "(aktivní)" : "";
+  $("autoState").textContent = manual === true ? "(off — manual profile)" : manual === false ? "(active)" : "";
   $("btnProfAuto").disabled = !!PEND;
 }
 
@@ -1077,8 +1084,8 @@ function renderClusters(d){
     var cur   = toKHz(pick(o, "cur", "cur_freq", "scaling_cur_freq", "current"));
     var cap   = toKHz(pick(o, "max", "max_freq", "scaling_max_freq", "cap", "limit"));
 
-    /* Když přijde jen stav cooling device, dopočítej strop podle ověřeného
-       pravidla ze SPEC: index = (počet - 1 - cur_state). */
+    /* When only the cooling device state arrives, work the cap out using the
+       verified rule from the SPEC: index = (count - 1 - cur_state). */
     var cst = num(pick(o, "cdev_cur_state", "cooling_cur_state", "cur_state"));
     if (cap === null && cst !== null){
       var idx = freqs.length - 1 - Math.round(cst);
@@ -1096,7 +1103,7 @@ function renderClusters(d){
     top.appendChild(el("span", "co", c.co));
     var pc = el("span", "pct", pct === null ? "—" : Math.round(pct) + " %");
     pc.style.color = throtColor(pct);
-    pc.title = "Aktuální strop jako podíl hardwarového maxima";
+    pc.title = "The current cap as a fraction of the hardware maximum";
     top.appendChild(pc);
     box.appendChild(top);
 
@@ -1105,18 +1112,18 @@ function renderClusters(d){
     var blocked = el("div", "seg blocked"); blocked.style.width = (100 - capP) + "%";
     var curSeg = el("div", "seg cur");   curSeg.style.width = curP + "%";
     tr.appendChild(head); tr.appendChild(blocked); tr.appendChild(curSeg);
-    tr.title = "Modrá = aktuální frekvence · světlá = dostupné pásmo · šrafovaná = zablokováno throttlingem";
+    tr.title = "Blue = the current frequency · light = the available band · hatched = blocked by throttling";
     box.appendChild(tr);
 
     var lg = el("div", "lg");
-    lg.appendChild(el("span", null, "teď " + mhz(cur) + " MHz"));
+    lg.appendChild(el("span", null, "now " + mhz(cur) + " MHz"));
     lg.appendChild(el("span", null,
-      "strop " + mhz(cap) + " / HW " + mhz(hwMax) + " MHz" + (cst !== null ? "  (cdev " + Math.round(cst) + ")" : "")));
+      "cap " + mhz(cap) + " / HW " + mhz(hwMax) + " MHz" + (cst !== null ? "  (cdev " + Math.round(cst) + ")" : "")));
     box.appendChild(lg);
     host.appendChild(box);
   });
 
-  if (!host.children.length) host.appendChild(el("div", "sub", "Data o CPU nejsou k dispozici."));
+  if (!host.children.length) host.appendChild(el("div", "sub", "No CPU data is available."));
 }
 
 function renderTemps(d){
@@ -1129,17 +1136,17 @@ function renderTemps(d){
     { k:["little","cpu_little"],     lb:"LITTLE",  kind:"junction" },
     { k:["g3d","gpu"],               lb:"GPU",     kind:"junction" },
     { k:["skin","quiet_therm"],      lb:"Skin",    kind:"skin" },
-    { k:["battery","battery_temp"],  lb:"Baterie", kind:"battery" }
+    { k:["battery","battery_temp"],  lb:"Battery", kind:"battery" }
   ];
   var extra = [
     { k:["soc","soc_therm"],         lb:"SoC",       kind:"skin" },
-    { k:["display","display_therm"], lb:"Displej",   kind:"skin" },
-    { k:["charger","charger_therm"], lb:"Nabíječka", kind:"skin" }
+    { k:["display","display_therm"], lb:"Display", kind:"skin" },
+    { k:["charger","charger_therm"], lb:"Charger", kind:"skin" }
   ];
 
   function tile(spec){
     var v = pick.apply(null, [t].concat(spec.k));
-    if (v === undefined && spec.lb === "Baterie") v = pick(bat, "temp", "temperature");
+    if (v === undefined && spec.lb === "Battery") v = pick(bat, "temp", "temperature");
     var c = toC(v);
     var box = el("div", "t " + tempClass(spec.kind, c));
     box.appendChild(el("div", "lb", spec.lb));
@@ -1173,8 +1180,8 @@ function renderGpu(d){
   var pol  = pick(g, "power_policy", "policy");
   var pct = cap !== null && hw ? cap / hw * 100 : null;
 
-  host.appendChild(kv("Frekvence", mhz(cur) + " MHz"));
-  var capRow = kv("Strop", mhz(cap) + " / " + mhz(hw) + " MHz");
+  host.appendChild(kv("Frequency", mhz(cur) + " MHz"));
+  var capRow = kv("Cap", mhz(cap) + " / " + mhz(hw) + " MHz");
   if (pct !== null){
     var b = badge(throtClass(pct), Math.round(pct) + " %");
     b.style.marginLeft = "6px";
@@ -1183,7 +1190,7 @@ function renderGpu(d){
   host.appendChild(capRow);
   if (min !== null) host.appendChild(kv("Minimum", mhz(min) + " MHz"));
   if (pol) host.appendChild(kv("Power policy", String(pol)));
-  host.appendChild(kv("Utilizace", util === null ? "—" : Math.round(util) + " %"));
+  host.appendChild(kv("Utilisation", util === null ? "—" : Math.round(util) + " %"));
   if (util !== null){
     var m = el("div", "mini"), i = el("i");
     i.style.width = Math.max(0, Math.min(100, util)) + "%";
@@ -1202,14 +1209,14 @@ function renderMem(d){
   var swp  = num(pick(m, "swappiness", "vm_swappiness"));
   if (swp === null) swp = num(pick(d, "swappiness"));
 
-  host.appendChild(kv("zram velikost", gib(size)));
+  host.appendChild(kv("zram size", gib(size)));
 
-  var algRow = kv("Algoritmus", alg ? String(alg) : "—");
+  var algRow = kv("Algorithm", alg ? String(alg) : "—");
   if (alg){
     var okAlg = String(alg).toLowerCase() === "lz77eh";
-    var b = badge(okAlg ? "ok" : "crit", okAlg ? "HW akcelerace" : "bez HW akcelerace!",
-      okAlg ? "lz77eh běží na akcelerátoru Emerald Hill — komprese stojí ~0 CPU a ~0 tepla."
-            : "Podle SPEC se nikdy nemá přepínat mimo lz77eh — zstd/lz4 běží na CPU a topí.");
+    var b = badge(okAlg ? "ok" : "crit", okAlg ? "HW acceleration" : "no HW acceleration!",
+      okAlg ? "lz77eh runs on the Emerald Hill accelerator — compression costs ~0 CPU and ~0 heat."
+            : "Per the SPEC it must never be switched away from lz77eh — zstd/lz4 run on the CPU and generate heat.");
     b.style.marginLeft = "6px";
     algRow.querySelector(".v").appendChild(b);
   }
@@ -1217,12 +1224,12 @@ function renderMem(d){
 
   if (used !== null){
     var pct = size ? Math.max(0, Math.min(100, used / size * 100)) : null;
-    host.appendChild(kv("Využito", gib(used) + (pct !== null ? " (" + Math.round(pct) + " %)" : "")));
+    host.appendChild(kv("Used", gib(used) + (pct !== null ? " (" + Math.round(pct) + " %)" : "")));
     if (pct !== null){
       var mm = el("div", "mini"), ii = el("i"); ii.style.width = pct + "%"; mm.appendChild(ii); host.appendChild(mm);
     }
   }
-  if (orig !== null && used) host.appendChild(kv("Kompresní poměr", (orig / used).toFixed(2).replace(".", ",") + "×"));
+  if (orig !== null && used) host.appendChild(kv("Compression ratio", (orig / used).toFixed(2) + "x"));
   host.appendChild(kv("swappiness", swp === null ? "—" : String(Math.round(swp))));
 }
 
@@ -1238,30 +1245,30 @@ function renderBattery(d){
   if (stop === null) stop = num(pick(d, "charge_stop_level"));
   var start = num(pick(b, "charge_start_level", "start_level"));
 
-  var STAT = { Charging:"nabíjí se", Discharging:"vybíjí se", Full:"nabito", "Not charging":"nenabíjí se", Unknown:"neznámý" };
+  var STAT = { Charging:"charging", Discharging:"discharging", Full:"full", "Not charging":"not charging", Unknown:"unknown" };
 
-  host.appendChild(kv("Úroveň", cap === null ? "—" : Math.round(cap) + " %"));
+  host.appendChild(kv("Level", cap === null ? "—" : Math.round(cap) + " %"));
   if (cap !== null){
     var m = el("div", "mini"), i = el("i");
     i.style.width = Math.max(0, Math.min(100, cap)) + "%";
     i.style.background = cap <= 15 ? "var(--crit)" : cap <= 30 ? "var(--warn)" : "var(--ok)";
     m.appendChild(i); host.appendChild(m);
   }
-  host.appendChild(kv("Stav", st ? (STAT[st] || String(st)) : "—"));
+  host.appendChild(kv("Status", st ? (STAT[st] || String(st)) : "—"));
 
-  var tr = kv("Teplota", fx(tp, 1) + " °C");
+  var tr = kv("Temperature", fx(tp, 1) + " °C");
   var tc = tempClass("battery", tp);
   if (tc) tr.querySelector(".v").style.color = "var(--" + tc + ")";
   host.appendChild(tr);
 
-  if (cyc !== null) host.appendChild(kv("Cyklů", String(Math.round(cyc))));
-  if (start !== null) host.appendChild(kv("Start nabíjení", Math.round(start) + " %"));
+  if (cyc !== null) host.appendChild(kv("Cycles", String(Math.round(cyc))));
+  if (start !== null) host.appendChild(kv("Charge start", Math.round(start) + " %"));
 
-  /* OPTIMISTICKY: dokud běží změna stropu, ukaž cílovou hodnotu. */
+  /* OPTIMISTICALLY: while a cap change is running, show the target value. */
   var shownStop = (PEND && PEND.kind === "charge") ? PEND.target : stop;
-  var sr = kv("Strop nabíjení", shownStop === null || shownStop === undefined ? "—" : Math.round(shownStop) + " %");
+  var sr = kv("Charge cap", shownStop === null || shownStop === undefined ? "—" : Math.round(shownStop) + " %");
   if (shownStop !== null && shownStop !== undefined && shownStop < 100) sr.querySelector(".v").style.color = "var(--accent)";
-  if (PEND && PEND.kind === "charge") sr.querySelector(".v").appendChild(badge("warn", " nastavuji…"));
+  if (PEND && PEND.kind === "charge") sr.querySelector(".v").appendChild(badge("warn", " applying…"));
   host.appendChild(sr);
 
   if (!S.chgDirty && stop !== null && !PEND){
@@ -1286,10 +1293,10 @@ function renderDisplay(d){
   var dens = num(pick(s, "density", "dpi", "density_forced"));
   var nat = (w === 1080 && h === 2400) || (w === null && h === null);
 
-  var r = kv("Aktuální", (w && h ? w + " × " + h : "—") + (dens !== null ? "  ·  " + Math.round(dens) + " dpi" : ""));
-  if (!nat){ var bd = badge("warn", "nenativní"); bd.style.marginLeft = "6px"; r.querySelector(".v").appendChild(bd); }
+  var r = kv("Current", (w && h ? w + " × " + h : "—") + (dens !== null ? "  ·  " + Math.round(dens) + " dpi" : ""));
+  if (!nat){ var bd = badge("warn", "non-native"); bd.style.marginLeft = "6px"; r.querySelector(".v").appendChild(bd); }
   host.appendChild(r);
-  host.appendChild(kv("Nativní", "1080 × 2400  ·  420 dpi"));
+  host.appendChild(kv("Native", "1080 × 2400  ·  420 dpi"));
 
   var pr = pick(s, "presets", "available", "list");
   var ids = Array.isArray(pr) && pr.length
@@ -1298,7 +1305,7 @@ function renderDisplay(d){
 
   var ph = clear($("resPresets"));
   ids.forEach(function(id){
-    if (id === "native") return;   /* má vlastní velké tlačítko */
+    if (id === "native") return;   /* it has its own big button */
     var b = el("button", "btn-sm");
     b.style.flex = "1 0 45%";
     b.appendChild(el("div", null, id));
@@ -1307,19 +1314,19 @@ function renderDisplay(d){
     b.onclick = function(){ changeRes(id); };
     ph.appendChild(b);
   });
-  if (!ph.children.length) ph.appendChild(el("div", "sub", "Presety nejsou k dispozici."));
+  if (!ph.children.length) ph.appendChild(el("div", "sub", "No presets are available."));
   $("btnResReset").disabled = !!PEND;
 }
 
 /* ==========================================================================
-   8) AKCE PŘEHLEDU
+   8) OVERVIEW ACTIONS
    ========================================================================== */
 function switchProfile(id, nm){
-  if (!safeTok(id)){ toast("Neplatný název profilu"); return; }
+  if (!safeTok(id)){ toast("Invalid profile name"); return; }
   LAST_ACTION = function(){ switchProfile(id, nm); };
   startAction({
     args: "profile " + id,
-    label: "Profil " + (nm || id),
+    label: "Profile " + (nm || id),
     kind: "profile", target: id,
     poll: function(){
       return refresh().then(function(dd){ return !!dd && activeProfile(dd) === id; });
@@ -1330,13 +1337,13 @@ function switchProfile(id, nm){
 function setCharge(v){
   var args = (v === "off") ? "charge off" : "charge " + v;
   var want = (v === "off") ? 100 : parseInt(v, 10);
-  if (v !== "off" && !(want >= 1 && want <= 100)){ toast("Neplatná hodnota"); return; }
+  if (v !== "off" && !(want >= 1 && want <= 100)){ toast("Invalid value"); return; }
   LAST_ACTION = function(){ setCharge(v); };
   S.chgDirty = false;
   startAction({
       kind:"charge", target:want,
     args: args,
-    label: "Strop nabíjení " + want + " %",
+    label: "Charge cap " + want + " %",
     poll: function(){
       return refresh().then(function(dd){
         if (!dd) return false;
@@ -1348,18 +1355,18 @@ function setCharge(v){
 }
 
 function changeRes(preset){
-  if (!safeTok(preset)){ toast("Neplatný název presetu"); return; }
+  if (!safeTok(preset)){ toast("Invalid preset name"); return; }
   LAST_ACTION = function(){ changeRes(preset); };
   startAction({
       kind:"res", target:preset,
     args: "res " + preset,
-    label: "Rozlišení " + preset,
+    label: "Resolution " + preset,
     timeout: 20000,
     poll: function(){
       return refresh().then(function(dd){
         if (!dd) return false;
         var s = pick(dd, "display", "res", "resolution") || {};
-        /* Hotovo, když CLI ohlásí čekající potvrzení, nebo když už sedí šířka. */
+        /* Done when the CLI reports a pending confirmation, or when the width already matches. */
         if (bool(pick(s, "res_pending", "pending")) === true) return true;
         var w = num(pick(s, "width", "w"));
         var want = parseInt(String(preset).split("x")[0], 10);
@@ -1389,7 +1396,7 @@ function resAction(sub, label){
 }
 
 /* ==========================================================================
-   9) ROZLIŠENÍ — 60s pojistka
+   9) RESOLUTION — the 60 s safeguard
    ========================================================================== */
 function startResCountdown(secs){
   S.resDeadline = Date.now() + secs * 1000;
@@ -1404,7 +1411,7 @@ function tickRes(){
   $("resCount").textContent = String(left);
   if (left <= 0){
     stopResCountdown();
-    toast("Čas vypršel — rozlišení se vrací na nativní");
+    toast("Time is up — the resolution is returning to native");
     scheduleLoop(1500);
   }
 }
@@ -1412,7 +1419,7 @@ function stopResCountdown(){
   clearInterval(S.resTimer); S.resTimer = null; S.resDeadline = 0;
   $("resBanner").classList.add("hide");
 }
-/* Když se stránka načte během čekání, převezmi odpočet ze stavu. */
+/* When the page loads while a confirmation is pending, take the countdown over from the state. */
 function syncResPending(d){
   var s = pick(d, "display", "res", "resolution") || {};
   var pend = bool(pick(s, "res_pending", "pending"));
@@ -1427,20 +1434,21 @@ function syncResPending(d){
 }
 
 /* ==========================================================================
-   10) TWEAKY
+   10) TWEAKS
    --------------------------------------------------------------------------
-   Data z `pxtune tweak json` — SAMOSTATNÝ příkaz, NENÍ součástí status --json.
-   Načítá se jen při otevření záložky a po změně, nikdy v pollu.
+   The data comes from `pxtune tweak json` — a SEPARATE command, NOT part of
+   status --json. It is loaded only when the tab is opened and after a change,
+   never in the poll.
    ========================================================================== */
-/* `--live` navíc dočte skutečné aktuální hodnoty ze sysfs (klíč `current`).
-   Stojí to čas, ale záložka se otevírá ručně a nepolluje se — a bez toho
-   bychom uživateli ukazovali jen to, co je zapsané v configu, ne realitu. */
+/* `--live` additionally reads the real current values from sysfs (the `current`
+   key). That costs time, but the tab is opened manually and is not polled — and
+   without it we would only show the user what is written in the config, not reality. */
 function loadTweaks(force){
   if (S.tweaksLoaded && !force) return Promise.resolve(S.tweaks);
   return bridge(BIN + " tweak json --live", 30000).then(function(r){
     var o = parseJson(r, "pxtune tweak json --live");
     if (pick(o, "error") === "registry_missing")
-      throw new Error("Registr tweaků chybí (tweaks/registry.def). Přeinstaluj modul.");
+      throw new Error("The tweak registry is missing (tweaks/registry.def). Reinstall the module.");
     S.tweaks = normTweaks(o);
     S.tweaksErr = null; S.tweaksLoaded = true;
     return S.tweaks;
@@ -1451,13 +1459,13 @@ function loadTweaks(force){
   });
 }
 
-/* Skutečný tvar z bin/pxtune-tweaks (cmd_tweak_json):
+/* The real shape from bin/pxtune-tweaks (cmd_tweak_json):
    { version, live, tweaks:[{id,cat,mech,target,type,risk,flags:[],name,desc,
                              set,value,stock[,current]}],
      categories:[{id,name,n}], count:{active,errors,ts} }
-   - `cat` je ID kategorie, český název je až v `categories[]`
-   - `flags` je POLE (boot | reapply | unverified | adv)
-   - `set` říká, jestli je tweak výslovně nastavený; `value` je pak ""        */
+   - `cat` is the category ID, the readable name is only in `categories[]`
+   - `flags` is an ARRAY (boot | reapply | unverified | adv)
+   - `set` says whether the tweak is explicitly set; `value` is "" otherwise    */
 function normTweaks(o){
   var cats = {}, order = [];
   (pick(o, "categories") || []).forEach(function(c){
@@ -1478,7 +1486,7 @@ function normTweaks(o){
     return {
       id:    String(pick(t, "id", "key") || ""),
       catId: catId,
-      cat:   cats[catId] || catId || "Ostatní",
+      cat:   cats[catId] || catId || "Other",
       mech:  String(pick(t, "mech") || ""),
       target:String(pick(t, "target") || ""),
       name:  String(pick(t, "name", "title") || pick(t, "id") || "?"),
@@ -1499,8 +1507,8 @@ function normTweaks(o){
   return list;
 }
 
-/* Co ukázat jako "aktuální": nejdřív skutečně přečtená hodnota (--live),
-   pak výslovně nastavená, jinak stock. */
+/* What to show as "current": first the actually read value (--live), then the
+   explicitly set one, otherwise the stock value. */
 function effVal(t){
   if (t.live !== null && t.live !== "") return t.live;
   if (t.set && t.value !== "") return t.value;
@@ -1516,7 +1524,7 @@ function parseType(type){
   m = s.match(/^enum:(.+)$/);
   if (m) return { k:"enum", opts:m[1].split(",").map(function(x){ return x.trim(); }).filter(Boolean) };
   m = s.match(/^enumf:(.+)$/);
-  /* Nabídka se čte ze zařízení, v JSON není -> volné pole s validací. */
+  /* The options are read from the device and are not in the JSON -> a free field with validation. */
   if (m) return { k:"enumf", src:m[1] };
   return { k:"text" };
 }
@@ -1524,7 +1532,7 @@ function parseType(type){
 function fmtVal(t, v){
   if (v === undefined || v === null || v === "") return "—";
   var ty = parseType(t.type);
-  if (ty.k === "bool") return bool(v) ? "zapnuto" : "vypnuto";
+  if (ty.k === "bool") return bool(v) ? "on" : "off";
   return String(v);
 }
 
@@ -1535,19 +1543,19 @@ function renderTweaks(){
   if (S.tweaksErr){
     var c = el("div", "card");
     var d = el("div", "banner err");
-    d.appendChild(el("div", "ttl", "Tweaky se nepodařilo načíst"));
-    d.appendChild(el("div", null, "Příkaz `pxtune tweak json` selhal nebo nevrátil platný JSON. Zbytek WebUI funguje dál."));
+    d.appendChild(el("div", "ttl", "The tweaks could not be loaded"));
+    d.appendChild(el("div", null, "The command `pxtune tweak json` failed or did not return valid JSON. The rest of the WebUI keeps working."));
     d.appendChild(el("pre", null, S.tweaksErr));
     var row = el("div", "btn-row"); row.style.marginTop = "10px";
-    var rb = el("button", "btn-sm btn-p", "Zkusit znovu");
+    var rb = el("button", "btn-sm btn-p", "Try again");
     rb.onclick = function(){ S.tweaksLoaded = false; renderTweaks(); loadTweaks(true).then(renderTweaks, renderTweaks); };
     row.appendChild(rb); d.appendChild(row);
     c.appendChild(d); host.appendChild(c);
     return;
   }
-  if (!S.tweaks){ host.appendChild(el("div", "card")).appendChild(el("div", "sub", "Načítám…")); return; }
+  if (!S.tweaks){ host.appendChild(el("div", "card")).appendChild(el("div", "sub", "Loading…")); return; }
   if (!S.tweaks.length){
-    host.appendChild(el("div", "card")).appendChild(el("div", "sub", "Registr tweaků je prázdný."));
+    host.appendChild(el("div", "card")).appendChild(el("div", "sub", "The tweak registry is empty."));
     return;
   }
 
@@ -1555,7 +1563,7 @@ function renderTweaks(){
   var exper  = S.tweaks.filter(function(t){ return  t.unverified && (adv || !t.adv); });
   var hiddenAdv = S.tweaks.filter(function(t){ return t.adv; }).length;
 
-  /* seskupení po kategoriích; pořadí drží `categories[]` z CLI */
+  /* grouping by category; the order comes from `categories[]` from the CLI */
   function groups(list){
     var order = [], map = {};
     list.forEach(function(t){ if (!map[t.cat]){ map[t.cat] = []; order.push(t.cat); } map[t.cat].push(t); });
@@ -1584,11 +1592,11 @@ function renderTweaks(){
     var wc = el("div", "card");
     wc.style.borderColor = "var(--warn)";
     var w = el("div", "banner warn");
-    w.appendChild(el("div", "ttl", "⚠ Experimentální — neověřeno"));
+    w.appendChild(el("div", "ttl", "⚠ Experimental — unverified"));
     w.appendChild(el("div", null,
-      "Tyhle tweaky nebyly na tomhle zařízení ověřeny. Nemusí mít žádný efekt, " +
-      "nebo se můžou chovat jinak, než popis slibuje. Zapínej je po jednom a sleduj, " +
-      "co to udělá. Když se něco pokazí, pomůže „Reset všech“ nebo „Vrátit vše na stock“."));
+      "These tweaks have not been verified on this device. They may have no effect at all, " +
+      "or behave differently from what the description promises. Enable them one at a time and " +
+      "watch what happens. If something goes wrong, 'Reset all' or 'Restore everything to stock' will help."));
     wc.appendChild(w);
     groups(exper).forEach(function(g){
       wc.appendChild(el("div", "cat", g.cat));
@@ -1599,7 +1607,7 @@ function renderTweaks(){
 
   if (!adv && hiddenAdv){
     var n = el("div", "card");
-    n.appendChild(el("div", "sub", "Skryto " + hiddenAdv + " pokročilých tweaků. Zapni přepínač „Pokročilé“ nahoře."));
+    n.appendChild(el("div", "sub", "Hidden: " + hiddenAdv + " advanced tweaks. Turn on the 'Advanced' switch at the top."));
     host.appendChild(n);
   }
 }
@@ -1613,11 +1621,11 @@ function tweakRow(t){
   hd.appendChild(el("div", "nm", t.name));
   var r = RISK[t.risk];
   hd.appendChild(badge(r.cls, r.lb, r.ds));
-  if (ty.k === "ro")  hd.appendChild(badge("mut", "jen ke čtení", "pixel_tune tuhle položku záměrně nenastavuje — důvod je v popisu."));
-  if (t.adv)          hd.appendChild(badge("mut", "pokročilé"));
-  if (t.unverified)   hd.appendChild(badge("warn", "neověřeno"));
-  if (t.set)          hd.appendChild(badge("ok", "nastaveno", "Tuhle hodnotu drží pixel_tune, není to stock."));
-  if (t.boot)         hd.appendChild(badge("mut", "při bootu", "Aplikuje se při startu systému."));
+  if (ty.k === "ro")  hd.appendChild(badge("mut", "read only", "pixel_tune deliberately does not set this item — the reason is in the description."));
+  if (t.adv)          hd.appendChild(badge("mut", "advanced"));
+  if (t.unverified)   hd.appendChild(badge("warn", "unverified"));
+  if (t.set)          hd.appendChild(badge("ok", "set", "This value is held by pixel_tune, it is not stock."));
+  if (t.boot)         hd.appendChild(badge("mut", "at boot", "Applied when the system starts."));
   row.appendChild(hd);
 
   if (t.desc) row.appendChild(el("div", "ds", t.desc));
@@ -1626,26 +1634,26 @@ function tweakRow(t){
   var pending = PEND && PEND.kind === "tweak" && PEND.target === t.id;
 
   if (ty.k === "ro"){
-    /* Read-only: žádné ovládání, jen hodnota. */
-    ctl.appendChild(el("span", "val", "Hodnota: " + fmtVal(t, cur)));
+    /* Read-only: no controls, just the value. */
+    ctl.appendChild(el("span", "val", "Value: " + fmtVal(t, cur)));
   } else if (ty.k === "bool"){
     var on = bool(cur) === true;
-    var b = el("button", on ? "btn-p" : "", on ? "Zapnuto" : "Vypnuto");
+    var b = el("button", on ? "btn-p" : "", on ? "On" : "Off");
     b.disabled = !!PEND;
-    b.onclick = function(){ setTweak(t, on ? "0" : "1", (on ? "Vypínám " : "Zapínám ") + t.name); };
+    b.onclick = function(){ setTweak(t, on ? "0" : "1", (on ? "Turning off " : "Turning on ") + t.name); };
     ctl.appendChild(b);
   } else if (ty.k === "int"){
     var inp = el("input"); inp.type = "number";
     inp.min = ty.min; inp.max = ty.max;
-    /* Hodnota může být seznam (např. read_ahead_kb má 4 disky) — pak needituj číslem. */
+    /* The value may be a list (e.g. read_ahead_kb has 4 disks) — then do not edit it as a number. */
     inp.value = /^-?\d+$/.test(String(cur)) ? String(cur) : "";
     inp.placeholder = ty.min + "–" + ty.max;
     inp.disabled = !!PEND;
-    var ap = el("button", "btn-p btn-sm", "Použít");
+    var ap = el("button", "btn-p btn-sm", "Apply");
     ap.disabled = !!PEND;
     ap.onclick = function(){
       var v = parseInt(inp.value, 10);
-      if (!isFinite(v) || v < ty.min || v > ty.max){ toast("Zadej celé číslo " + ty.min + "–" + ty.max); return; }
+      if (!isFinite(v) || v < ty.min || v > ty.max){ toast("Enter a whole number " + ty.min + "-" + ty.max); return; }
       setTweak(t, String(v), t.name + " → " + v);
     };
     ctl.appendChild(inp); ctl.appendChild(ap);
@@ -1658,38 +1666,38 @@ function tweakRow(t){
       sel.appendChild(op);
     });
     if (!seen){
-      var un = el("option", null, "(" + (String(cur) || "neznámá") + ")");
+      var un = el("option", null, "(" + (String(cur) || "unknown") + ")");
       un.value = ""; un.selected = true; un.disabled = true;
       sel.insertBefore(un, sel.firstChild);
     }
     sel.disabled = !!PEND;
     sel.onchange = function(){
       var v = sel.value;
-      if (!safeVal(v)){ toast("Neplatná hodnota"); return; }
+      if (!safeVal(v)){ toast("Invalid value"); return; }
       setTweak(t, v, t.name + " → " + v);
     };
     ctl.appendChild(sel);
   } else if (ty.k === "enumf"){
-    /* Nabídku zná jen zařízení (čte se z `ty.src`), v JSON nepřijde. */
+    /* Only the device knows the options (they are read from `ty.src`), they do not come in the JSON. */
     var ti = el("input"); ti.type = "text";
     ti.value = String(cur || "");
     ti.autocapitalize = "off"; ti.spellcheck = false;
     ti.disabled = !!PEND;
-    var ab = el("button", "btn-p btn-sm", "Použít");
+    var ab = el("button", "btn-p btn-sm", "Apply");
     ab.disabled = !!PEND;
     ab.onclick = function(){
       var v = String(ti.value).trim();
-      if (!safeVal(v)){ toast("Neplatná hodnota"); return; }
+      if (!safeVal(v)){ toast("Invalid value"); return; }
       setTweak(t, v, t.name + " → " + v);
     };
     ctl.appendChild(ti); ctl.appendChild(ab);
   } else {
-    ctl.appendChild(el("span", "val", "Neznámý typ „" + t.type + "“ — ovládání není k dispozici."));
+    ctl.appendChild(el("span", "val", "Unknown type '" + t.type + "' — no control is available."));
   }
 
   if (t.set && ty.k !== "ro"){
     var rb = el("button", "btn-sm", "↺ Stock");
-    rb.title = "Vrátit na " + fmtVal(t, t.stock);
+    rb.title = "Restore to " + fmtVal(t, t.stock);
     rb.disabled = !!PEND;
     rb.onclick = function(){ resetTweak(t); };
     ctl.appendChild(rb);
@@ -1698,13 +1706,13 @@ function tweakRow(t){
   row.appendChild(ctl);
 
   if (ty.k === "enumf"){
-    var hint = el("div", "val", "Povolené hodnoty přečteš na zařízení z " + ty.src + ".");
+    var hint = el("div", "val", "You can read the allowed values on the device from " + ty.src + ".");
     hint.style.marginTop = "5px";
     row.appendChild(hint);
   }
 
   var info = el("div", "val");
-  info.textContent = "teď: " + fmtVal(t, cur) +
+  info.textContent = "now: " + fmtVal(t, cur) +
     (t.stock !== "" ? "   ·   stock: " + fmtVal(t, t.stock) : "") +
     "   ·   " + t.id;
   info.style.marginTop = "6px";
@@ -1714,7 +1722,7 @@ function tweakRow(t){
 }
 
 function setTweak(t, value, label){
-  if (!safeId(t.id) || !safeVal(value)){ toast("Neplatný vstup"); return; }
+  if (!safeId(t.id) || !safeVal(value)){ toast("Invalid input"); return; }
   LAST_ACTION = function(){ setTweak(t, value, label); };
   startAction({
     kind:"tweak", target:t.id,
@@ -1736,7 +1744,7 @@ function setTweak(t, value, label){
 }
 
 function resetTweak(t){
-  if (!safeId(t.id)){ toast("Neplatné id"); return; }
+  if (!safeId(t.id)){ toast("Invalid id"); return; }
   LAST_ACTION = function(){ resetTweak(t); };
   startAction({
     kind:"tweak", target:t.id,
@@ -1747,22 +1755,22 @@ function resetTweak(t){
       return loadTweaks(true).then(function(list){
         renderTweaks();
         var n = (list || []).filter(function(x){ return x.id === t.id; })[0];
-        return !!n && n.set === false;   /* už není výslovně nastavený */
+        return !!n && n.set === false;   /* no longer explicitly set */
       });
     }
   });
 }
 
 function resetAllTweaks(){
-  confirmDialog("Vrátit všechny tweaky na stock?",
-    "Všechny jednotlivé tweaky se vrátí na stock hodnoty. Profily, rozlišení ani per-app pravidla se nemění.",
-    "Ano, resetovat", true).then(function(yes){
+  confirmDialog("Restore all tweaks to stock?",
+    "All the individual tweaks return to their stock values. Profiles, the resolution and per-app rules are unchanged.",
+    "Yes, reset them", true).then(function(yes){
       if (!yes) return;
       LAST_ACTION = resetAllTweaks;
       startAction({
       kind:"tweak", target:null,
         args: "tweak reset-all",
-        label: "Reset všech tweaků",
+        label: "Reset of all tweaks",
         timeout: 30000,
         poll: function(){
           return loadTweaks(true).then(function(list){
@@ -1775,18 +1783,18 @@ function resetAllTweaks(){
 }
 
 /* ==========================================================================
-   11) PER-APP PRAVIDLA
+   11) PER-APP RULES
    --------------------------------------------------------------------------
-   Data z `pxtune app json` — samostatný příkaz, jen při otevření záložky.
+   The data comes from `pxtune app json` — a separate command, only when the tab is opened.
    ========================================================================== */
-/* Skutečný tvar z bin/pxtune-perapp (cmd_json):
+/* The real shape from bin/pxtune-perapp (cmd_json):
    { version, gates:{res_enabled,refresh_verified},
      active:{pkg,since,age_sec,saved:{…}}|null,
      rules:[{pkg,desc,enabled,profile,
              game:{mode,fps,downscale,apply},
              refresh:{min,peak}, res:{preset,enabled},
              min_fg_sec,sticky_sec,thermal_cap,priority,overlay:{},active}] }
-   Ploché klíče APP_ a GAME_ existují jen na VSTUPU (`app set KLIC=HODNOTA`). */
+   The flat APP_ and GAME_ keys exist only on INPUT (`app set KEY=VALUE`). */
 function loadApps(force){
   if (S.appsLoaded && !force) return Promise.resolve(S.apps);
   return bridge(BIN + " app json", 25000).then(function(r){
@@ -1809,7 +1817,7 @@ function loadApps(force){
           enabled: bool(pick(x, "enabled")) !== false,
           active: bool(pick(x, "active")) === true,
           priority: num(pick(x, "priority")),
-          /* ploché klíče pro editor = přesně to, co bere `app set` */
+          /* the flat keys for the editor = exactly what `app set` takes */
           APP_PROFILE:      s(pick(x, "profile")),
           GAME_MODE:        s(pick(g, "mode")),
           GAME_FPS:         s(pick(g, "fps")),
@@ -1837,44 +1845,44 @@ function renderApps(){
   if (S.appsErr){
     var c = el("div", "card");
     var d = el("div", "banner err");
-    d.appendChild(el("div", "ttl", "Per-app pravidla se nepodařilo načíst"));
-    d.appendChild(el("div", null, "Příkaz `pxtune app json` selhal nebo nevrátil platný JSON."));
+    d.appendChild(el("div", "ttl", "The per-app rules could not be loaded"));
+    d.appendChild(el("div", null, "The command `pxtune app json` failed or did not return valid JSON."));
     d.appendChild(el("pre", null, S.appsErr));
     var row = el("div", "btn-row"); row.style.marginTop = "10px";
-    var rb = el("button", "btn-sm btn-p", "Zkusit znovu");
+    var rb = el("button", "btn-sm btn-p", "Try again");
     rb.onclick = function(){ S.appsLoaded = false; loadApps(true).then(renderApps, renderApps); };
     row.appendChild(rb); d.appendChild(row);
     c.appendChild(d); host.appendChild(c);
     st.textContent = "";
     return;
   }
-  if (!S.apps){ host.appendChild(el("div","card")).appendChild(el("div","sub","Načítám…")); return; }
+  if (!S.apps){ host.appendChild(el("div","card")).appendChild(el("div","sub","Loading…")); return; }
 
   clear(st);
-  st.appendChild(document.createTextNode("Přepínání rozlišení: "));
-  st.appendChild(badge(S.apps.resEnabled ? "warn" : "ok", S.apps.resEnabled ? "POVOLENO" : "vypnuto (výchozí)"));
+  st.appendChild(document.createTextNode("Resolution switching: "));
+  st.appendChild(badge(S.apps.resEnabled ? "warn" : "ok", S.apps.resEnabled ? "ALLOWED" : "off (default)"));
   st.appendChild(document.createTextNode(S.apps.resEnabled
-    ? " — klíč APP_RES se používá. Mění rozlišení celého systému."
-    : " — klíč APP_RES se ignoruje, dokud ho u pravidla nepovolíš."));
+    ? " — the APP_RES key is in use. It changes the resolution of the whole system."
+    : " — the APP_RES key is ignored until you allow it on a rule."));
   if (S.apps.activePkg){
-    st.appendChild(el("div", null, "V popředí právě: " + S.apps.activePkg +
+    st.appendChild(el("div", null, "Currently in the foreground: " + S.apps.activePkg +
       (S.apps.activeAge !== null ? " (" + Math.round(S.apps.activeAge) + " s)" : "")));
   }
 
-  /* Poctivé varování: refresh rate se na Androidu 16 zatím NEAPLIKUJE. */
+  /* An honest warning: the refresh rate is NOT APPLIED on Android 16 yet. */
   if (!S.apps.refreshVerified){
     var rw = el("div", "banner warn");
-    rw.appendChild(el("div", "ttl", "⚠ Obnovovací frekvence zatím nefunguje"));
+    rw.appendChild(el("div", "ttl", "⚠ The refresh rate does not work yet"));
     rw.appendChild(el("div", null,
-      "CLI hlásí refresh_verified = false: názvy systémových klíčů pro obnovovací " +
-      "frekvenci nejsou na Androidu 16 ověřené, takže se APP_REFRESH_MIN a " +
-      "APP_REFRESH_PEAK sice uloží, ale reálně se nic nepřepne. Neber je zatím vážně."));
+      "The CLI reports refresh_verified = false: the names of the system keys for the " +
+      "refresh rate are not verified on Android 16, so APP_REFRESH_MIN and " +
+      "APP_REFRESH_PEAK are saved but nothing actually switches. Do not rely on them yet."));
     host.appendChild(rw);
   }
 
   if (!S.apps.rules.length){
     var e0 = el("div", "card");
-    e0.appendChild(el("div", "sub", "Zatím žádná pravidla. Přidej první tlačítkem „+ Přidat pravidlo“."));
+    e0.appendChild(el("div", "sub", "No rules yet. Add the first one with the '+ Add a rule' button."));
     host.appendChild(e0);
     return;
   }
@@ -1886,35 +1894,35 @@ function renderApps(){
     r.appendChild(hd);
     if (rule.desc) r.appendChild(el("div", "sub", rule.pkg));
     var stat = el("div", "tags");
-    if (rule.active)   stat.appendChild(badge("fill", "právě v popředí"));
-    if (!rule.enabled) stat.appendChild(badge("mut", "pravidlo vypnuté"));
+    if (rule.active)   stat.appendChild(badge("fill", "currently in the foreground"));
+    if (!rule.enabled) stat.appendChild(badge("mut", "rule disabled"));
     if (stat.children.length) r.appendChild(stat);
 
     var tags = el("div", "tags");
     APP_KEYS.forEach(function(k){
       var v = rule[k.k];
       if (v === "" || v === undefined) return;
-      if (k.k === "APP_RES_ENABLE" && v === "0") return;      /* výchozí, neplevel */
-      var shown = (k.type === "bool") ? (bool(v) ? "ano" : "ne") : v;
+      if (k.k === "APP_RES_ENABLE" && v === "0") return;      /* the default, no clutter */
+      var shown = (k.type === "bool") ? (bool(v) ? "yes" : "no") : v;
       var txt = k.nm + ": " + shown + (k.unit || "");
       var dead = (k.k === "APP_REFRESH_MIN" || k.k === "APP_REFRESH_PEAK") && !S.apps.refreshVerified;
       var b = badge(dead ? "mut" : (k.scope === "app" ? "ok" : "warn"),
-        txt + (dead ? " (neaplikuje se)" : ""),
-        k.scope === "app" ? "Per-app — platí jen pro tuhle aplikaci"
-                          : "GLOBÁLNÍ — přepne se při vstupu a vrátí při odchodu");
+        txt + (dead ? " (not applied)" : ""),
+        k.scope === "app" ? "Per-app — applies to this app only"
+                          : "GLOBAL — switched on entry and restored on exit");
       tags.appendChild(b);
     });
-    if (!tags.children.length) tags.appendChild(el("span", "sub", "Nic nenastaveno."));
+    if (!tags.children.length) tags.appendChild(el("span", "sub", "Nothing is set."));
     r.appendChild(tags);
     c.appendChild(r);
 
     var row = el("div", "btn-row");
-    var eb = el("button", "btn-sm btn-p", "Upravit"); eb.disabled = !!PEND;
+    var eb = el("button", "btn-sm btn-p", "Edit"); eb.disabled = !!PEND;
     eb.onclick = function(){ editRule(rule); };
-    var db = el("button", "btn-sm btn-d", "Smazat"); db.disabled = !!PEND;
+    var db = el("button", "btn-sm btn-d", "Delete"); db.disabled = !!PEND;
     db.onclick = function(){
-      confirmDialog("Smazat pravidlo?", rule.pkg + " — celé pravidlo se smaže.", "Smazat", true)
-        .then(function(y){ if (y) appAction("app rm " + rule.pkg, "Mazání " + rule.pkg, rule.pkg, true); });
+      confirmDialog("Delete the rule?", rule.pkg + " — the whole rule will be deleted.", "Delete", true)
+        .then(function(y){ if (y) appAction("app rm " + rule.pkg, "Deleting " + rule.pkg, rule.pkg, true); });
     };
     row.appendChild(eb); row.appendChild(db);
     c.appendChild(row);
@@ -1922,8 +1930,8 @@ function renderApps(){
   });
 }
 
-/* Editor pravidla. Ukládá jen změněné klíče, a to jedním řetězeným příkazem —
-   jedno volání mostu místo osmi. */
+/* The rule editor. It saves only the changed keys, and does so with a single
+   chained command — one bridge call instead of eight. */
 function editRule(rule){
   var isNew = !rule;
   var cur = rule || { pkg:"", label:"" };
@@ -1933,41 +1941,41 @@ function editRule(rule){
   var wrap = el("div");
   if (isNew){
     var lp = el("label", "fld");
-    lp.appendChild(el("span", "lbl", "Název balíčku"));
-    var ip = el("input"); ip.type = "text"; ip.placeholder = "com.vyrobce.hra";
+    lp.appendChild(el("span", "lbl", "Package name"));
+    var ip = el("input"); ip.type = "text"; ip.placeholder = "com.vendor.game";
     ip.autocapitalize = "off"; ip.spellcheck = false;
     lp.appendChild(ip);
-    lp.appendChild(el("span", "hint", "Přesné jméno balíčku, např. com.mojang.minecraftpe."));
+    lp.appendChild(el("span", "hint", "The exact package name, e.g. com.mojang.minecraftpe."));
     wrap.appendChild(lp);
     fields.__pkg = ip;
   } else {
     wrap.appendChild(el("div", "sub", cur.pkg));
   }
 
-  /* Rychlé presety — předvyplní viditelná pole (stejné hodnoty jako CLI
-     `pxtune app preset`). Ostatní klíče (priorita, sticky, thermal cap)
-     dosadí CLI výchozími hodnotami při uložení. */
+  /* Quick presets — they prefill the visible fields (the same values as the CLI
+     `pxtune app preset`). The remaining keys (priority, sticky, thermal cap) are
+     filled in with defaults by the CLI on save. */
   var APP_PRESETS = [
-    { id:"game",     lb:"🎮 Hra",        set:{ GAME_MODE:"performance", GAME_FPS:"60", GAME_DOWNSCALE:"0.7",     APP_PROFILE:"game" } },
-    { id:"game-max", lb:"🎮 Hra naplno", set:{ GAME_MODE:"performance", GAME_FPS:"0",  GAME_DOWNSCALE:"disable", APP_PROFILE:"performance" } },
-    { id:"video",    lb:"🎬 Video",      set:{ GAME_MODE:"",           GAME_FPS:"",   GAME_DOWNSCALE:"",        APP_PROFILE:"balanced" } },
-    { id:"social",   lb:"📱 Social",     set:{ GAME_MODE:"",           GAME_FPS:"",   GAME_DOWNSCALE:"",        APP_PROFILE:"balanced" } },
-    { id:"saver",    lb:"🔋 Šetřič",     set:{ GAME_MODE:"",           GAME_FPS:"",   GAME_DOWNSCALE:"",        APP_PROFILE:"powersave" } }
+    { id:"game",     lb:"🎮 Game",      set:{ GAME_MODE:"performance", GAME_FPS:"60", GAME_DOWNSCALE:"0.7",     APP_PROFILE:"game" } },
+    { id:"game-max", lb:"🎮 Game max",  set:{ GAME_MODE:"performance", GAME_FPS:"0",  GAME_DOWNSCALE:"disable", APP_PROFILE:"performance" } },
+    { id:"video",    lb:"🎬 Video",     set:{ GAME_MODE:"",           GAME_FPS:"",   GAME_DOWNSCALE:"",        APP_PROFILE:"balanced" } },
+    { id:"social",   lb:"📱 Social",    set:{ GAME_MODE:"",           GAME_FPS:"",   GAME_DOWNSCALE:"",        APP_PROFILE:"balanced" } },
+    { id:"saver",    lb:"🔋 Saver",     set:{ GAME_MODE:"",           GAME_FPS:"",   GAME_DOWNSCALE:"",        APP_PROFILE:"powersave" } }
   ];
   var prow = el("label", "fld");
-  prow.appendChild(el("span", "lbl", "Rychlý preset"));
+  prow.appendChild(el("span", "lbl", "Quick preset"));
   var pbtns = el("div", "btn-row");
   APP_PRESETS.forEach(function(p){
     var b = el("button", "btn-sm", p.lb); b.type = "button";
     b.onclick = function(){
       Object.keys(p.set).forEach(function(kk){ if (fields[kk]) fields[kk].value = p.set[kk]; });
-      toast("Preset „" + p.lb + "“ předvyplněn — zkontroluj a ulož");
+      toast("The '" + p.lb + "' preset was prefilled — check it and save");
     };
     pbtns.appendChild(b);
   });
   prow.appendChild(pbtns);
   prow.appendChild(el("span", "hint",
-    "Vyplní herní režim/FPS/downscale a profil. Ostatní hodnoty dosadí modul sám. Pak ulož tlačítkem dole."));
+    "Fills in the game mode/FPS/downscale and the profile. The module fills the rest in itself. Then save with the button below."));
   wrap.appendChild(prow);
 
   var profIds = (function(){
@@ -1985,7 +1993,7 @@ function editRule(rule){
     var lb = el("label", "fld");
     var t = el("span", "lbl");
     t.appendChild(document.createTextNode(k.nm));
-    var sc = el("span", "scope " + (k.scope === "app" ? "app" : "glob"), k.scope === "app" ? "PER-APP" : "GLOBÁLNÍ");
+    var sc = el("span", "scope " + (k.scope === "app" ? "app" : "glob"), k.scope === "app" ? "PER-APP" : "GLOBAL");
     t.appendChild(sc);
     lb.appendChild(t);
 
@@ -1993,7 +2001,7 @@ function editRule(rule){
     var inp;
     if (k.type === "bool"){
       inp = el("select");
-      [["","— nesahat —"],["0","ne"],["1","ano"]].forEach(function(o){
+      [["","— leave alone —"],["0","no"],["1","yes"]].forEach(function(o){
         var op = el("option", null, o[1]); op.value = o[0];
         if (val === o[0] || (o[0] === "1" && bool(val) === true) || (o[0] === "0" && bool(val) === false && val !== "")) op.selected = true;
         inp.appendChild(op);
@@ -2002,7 +2010,7 @@ function editRule(rule){
       inp = el("select");
       var opts = [""].concat(k.type === "profile" ? profIds : resIds);
       opts.forEach(function(o){
-        var op = el("option", null, o === "" ? "— nesahat —" : (k.type === "res" && RES_LABEL[o] ? RES_LABEL[o] : o));
+        var op = el("option", null, o === "" ? "— leave alone —" : (k.type === "res" && RES_LABEL[o] ? RES_LABEL[o] : o));
         op.value = o;
         if (val === o) op.selected = true;
         inp.appendChild(op);
@@ -2024,22 +2032,22 @@ function editRule(rule){
   });
 
   var warn = el("div", "banner warn");
-  warn.appendChild(el("div", "ttl", "⚠ Rozlišení je globální a rizikové"));
+  warn.appendChild(el("div", "ttl", "⚠ The resolution is global and risky"));
   warn.appendChild(el("div", null,
-    "APP_RES změní rozlišení CELÉHO systému, ne jen té aplikace, a je proto defaultně " +
-    "vypnuté přepínačem „Povolit přepínání rozlišení“. Než ho zapneš, vyzkoušej si cílový " +
-    "preset ručně v Přehledu — tam máš 60s pojistku. Automatické přepnutí při vstupu do " +
-    "aplikace pojistku mít nemusí."));
+    "APP_RES changes the resolution of the WHOLE system, not just that app, which is why it " +
+    "is off by default behind the 'Allow resolution switching' toggle. Before you turn it on, " +
+    "try the target preset by hand in the Overview — there you have the 60 s safeguard. An " +
+    "automatic switch on app entry may not have one."));
   wrap.appendChild(warn);
   m.appendChild(wrap);
 
-  dialogForm(isNew ? "Nové pravidlo" : "Upravit pravidlo", m, isNew ? "Vytvořit" : "Uložit").then(function(ok){
+  dialogForm(isNew ? "New rule" : "Edit the rule", m, isNew ? "Create" : "Save").then(function(ok){
     if (!ok) return;
     var pkg = isNew ? String(fields.__pkg.value || "").trim() : cur.pkg;
-    if (!safePkg(pkg)){ toast("Neplatné jméno balíčku"); return; }
+    if (!safePkg(pkg)){ toast("Invalid package name"); return; }
 
-    /* CLI bere `pxtune app set <pkg> KLIC=HODNOTA [KLIC=HODNOTA...]`,
-       takže všechny změny jdou JEDNÍM příkazem = jedno volání mostu. */
+    /* The CLI takes `pxtune app set <pkg> KEY=VALUE [KEY=VALUE...]`, so all the
+       changes go in ONE command = one bridge call. */
     var pairs = [];
     APP_KEYS.forEach(function(k){
       var v = String(fields[k.k].value);
@@ -2049,28 +2057,28 @@ function editRule(rule){
       pairs.push(k.k + "=" + (v === "" ? shq("") : v));
     });
     if (!pairs.length){
-      if (!isNew){ toast("Nic se nezměnilo"); return; }
-      pairs.push("APP_PKG=" + pkg);   /* založí pravidlo s výchozími hodnotami */
+      if (!isNew){ toast("Nothing changed"); return; }
+      pairs.push("APP_PKG=" + pkg);   /* creates the rule with default values */
     }
 
     LAST_ACTION = function(){ editRule(rule); };
     startAction({
       args: "app set " + pkg + " " + pairs.join(" "),
       kind: "app", target: pkg,
-      label: (isNew ? "Vytvářím " : "Ukládám ") + pkg,
+      label: (isNew ? "Creating " : "Saving ") + pkg,
       timeout: 20000,
       poll: function(){
         return loadApps(true).then(function(a){
           renderApps();
           var found = (a && a.rules || []).filter(function(x){ return x.pkg === pkg; })[0];
           if (!found) return false;
-          /* Kontroluj JEN klíče, které jsme opravdu měnili — na zbytek CLI
-             dosadí výchozí hodnoty a rovnost by nikdy nenastala. */
+          /* Check ONLY the keys we really changed — the CLI fills the rest in with
+             defaults and equality would never hold. */
           return APP_KEYS.every(function(k){
             var want = String(fields[k.k].value);
             var old = cur[k.k] === undefined ? "" : String(cur[k.k]);
-            if (want === old) return true;          /* neměněno */
-            if (want === "") return true;           /* smazání -> CLI dosadí default */
+            if (want === old) return true;          /* unchanged */
+            if (want === "") return true;           /* cleared -> the CLI fills in the default */
             return String(found[k.k] || "") === want;
           });
         });
@@ -2096,7 +2104,7 @@ function appAction(args, label, pkg, expectGone){
 }
 
 /* ==========================================================================
-   12) PANEL DÉMONA
+   12) THE DAEMON PANEL
    ========================================================================== */
 function renderDaemon(){
   var d = S.data || {};
@@ -2114,37 +2122,37 @@ function renderDaemon(){
   var host = clear($("daemonBox"));
 
   var r1 = el("div", "kv");
-  r1.appendChild(el("span", "k", "Stav"));
+  r1.appendChild(el("span", "k", "State"));
   var v1 = el("span", "v");
-  if (running === true)       v1.appendChild(badge("ok", "běží" + (pid !== null ? " · pid " + Math.round(pid) : "")));
-  else if (running === false) v1.appendChild(badge("crit", "neběží"));
-  else                        v1.appendChild(badge("mut", "neznámý"));
+  if (running === true)       v1.appendChild(badge("ok", "running" + (pid !== null ? " · pid " + Math.round(pid) : "")));
+  else if (running === false) v1.appendChild(badge("crit", "not running"));
+  else                        v1.appendChild(badge("mut", "unknown"));
   r1.appendChild(v1); host.appendChild(r1);
 
   var r2 = el("div", "kv");
-  r2.appendChild(el("span", "k", "Přepínání profilů"));
+  r2.appendChild(el("span", "k", "Profile switching"));
   var v2 = el("span", "v");
   v2.appendChild(badge(enabled === true ? "ok" : enabled === false ? "crit" : "mut",
-    enabled === true ? "povoleno" : enabled === false ? "zakázáno" : "?"));
+    enabled === true ? "allowed" : enabled === false ? "forbidden" : "?"));
   r2.appendChild(v2); host.appendChild(r2);
 
-  host.appendChild(kv("Aktivní profil", autoProf ? String(autoProf) : "—"));
+  host.appendChild(kv("Active profile", autoProf ? String(autoProf) : "—"));
 
   var lvl = num(level);
   var r4 = el("div", "kv");
-  r4.appendChild(el("span", "k", "Teplotní úroveň"));
+  r4.appendChild(el("span", "k", "Thermal level"));
   var v4 = el("span", "v");
   if (level === undefined || level === null || level === "") v4.appendChild(document.createTextNode("—"));
   else if (lvl !== null) v4.appendChild(badge(lvl <= 0 ? "ok" : lvl === 1 ? "warn" : lvl === 2 ? "hot" : "crit",
-    ["chladno","teplo","horko","kritické"][Math.max(0, Math.min(3, Math.round(lvl)))] + " (" + Math.round(lvl) + ")"));
+    ["cool","warm","hot","critical"][Math.max(0, Math.min(3, Math.round(lvl)))] + " (" + Math.round(lvl) + ")"));
   else v4.appendChild(document.createTextNode(String(level)));
   r4.appendChild(v4); host.appendChild(r4);
 
-  host.appendChild(kv("Poslední rozhodnutí", lastDec ? String(lastDec) : "—"));
-  if (lastAt) host.appendChild(kv("Kdy", String(lastAt)));
+  host.appendChild(kv("Last decision", lastDec ? String(lastDec) : "—"));
+  if (lastAt) host.appendChild(kv("When", String(lastAt)));
 
   var bt = $("btnDaemonToggle");
-  bt.textContent = enabled === true ? "⏹ Vypnout démona" : "▶ Zapnout démona";
+  bt.textContent = enabled === true ? "⏹ Stop the daemon" : "▶ Start the daemon";
   bt.className = enabled === true ? "btn-d" : "btn-p";
   bt.style.flex = "1";
   bt.disabled = !!PEND || enabled === null;
@@ -2153,11 +2161,11 @@ function renderDaemon(){
 
 function loadDaemonRaw(){
   return bridge(BIN + " auto status", 15000).then(function(r){
-    S.daemonRaw = ((r.stdout || "") + (r.stderr ? "\n" + r.stderr : "")).trim() || "(bez výstupu)";
+    S.daemonRaw = ((r.stdout || "") + (r.stderr ? "\n" + r.stderr : "")).trim() || "(no output)";
     S.daemonLoaded = true;
     $("daemonRaw").textContent = S.daemonRaw;
   }).catch(function(e){
-    $("daemonRaw").textContent = "Nepodařilo se spustit `pxtune auto status`:\n" + (e && e.message ? e.message : e);
+    $("daemonRaw").textContent = "Could not run `pxtune auto status`:\n" + (e && e.message ? e.message : e);
   });
 }
 
@@ -2167,7 +2175,7 @@ function toggleDaemon(){
   startAction({
       kind:"daemon", target:next,
     args: "auto " + next,
-    label: "Démon " + (next === "on" ? "zapnout" : "vypnout"),
+    label: "Daemon " + (next === "on" ? "start" : "stop"),
     poll: function(){
       return refresh().then(function(dd){
         if (!dd) return false;
@@ -2180,7 +2188,7 @@ function toggleDaemon(){
 }
 
 /* ==========================================================================
-   13) DIALOGY
+   13) DIALOGS
    ========================================================================== */
 function confirmDialog(title, text, okLabel, danger){
   return new Promise(function(resolve){
@@ -2188,7 +2196,7 @@ function confirmDialog(title, text, okLabel, danger){
     m.appendChild(el("h3", null, title));
     m.appendChild(el("p", null, text));
     var row = el("div", "btn-row"); row.style.justifyContent = "flex-end";
-    var no = el("button", null, "Zrušit"), yes = el("button", danger ? "btn-d" : "btn-p", okLabel);
+    var no = el("button", null, "Cancel"), yes = el("button", danger ? "btn-d" : "btn-p", okLabel);
     row.appendChild(no); row.appendChild(yes);
     m.appendChild(row); mask.appendChild(m);
     $("modalHost").appendChild(mask);
@@ -2205,7 +2213,7 @@ function dialogForm(title, bodyNode, okLabel){
     m.appendChild(el("h3", null, title));
     m.appendChild(bodyNode);
     var row = el("div", "btn-row"); row.style.justifyContent = "flex-end"; row.style.marginTop = "12px";
-    var no = el("button", null, "Zrušit"), yes = el("button", "btn-p", okLabel);
+    var no = el("button", null, "Cancel"), yes = el("button", "btn-p", okLabel);
     row.appendChild(no); row.appendChild(yes);
     m.appendChild(row); mask.appendChild(m);
     $("modalHost").appendChild(mask);
@@ -2223,7 +2231,7 @@ function dialog(title, text, mono){
   pre.style.cssText = "white-space:pre-wrap;word-break:break-word;font-size:12px;max-height:50vh;overflow:auto;color:var(--muted)";
   m.appendChild(pre);
   var row = el("div", "btn-row"); row.style.justifyContent = "flex-end";
-  var ok = el("button", "btn-p", "Zavřít"); row.appendChild(ok);
+  var ok = el("button", "btn-p", "Close"); row.appendChild(ok);
   m.appendChild(row); mask.appendChild(m);
   $("modalHost").appendChild(mask);
   ok.onclick = function(){ mask.remove(); };
@@ -2242,7 +2250,7 @@ function setTab(name){
   for (var i = 0; i < bs.length; i++)
     bs[i].setAttribute("aria-selected", String(bs[i].dataset.tab === name));
 
-  /* Data nových sekcí se načítají JEN při otevření záložky, ne v pollu. */
+  /* The data of the new sections is loaded ONLY when the tab is opened, never in the poll. */
   if (name === "tweaks" && !S.tweaksLoaded) loadTweaks().then(renderTweaks, renderTweaks);
   else if (name === "tweaks") renderTweaks();
   if (name === "apps" && !S.appsLoaded) loadApps().then(renderApps, renderApps);
@@ -2267,8 +2275,8 @@ function init(){
   if (DEMO){
     var dn = $("demoNote");
     dn.className = "banner warn";
-    dn.appendChild(el("div", "ttl", "DEMO režim"));
-    dn.appendChild(el("div", null, "Zobrazená data jsou smyšlená. Skutečný stav uvidíš po otevření ve správci KernelSU."));
+    dn.appendChild(el("div", "ttl", "DEMO mode"));
+    dn.appendChild(el("div", null, "The data shown is made up. You will see the real state after opening this in the KernelSU manager."));
   }
 
   $("btnRefresh").onclick = function(){ refresh(true).then(function(){ scheduleLoop(); }); };
@@ -2276,12 +2284,12 @@ function init(){
     intervalIdx = (intervalIdx + 1) % INTERVALS.length;
     applyIntervalLabel();
     scheduleLoop();
-    toast(INTERVALS[intervalIdx].ms ? "Obnovování každých " + INTERVALS[intervalIdx].lb : "Automatické obnovování vypnuto");
+    toast(INTERVALS[intervalIdx].ms ? "Refreshing every " + INTERVALS[intervalIdx].lb : "Automatic refresh is off");
   };
   $("pendCancel").onclick = function(){
     if (!PEND) return;
     var l = PEND.label; PEND = null; showPend(false);
-    toast("Přestal jsem čekat na: " + l);
+    toast("Stopped waiting for: " + l);
     renderAll(); scheduleLoop();
   };
 
@@ -2294,7 +2302,7 @@ function init(){
     startAction({
       kind:"profile", target:null,
       args: "profile auto",
-      label: "Řízení automatu",
+      label: "Hand control to the daemon",
       poll: function(){
         return refresh().then(function(dd){
           if (!dd) return false;
@@ -2305,9 +2313,9 @@ function init(){
     });
   };
 
-  $("btnResConfirm").onclick = function(){ resAction("confirm", "Potvrzení rozlišení"); };
-  $("btnResRevert").onclick  = function(){ resAction("reset", "Návrat na nativní"); };
-  $("btnResReset").onclick   = function(){ resAction("reset", "Návrat na nativní"); };
+  $("btnResConfirm").onclick = function(){ resAction("confirm", "Resolution confirmation"); };
+  $("btnResRevert").onclick  = function(){ resAction("reset", "Return to native"); };
+  $("btnResReset").onclick   = function(){ resAction("reset", "Return to native"); };
 
   var sl = $("chgSlider");
   sl.addEventListener("input", function(){
@@ -2319,16 +2327,16 @@ function init(){
   $("btnChgOff").onclick   = function(){ setCharge("off"); };
 
   $("btnRevert").onclick = function(){
-    confirmDialog("Vrátit vše na stock?",
-      "Všechna nastavení pixel_tune (uclamp, GPU, vm, I/O, nabíjení) se vrátí na hodnoty ze zálohy backup/stock.conf. Aktivní profil se zruší.",
-      "Ano, vrátit vše", true).then(function(yes){
+    confirmDialog("Restore everything to stock?",
+      "All pixel_tune settings (uclamp, GPU, vm, I/O, charging) return to the values from the backup in backup/stock.conf. The active profile is cleared.",
+      "Yes, restore everything", true).then(function(yes){
         if (!yes) return;
         LAST_ACTION = function(){ $("btnRevert").onclick(); };
         S.tweaksLoaded = false; S.appsLoaded = false;
         startAction({
           args: "revert",
           kind: "revert", target: null,
-          label: "Návrat na stock",
+          label: "Return to stock",
           timeout: 25000,
           poll: function(){
             return refresh().then(function(dd){
@@ -2368,7 +2376,7 @@ function demoExec(cmd){
     return delay({ errno:0, stdout:JSON.stringify({
       profile:{ active:DEMO_ST.profile, manual_override:true, available:["balanced","game","night","performance","powersave"] },
       auto:{ enabled:DEMO_ST.auto, running:true, pid:4821, thermal_level:1,
-             last_decision:"skin 41,2 °C -> profil game (aplikace v popředí)", last_decision_at:"12:04:31", profile:DEMO_ST.profile },
+             last_decision:"skin 41.2 °C -> the game profile (app in the foreground)", last_decision_at:"12:04:31", profile:DEMO_ST.profile },
       thermal:{ big:w(64,0), mid:w(60,1), little:w(55,2), g3d:w(58,3), skin:w(41,4), soc:w(47,5), display:w(38,6), charger:w(33,8), battery:w(33,7) },
       cpu:{ policy0:{ cur:1098000, max:1036000, hw_max:1704000, cdev_cur_state:4 },
             policy4:{ cur:910000,  max:910000,  hw_max:2367000, cdev_cur_state:10 },
@@ -2384,45 +2392,45 @@ function demoExec(cmd){
   if (/tweak json/.test(cmd)){
     if (!DEMO_ST.tweaks) DEMO_ST.tweaks = [
       { id:"io.read_ahead_kb", cat:"io", mech:"sysfs", target:"/sys/block/sd[a-d]/queue/read_ahead_kb",
-        type:"int:0:8192", risk:1, flags:["boot","reapply"], name:"Předčítání z disku (KB)",
-        desc:"Kolik dat jádro načte dopředu, když čte soubor popořadě. Vyšší hodnota zrychlí velká sekvenční čtení, u náhodných přístupů ale plýtvá pamětí a proudem.",
+        type:"int:0:8192", risk:1, flags:["boot","reapply"], name:"Disk read-ahead (KB)",
+        desc:"How much data the kernel reads ahead when reading a file sequentially. A higher value speeds up large sequential reads, but with random access it wastes memory and power.",
         set:false, value:"", stock:"128 1024 1024 1024", current:"128 1024 1024 1024" },
       { id:"io.scheduler", cat:"io", mech:"sysfs", target:"/sys/block/sd[a-d]/queue/scheduler",
-        type:"enumf:@self", risk:2, flags:[], name:"Plánovač I/O",
-        desc:"Který algoritmus řadí požadavky na disk. Nabídka se liší podle jádra.",
+        type:"enumf:@self", risk:2, flags:[], name:"I/O scheduler",
+        desc:"Which algorithm queues the requests to the disk. The options differ by kernel.",
         set:false, value:"", stock:"mq-deadline", current:"mq-deadline" },
       { id:"vm.swappiness", cat:"vm", mech:"proc", target:"/proc/sys/vm/swappiness",
-        type:"int:0:100", risk:1, flags:["boot"], name:"Ochota odkládat do zramu",
-        desc:"Vyšší hodnota znamená víc volné RAM, ale víc práce s kompresí.",
+        type:"int:0:100", risk:1, flags:["boot"], name:"Willingness to swap into zram",
+        desc:"A higher value means more free RAM, but more compression work.",
         set:true, value:"80", stock:"60", current:"80" },
       { id:"sched.child_runs_first", cat:"sched", mech:"proc", target:"/proc/sys/kernel/sched_child_runs_first",
-        type:"bool", risk:1, flags:[], name:"Potomek běží první",
-        desc:"Po fork() dostane procesor nejdřív nový proces. Může nepatrně zrychlit start aplikací.",
+        type:"bool", risk:1, flags:[], name:"Child runs first",
+        desc:"After a fork() the new process gets the CPU first. It may speed up app starts slightly.",
         set:false, value:"", stock:"0", current:"0" },
       { id:"zram.comp_algorithm", cat:"zram", mech:"ro", target:"/sys/block/zram0/comp_algorithm",
-        type:"ro", risk:0, flags:[], name:"Kompresní algoritmus zramu",
-        desc:"Tensor má hardwarový akcelerátor Emerald Hill (lz77eh) — komprese stojí skoro nula CPU a nula tepla. Přepnutí na zstd nebo lz4 by běželo na CPU a topilo, proto to pixel_tune ZÁMĚRNĚ nenastavuje.",
+        type:"ro", risk:0, flags:[], name:"zram compression algorithm",
+        desc:"Tensor has the Emerald Hill hardware accelerator (lz77eh) — compression costs almost zero CPU and zero heat. Switching to zstd or lz4 would run on the CPU and generate heat, which is why pixel_tune DELIBERATELY does not set it.",
         set:false, value:"", stock:"lz77eh", current:"lz77eh" },
       { id:"power.adaptive_battery_management_enabled", cat:"power", mech:"settings",
         target:"global adaptive_battery_management_enabled",
-        type:"bool", risk:1, flags:["adv"], name:"Adaptivní správa baterie",
-        desc:"Systém se učí, které aplikace omezovat na pozadí. Vypnutí zlepší doručování notifikací, zhorší výdrž.",
+        type:"bool", risk:1, flags:["adv"], name:"Adaptive Battery",
+        desc:"The system learns which apps to restrict in the background. Turning it off improves notification delivery and worsens battery life.",
         set:false, value:"", stock:"1", current:"1" },
       { id:"disp.min_refresh_rate", cat:"disp", mech:"settings", target:"secure min_refresh_rate",
-        type:"enum:0,60,90,120", risk:2, flags:["adv","unverified"], name:"Minimální obnovovací frekvence",
-        desc:"Spodní hranice adaptivního rozsahu displeje. Na Androidu 16 není název klíče ověřený.",
+        type:"enum:0,60,90,120", risk:2, flags:["adv","unverified"], name:"Minimum refresh rate",
+        desc:"The lower bound of the display's adaptive range. The key name is not verified on Android 16.",
         set:false, value:"", stock:"0", current:null },
       { id:"exp.thp_enabled", cat:"exp", mech:"sysfs", target:"/sys/kernel/mm/transparent_hugepage/enabled",
-        type:"enumf:@self", risk:3, flags:["unverified","adv"], name:"Transparentní velké stránky",
-        desc:"Neověřený zásah do správy paměti. Může zlepšit propustnost, ale i způsobit záseky při alokaci.",
+        type:"enumf:@self", risk:3, flags:["unverified","adv"], name:"Transparent huge pages",
+        desc:"An unverified change to memory management. It may improve throughput, but also cause stalls during allocation.",
         set:false, value:"", stock:"never", current:"never" }
     ];
     return delay({ errno:0, stdout:JSON.stringify({
       version:"1.0", live:true, tweaks:DEMO_ST.tweaks,
-      categories:[{id:"io",name:"Disk a I/O",n:2},{id:"vm",name:"Paměť a cache",n:1},
-                  {id:"sched",name:"Plánovač CPU",n:1},{id:"zram",name:"zram",n:1},
-                  {id:"power",name:"Správa napájení",n:1},{id:"disp",name:"Displej",n:1},
-                  {id:"exp",name:"Experimentální",n:1}],
+      categories:[{id:"io",name:"Disk and I/O",n:2},{id:"vm",name:"Memory and cache",n:1},
+                  {id:"sched",name:"CPU scheduler",n:1},{id:"zram",name:"zram",n:1},
+                  {id:"power",name:"Power management",n:1},{id:"disp",name:"Display",n:1},
+                  {id:"exp",name:"Experimental",n:1}],
       count:{active:1,errors:0,ts:0}
     }), stderr:"" }, 400);
   }
@@ -2449,8 +2457,9 @@ function demoExec(cmd){
   if (/auto status/.test(cmd))
     return delay({ errno:0, stdout:"auto: " + (DEMO_ST.auto ? "on" : "off") + "\npid: 4821\nthermal_level: 1\nlast: skin 41,2 °C -> game\n", stderr:"" }, 200);
 
-  /* fire-and-forget v demu: promítni do DEMO_ST (se zpožděním, jako na zařízení).
-     Každý match se kopíruje do vlastní proměnné — jinak by ho přepsal další. */
+  /* fire-and-forget in the demo: project it into DEMO_ST (with a delay, as on the
+     device). Every match is copied into its own variable — otherwise the next one
+     would overwrite it. */
   var mp = cmd.match(/pxtune profile ([A-Za-z0-9_.-]+)/);
   if (mp && mp[1] !== "auto"){ var vp = mp[1]; setTimeout(function(){ DEMO_ST.profile = vp; }, 1200); }
 
@@ -2521,21 +2530,21 @@ function demoExec(cmd){
 }
 function delay(v, ms){ return new Promise(function(r){ setTimeout(function(){ r(v); }, ms); }); }
 
-/* Poslední pojistka: JS chyba nesmí nechat bílou stránku. */
+/* The last safeguard: a JS error must not leave a blank page. */
 window.addEventListener("error", function(e){
   try {
     setStatus("err", "chyba UI");
-    banner("err", "Chyba v uživatelském rozhraní",
-      "Něco se nepovedlo vykreslit. Zbytek stránky by měl fungovat dál.",
+    banner("err", "User interface error",
+      "Something failed to render. The rest of the page should keep working.",
       (e.message || String(e)) + "\n" + (e.filename || "") + ":" + (e.lineno || ""),
-      [{ lb:"Znovu načíst", cls:"btn-p", fn:function(){ location.reload(); } }]);
+      [{ lb:"Reload", cls:"btn-p", fn:function(){ location.reload(); } }]);
   } catch(x){}
 });
 window.addEventListener("unhandledrejection", function(e){
   try {
     var r = e.reason;
     setStatus("err", "chyba");
-    if (!PEND) banner("err", "Neošetřená chyba", "Poslední operace skončila chybou.",
+    if (!PEND) banner("err", "Unhandled error", "The last operation ended with an error.",
       (r && r.message) ? r.message : String(r),
       [{ lb:"Zkusit znovu", cls:"btn-p", fn:function(){ refresh(true); } }]);
   } catch(x){}
