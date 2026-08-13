@@ -1,309 +1,343 @@
 # pixel_tune (Pixel Tune) v1.0
 
-Kernel manager pro **Google Pixel 8a („akita", Tensor G3 „zuma")** s KernelSU-Next.
+A kernel manager for the **Google Pixel 8a ("akita", Tensor G3 "zuma")** with
+KernelSU-Next.
 
-Podklad: kernel `6.1.145-android14-11`, Android 16, 8 GB RAM, `ksud 3.3.0`,
+> ### ⚠ THIS IS A CUSTOM MODULE FOR ONE PHONE
+>
+> pixel_tune was written **specifically for the Google Pixel 8a (akita /
+> Tensor G3)** and every number in it comes from measurements on that device.
+> **Other devices are not supported and are not compatible.** The sysfs paths,
+> the frequency tables, the thermal thresholds, the cooling-device indices, the
+> zram accelerator and the vendor scheduler nodes are all Tensor-G3-specific;
+> on another SoC they either do not exist or mean something different. Do not
+> install this on anything else.
+
+Basis: kernel `6.1.145-android14-11`, Android 16, 8 GB RAM, `ksud 3.3.0`,
 manager `com.rifsxd.ksunext`, SELinux **Enforcing**.
-CLI `pxtune` verze `1.1.0`.
+The `pxtune` CLI is version `1.1.0`.
 
 ---
 
-## 1. Co to je a co to dělá
+## 1. What it is and what it does
 
-`pixel_tune` je KernelSU modul, který dává **jedno místo pro sadu ladicích páček**,
-které Android na tomhle telefonu jinak nemá vystavené:
+`pixel_tune` is a KernelSU module that gives you **one place for a set of tuning
+levers** that Android does not otherwise expose on this phone:
 
-- **uclamp cgroups** (`/dev/cpuctl/*/cpu.uclamp.{min,max}`) — hlavní páka na výkon
-  a spotřebu CPU. Buď procesům dovolí naskočit na frekvenci rychleji (svižnost),
-  nebo jim dá strop na utilizaci (chlazení).
-- **GPU Mali** — `scaling_max_freq`, `scaling_min_freq`, `power_policy`.
-- **thermal HAL profil** — `vendor.thermal.<SENZOR>.profile`.
-- **vm ladění** — `swappiness`, `dirty_ratio`, `dirty_background_ratio`,
+- **uclamp cgroups** (`/dev/cpuctl/*/cpu.uclamp.{min,max}`) — the main lever on
+  CPU performance and power draw. It either lets processes ramp up to a higher
+  frequency sooner (snappiness) or caps their utilisation (cooling).
+- **The Mali GPU** — `scaling_max_freq`, `scaling_min_freq`, `power_policy`.
+- **The thermal HAL profile** — `vendor.thermal.<SENSOR>.profile`.
+- **vm tuning** — `swappiness`, `dirty_ratio`, `dirty_background_ratio`,
   `vfs_cache_pressure`, `page-cluster`.
-- **I/O readahead** na `sda`–`sdd`.
-- **Velikost zramu** (volitelně, viz sekci 9 — **algoritmus se nikdy nemění**).
-- **Strop nabíjení** — `charge_stop_level`.
-- **Rozlišení a hustotu displeje** — s pojistkou proti zamrznutí na nečitelném obrazu.
-- **Android Game Mode** — obálka nad systémovým `cmd game` (per-app, žádný hack).
-- **Čtení stavu** — teploty z thermal zón, frekvence, aktuální throttling z cooling
-  devices, zram, baterie.
+- **I/O readahead** on `sda`-`sdd`.
+- **The zram size** (optional, see section 9 — **the algorithm is never changed**).
+- **The charge cap** — `charge_stop_level`.
+- **Display resolution and density** — with a safeguard against being stuck on an
+  unreadable screen.
+- **Android Game Mode** — a wrapper around the system `cmd game` (per-app, no hacks).
+- **State readout** — temperatures from the thermal zones, frequencies, the current
+  throttling from the cooling devices, zram, the battery.
 
-A hlavně: **všechno je reversibilní.** Při prvním spuštění se udělá snapshot stock
-hodnot do `backup/stock.conf` a `pxtune revert` se k němu kdykoli vrátí.
+And above all: **everything is reversible.** On the first run a snapshot of the
+stock values is taken into `backup/stock.conf`, and `pxtune revert` returns to it
+at any time.
 
-### Proč to vzniklo — konkrétní naměřený problém
+### Why it exists — a specific measured problem
 
-Telefon throttluje agresivně a preventivně. **Naměřeno při 150 s trvalé zátěže
-na všech 9 jádrech:**
+The phone throttles aggressively and pre-emptively. **Measured during 150 s of
+sustained load on all 9 cores:**
 
-| Cluster | Strop | % HW maxima |
+| Cluster | Cap | % of HW maximum |
 |---|---|---|
 | Little (A510) | ~1036 MHz | **61 %** |
 | Big (A715) | 910 MHz | **38 %** |
 | Prime (X3) | 1164 MHz | **40 %** |
 
-A to všechno při junction jen **58 °C** a skin **40,5 °C** — což není teplotní nouze,
-ale konzervativní politika. Špička junction přitom v prvních ~40 s dosáhne **81 °C**.
+And all that at a junction temperature of only **58 °C** and a skin of
+**40.5 °C** — which is not a thermal emergency but a conservative policy. The
+junction peak reaches **81 °C** in the first ~40 s.
 
-**Zotavení je navíc pomalé** — thermal HAL má v konfiguraci `MaxReleaseStep=1`, takže
-uvolňuje po jednom kroku: trvá to **~84 s** a **60 s po skončení zátěže se neuvolnilo
-vůbec nic.**
+**Recovery is slow on top of that** — the thermal HAL has `MaxReleaseStep=1` in
+its configuration, so it releases one step at a time: it takes **~84 s**, and
+**60 s after the load ended nothing at all had been released.**
 
-Z toho plyne celý návrh modulu: nemá smysl honit špičkový výkon (ten je stejně
-oříznutý), má smysl **nepouštět telefon do stavu, ze kterého se pak minutu a půl
-hrabe zpátky.** Proto profily řežou teplotní špičku, ne ustálený výkon — viz sekci 3.
+The whole design of the module follows from that: there is no point chasing peak
+performance (it gets cut anyway), the point is **not to let the phone into a
+state it then spends a minute and a half crawling back from.** That is why the
+profiles trim the thermal peak rather than the sustained performance — see
+section 3.
 
-### Co to fyzicky je
+### What it physically is
 
 ```
-/data/adb/modules/pixel_tune/     # modul — smaže se při odinstalaci
+/data/adb/modules/pixel_tune/     # the module — deleted on uninstall
 ├── module.prop
-├── post-fs-data.sh               # POUZE bootloop ochrana + volitelný zram
-├── service.sh                    # všechno ostatní (pozdní fáze bootu, +20 s)
-├── uninstall.sh                  # automatický revert při odinstalaci
-├── bin/pxtune                    # CLI jádro (POSIX sh)
-├── bin/pxtune-auto               # adaptivní démon (event-driven, viz sekci 6)
-└── webroot/index.html            # WebUI
+├── post-fs-data.sh               # ONLY bootloop protection + optional zram
+├── service.sh                    # everything else (late boot phase, +20 s)
+├── uninstall.sh                  # automatic revert on uninstall
+├── bin/pxtune                    # the CLI core (POSIX sh)
+├── bin/pxtune-auto               # the adaptive daemon (event-driven, see section 6)
+└── webroot/index.html            # the WebUI
 
-/data/adb/pixel_tune/             # stav — PŘEŽIJE odinstalaci i přeinstalaci
+/data/adb/pixel_tune/             # state — SURVIVES uninstall and reinstall
 ├── profiles/{powersave,balanced,performance,game,night}.conf
-├── backup/stock.conf             # snapshot stock hodnot (vytvoří se 1×)
-├── active                        # jméno aktivního profilu
-├── auto                          # "on" / "off" — přepínač adaptivního automatu
-├── auto.conf                     # volitelný, přepisuje konstanty démona
-├── pxtune-auto.pid               # pid běžícího démona
-├── pxtune-auto.fifo              # událostní roura démona
-├── pxtune-auto.lock              # zámek proti dvěma instancím démona
-├── appstats                      # naučená klasifikace aplikací (démon)
-├── appstats.override             # ruční klasifikace aplikací, má přednost
-├── manual_override               # existuje = automat nepřepisuje profil
-├── boot_count                    # ochrana proti bootloopu
-├── display_state                 # cache rozlišení pro `status --json` (bez binderu)
-├── zram.conf                     # volitelný, jen ZRAM_DISKSIZE (viz sekci 9)
-├── DISABLE                       # existuje = modul se při bootu vypne
-├── res_pending                   # čeká na potvrzení změny rozlišení
-├── PURGE                         # volitelný, viz sekci 12
+├── backup/stock.conf             # the snapshot of stock values (created once)
+├── active                        # the name of the active profile
+├── auto                          # "on" / "off" — the adaptive daemon switch
+├── auto.conf                     # optional, overrides the daemon's constants
+├── pxtune-auto.pid               # the pid of the running daemon
+├── pxtune-auto.fifo              # the daemon's event pipe
+├── pxtune-auto.lock              # a lock against two daemon instances
+├── appstats                      # the learned app classification (the daemon)
+├── appstats.override             # a manual app classification, takes precedence
+├── manual_override               # exists = the daemon does not overwrite the profile
+├── boot_count                    # bootloop protection
+├── display_state                 # a resolution cache for `status --json` (no binder)
+├── zram.conf                     # optional, only ZRAM_DISKSIZE (see section 9)
+├── DISABLE                       # exists = the module turns itself off at boot
+├── res_pending                   # waiting for a resolution change to be confirmed
+├── PURGE                         # optional, see section 12
 └── pxtune.log  (+ pxtune.log.old)
 ```
 
-Že jsou to dva oddělené adresáře, je záměr: **odinstaluješ-li modul, tvoje profily
-a záloha stock hodnot zůstanou.** Úplně čistý stav viz sekci 12.
+The two separate directories are deliberate: **if you uninstall the module, your
+profiles and the backup of the stock values stay.** For a completely clean state
+see section 12.
 
 ---
 
-## 2. Instalace a odinstalace
+## 2. Installation and uninstallation
 
-### Instalace
+### Installation
 
-1. KernelSU-Next manager → **Moduly** → **Instalovat z úložiště** → vyber ZIP modulu.
-2. Restartuj telefon.
-3. Ověř:
+1. KernelSU-Next manager → **Modules** → **Install from storage** → pick the
+   module ZIP.
+2. Reboot the phone.
+3. Verify:
 
 ```sh
 su -c 'pxtune selftest'
 su -c 'pxtune status'
 ```
 
-`selftest` projde všechny cesty, které modul používá, a vypíše, které existují
-a jsou zapisovatelné. Návratový kód 2 = něco chybí.
+`selftest` walks every path the module uses and prints which ones exist and are
+writable. Return code 2 = something is missing.
 
-Po bootu `service.sh` **čeká 20 sekund** (`SETTLE=20`), než začne cokoli dělat —
-do té doby neběží `system_server` a `settings` ani `cmd game` by nefungovaly.
-Nediv se, že se profil aplikuje až chvíli po odemčení.
+After a boot, `service.sh` **waits 20 seconds** (`SETTLE=20`) before doing
+anything — until then `system_server` is not running and neither `settings` nor
+`cmd game` would work. Do not be surprised that the profile is only applied a
+little while after you unlock.
 
-> TODO: přesné jméno instalačního ZIPu. Ve SPEC ani v souborech modulu není uvedeno
-> a `customize.sh` v modulu není.
+> TODO: the exact name of the installation ZIP. It is stated neither in the SPEC
+> nor in the module files, and there is no `customize.sh` in the module.
 
-### Souběh s ostatními moduly
+### Coexistence with other modules
 
-Na zařízení už běží: NLSound, TA_utl, hma_oss_zygisk, meta-overlayfs, pgs,
-playintegrityfix, susfs4ksu, tricky_store, zygisk-assistant, zygisksu.
-`pixel_tune` **nemá žádný overlay** — nepřipojuje nic do `/system` ani `/vendor` —
-takže s meta-overlayfs ani susfs si nelezou do zelí.
+Already running on the device: NLSound, TA_utl, hma_oss_zygisk, meta-overlayfs,
+pgs, playintegrityfix, susfs4ksu, tricky_store, zygisk-assistant, zygisksu.
+`pixel_tune` **has no overlay** — it mounts nothing into `/system` or `/vendor` —
+so it does not get in the way of meta-overlayfs or susfs.
 
-### Odinstalace
+### Uninstallation
 
-KernelSU-Next manager → **Moduly** → `Pixel Tune` → **Odinstalovat** → restart.
+KernelSU-Next manager → **Modules** → `Pixel Tune` → **Uninstall** → reboot.
 
-`uninstall.sh` se přitom postará o většinu úklidu **sám**:
+`uninstall.sh` takes care of most of the cleanup **by itself**:
 
-1. zastaví adaptivního démona (`pxtune-auto stop`, náhradně `SIGTERM` podle
-   `pxtune-auto.pid`) a uklidí po něm `pxtune-auto.{pid,fifo,lock}`,
-2. položí `DISABLE`, aby se modul v tomhle bootu už nechytil,
-3. spustí `pxtune revert` (uclamp, GPU, vm, I/O, thermal, nabíjení),
-4. spustí `pxtune res reset` — **ale jen když už systém běží**,
-5. **uživatelská data v `/data/adb/pixel_tune/` nemaže** (profily, `backup/stock.conf`,
-   log). Maže jen běhové soubory: `boot_count`, `res_pending`, `manual_override`.
+1. stops the adaptive daemon (`pxtune-auto stop`, alternatively `SIGTERM` by
+   `pxtune-auto.pid`) and cleans up `pxtune-auto.{pid,fifo,lock}` after it,
+2. drops `DISABLE` so the module cannot take hold again during this boot,
+3. runs `pxtune revert` (uclamp, GPU, vm, I/O, thermal, charging),
+4. runs `pxtune res reset` — **but only if the system is already up**,
+5. **does not delete the user data in `/data/adb/pixel_tune/`** (the profiles,
+   `backup/stock.conf`, the log). It only deletes the runtime files:
+   `boot_count`, `res_pending`, `manual_override`.
 
-**Dva háčky, o kterých musíš vědět:**
+**Two catches you need to know about:**
 
-- **Odinstalace může běžet ve fázi bootu, kde `settings` neexistuje.** Pak se
-  rozlišení a DPI **nevrátí** a skript to napíše do logu. Proto je lepší spustit
-  `su -c 'pxtune revert'` **ručně ještě před odinstalací**, na běžícím systému.
-- **`pxtune res reset` nastaví DPI na 420, ne na tvých 353.** Viz sekci 7 —
-  je to důležité a mate to.
+- **An uninstall may run in a boot phase where `settings` does not exist.** The
+  resolution and DPI are then **not restored** and the script writes that into
+  the log. It is therefore better to run `su -c 'pxtune revert'` **by hand before
+  uninstalling**, on a running system.
+- **`pxtune res reset` sets the DPI to 420, not to your 353.** See section 7 —
+  this matters and it is confusing.
 
-Chceš-li při odinstalaci smazat úplně všechno včetně profilů a zálohy, vytvoř
-předem soubor `PURGE`:
+If you want the uninstall to delete absolutely everything including the profiles
+and the backup, create a `PURGE` file first:
 
 ```sh
 su -c 'touch /data/adb/pixel_tune/PURGE'
 ```
 
-### Když se něco pokazí — čtyři úrovně nouzového vypnutí
+### When something goes wrong — four levels of emergency shutdown
 
-Od nejjemnějšího po nejtvrdší:
+From the gentlest to the harshest:
 
-#### a) `pxtune revert` — telefon běží, jen se chová divně
+#### a) `pxtune revert` — the phone runs, it just behaves oddly
 
 ```sh
 su -c 'pxtune revert'
 ```
 
-Vrátí **všechno** na hodnoty z `backup/stock.conf` (a co v něm chybí, na výchozí
-hodnoty ze SPEC). Nevypne modul, jen zruší jeho účinky. Nastaví `active=stock`
-a položí `manual_override`, aby automat hned nezapsal jiný profil.
-**Tohle zkus jako první.**
+Restores **everything** to the values from `backup/stock.conf` (and whatever is
+missing from it, to the default values from the SPEC). It does not disable the
+module, it only cancels its effects. It sets `active=stock` and drops
+`manual_override` so the daemon does not immediately write another profile.
+**Try this first.**
 
-#### b) Soubor `DISABLE` — modul se nemá při dalším bootu vůbec spustit
+#### b) The `DISABLE` file — the module must not start at all on the next boot
 
 ```sh
 su -c 'touch /data/adb/pixel_tune/DISABLE'
 ```
 
-Když tenhle soubor existuje, `post-fs-data.sh` i `service.sh` **okamžitě skončí**
-a neudělají nic. Modul zůstane nainstalovaný, ale je inertní.
-`service.sh` navíc kontroluje `DISABLE` **ještě jednou** po svém 20sekundovém čekání —
-takže ho stihneš položit i z WebUI těsně po bootu.
+When this file exists, both `post-fs-data.sh` and `service.sh` **exit
+immediately** and do nothing. The module stays installed but is inert.
+`service.sh` additionally checks `DISABLE` **once more** after its 20-second
+wait — so you can still drop it from the WebUI right after a boot.
 
-Zpět ho zapneš smazáním:
+You re-enable it by deleting the file:
 
 ```sh
 su -c 'rm /data/adb/pixel_tune/DISABLE'
 ```
 
-#### c) KernelSU safe mode — telefon nenaběhne nebo nemáš jak spustit shell
+#### c) KernelSU safe mode — the phone does not boot or you cannot get a shell
 
-Při startu **drž Volume Down**. KernelSU nabootuje v safe mode, což **vypne všechny
-moduly** (nejen pixel_tune). Pak v manageru modul odinstaluj nebo polož `DISABLE`.
+**Hold Volume Down** during startup. KernelSU boots into safe mode, which
+**disables all modules** (not just pixel_tune). Then uninstall the module in the
+manager or drop `DISABLE`.
 
-#### d) Automatická pojistka proti bootloopu (běží sama, nemusíš nic dělat)
+#### d) The automatic bootloop safeguard (runs by itself, nothing to do)
 
-- `post-fs-data.sh` při každém bootu **zvýší** čítač `boot_count`.
-- `service.sh` ho po úspěšném doběhnutí **vynuluje**.
-- Když `post-fs-data.sh` uvidí `boot_count ≥ 3` (tři boothy po sobě, kdy se
-  `service.sh` nedostal do konce), **sám vytvoří `DISABLE`** a nic neudělá.
-  Čítač přitom rovnou vynuluje, takže po ručním smazání `DISABLE` máš zase tři pokusy.
-- Navíc už při `boot_count ≥ 2` **přeskočí změnu zramu** — to je nejrizikovější
-  operace v rané fázi bootu, takže po jednom nepovedeném bootu se na ni nesahá.
+- `post-fs-data.sh` **increments** the `boot_count` counter on every boot.
+- `service.sh` **zeroes** it after completing successfully.
+- When `post-fs-data.sh` sees `boot_count ≥ 3` (three boots in a row in which
+  `service.sh` did not reach its end), **it creates `DISABLE` itself** and does
+  nothing. It zeroes the counter at the same time, so after you delete `DISABLE`
+  by hand you have three attempts again.
+- On top of that, at `boot_count ≥ 2` it already **skips the zram change** — that
+  is the riskiest operation in the early boot phase, so after a single failed
+  boot it is left alone.
 
-**Tedy: i kdyby modul telefon shazoval, po třech restartech se sám vypne.**
+**In other words: even if the module were crashing the phone, it disables itself
+after three restarts.**
 
-Návrh tomu jde naproti ještě jinak: v `post-fs-data.sh` (raná fáze bootu, kde by
-chyba mohla znamenat bootloop) je **jen bootloop ochrana a volitelný zram**.
-Všechno ostatní dělá `service.sh` až v pozdní fázi, kde chyba znamená nanejvýš
-„nic se nenastavilo".
+The design meets that halfway in another way too: `post-fs-data.sh` (the early
+boot phase, where an error could mean a bootloop) contains **only the bootloop
+protection and the optional zram**. Everything else is done by `service.sh` in
+the late phase, where an error means at most "nothing got set".
 
 ---
 
-## 3. Profily
+## 3. Profiles
 
-Profil je textový soubor `KEY=VALUE` v `/data/adb/pixel_tune/profiles/`.
-Pravidla, která platí vždy:
+A profile is a `KEY=VALUE` text file in `/data/adb/pixel_tune/profiles/`.
+Rules that always apply:
 
-- **Prázdná hodnota nebo chybějící klíč = na tu věc se nesáhne.**
-- Neznámé klíče se ignorují (aby starší profil nerozbil novější `pxtune`).
-- Soubory se **nesourcují** — `pxtune` je parsuje po řádcích, takže poškozený
-  nebo podvržený profil nemůže nic spustit.
-- Profily jsou tvoje, můžeš je editovat a **přežijí přeinstalaci modulu**.
+- **An empty value or a missing key = that thing is left alone.**
+- Unknown keys are ignored (so an older profile does not break a newer `pxtune`).
+- The files are **not sourced** — `pxtune` parses them line by line, so a
+  corrupted or planted profile cannot execute anything.
+- The profiles are yours, you can edit them and **they survive a module
+  reinstall**.
 
-### Přehled — co který profil konkrétně mění
+### Overview — what each profile actually changes
 
-Prázdná buňka „—" znamená, že profil na tu skupinu hodnot **nesahá** (zůstává stock).
+An empty cell "—" means the profile **does not touch** that group of values (it
+stays at stock).
 
-| Profil | uclamp | GPU | thermal profil | nabíjení | vm / I/O |
+| Profile | uclamp | GPU | thermal profile | charging | vm / I/O |
 |---|---|---|---|---|---|
 | **balanced** *(default)* | — | — | — | — | — |
 | **powersave** | `top-app.max=60`<br>`foreground.max=50`<br>`background.max=30`<br>`system-bg.max=40` | `max=580000` kHz | — | — | — |
 | **performance** | `top-app.min=25` | — | — | — | — |
-| **game** | `top-app.min=30`<br>`background.max=30`<br>`system-bg.max=40` | — | `game` na CPU-MID<br>i CPU-HIGH | — | — |
+| **game** | `top-app.min=30`<br>`background.max=30`<br>`system-bg.max=40` | — | `game` on CPU-MID<br>and CPU-HIGH | — | — |
 | **night** | `top-app.max=50`<br>`foreground.max=35`<br>`background.max=17`<br>`system-bg.max=35` | `max=419000` kHz | — | `charge_stop_level=80` | — |
 
-**Žádný profil nemění vm, I/O readahead ani zram.** Ve všech pěti jsou tyhle klíče
-prázdné — není pro ně naměřený podklad.
+**No profile changes vm, the I/O readahead or zram.** In all five those keys are
+empty — there is no measured basis for them.
 
-### Kdy který použít
+### When to use which
 
-| Profil | Popis | Kdy |
+| Profile | Description | When |
 |---|---|---|
-| **balanced** | „Vyvážený — čistý stock, žádné zásahy (default)" | Výchozí stav a referenční bod, se kterým porovnáváš ostatní. Použij, když nemáš konkrétní důvod na nic jiného. |
-| **powersave** | „Chladný — ořezaná špička, priorita teploty a výdrže" | Když ti telefon hřeje v ruce nebo chceš vydržet den. Ořezává **teplotní špičku v prvních desítkách sekund zátěže**, ne ustálený výkon (ten je stejně sražený na ~40 %). |
-| **performance** | „Svižnější balanced — rychlejší náběh, stropy beze změny" | Když telefon nepůsobí pomalu, ale „zpožděně" — drobný lag při prvním doteku. Nezvyšuje stropy (nemá jak), jen zkracuje ramp-up. |
-| **game** | „Hry — stabilní frame-time, uklizené pozadí, GPU beze změny" | Hry, které běží desítky minut (Pokémon GO apod.). Cílí na stabilní frame-time a klid v pozadí, ne na špičkový výkon. **Kombinuj s Game Mode** — viz sekci 7. |
-| **night** | „Noc — pozadí drženo mimo velká jádra, GPU srazená, nabíjení do 80 %" | Telefon leží na stole nebo na noční nabíječce. Jediný profil, který **sám nastaví strop nabíjení na 80 %.** |
+| **balanced** | "Balanced — pure stock, no interventions (default)" | The default state and the reference point you compare the others against. Use it when you have no specific reason for anything else. |
+| **powersave** | "Cool — trimmed peak, temperature and battery life first" | When the phone is warm in your hand or you want it to last the day. It trims the **thermal peak in the first tens of seconds of load**, not the sustained performance (that is cut to ~40 % anyway). |
+| **performance** | "Snappier balanced — faster ramp-up, ceilings unchanged" | When the phone does not feel slow but "delayed" — a small lag on the first touch. It does not raise ceilings (it cannot), it only shortens the ramp-up. |
+| **game** | "Games — stable frame-time, tidy background, GPU unchanged" | Games that run for tens of minutes (Pokémon GO and the like). It aims at stable frame-time and quiet in the background, not at peak performance. **Combine it with Game Mode** — see section 7. |
+| **night** | "Night — background kept off the big cores, GPU cut down, charge to 80 %" | The phone lies on a desk or on the night charger. The only profile that **sets the charge cap to 80 % by itself.** |
 
-### Proč je `balanced` prázdný
+### Why `balanced` is empty
 
-Není to nedodělek, je to výsledek. Autor profilu prošel všechny páky a u každé
-zjistil, že v naměřených datech není důkaz, že by stock hodnota byla špatně:
+It is not unfinished, it is a result. The author of the profile went through
+every lever and found that for each of them the measured data contains no
+evidence that the stock value is wrong:
 
-- **uclamp** — stock je `min=0.00`, `max=max` všude (kromě `nnapi-hal`, které má
-  `min=1.00`; na to se nesahá). Jakýkoli `uclamp.max < 100` je ztráta výkonu,
-  jakýkoli `uclamp.min > 0` je vyšší spotřeba. U defaultu nechceš ani jedno.
-- **CPU stropy** — nejde je nastavit, viz sekci 9.
-- **thermal profil** — mechanismus **není ověřený** a systém si ten prop nastavuje
-  sám (při měření byl už na `camera`, protože běžela kamera). Default do toho
-  skákat nesmí.
-- **GPU** — stock `scaling_max_freq` je 890000 kHz, což **je** hardwarové maximum.
-  Nahoru není kam, dolů je ztráta výkonu bez důvodu.
+- **uclamp** — stock is `min=0.00`, `max=max` everywhere (except `nnapi-hal`,
+  which has `min=1.00`; that is left alone). Any `uclamp.max < 100` is a loss of
+  performance, any `uclamp.min > 0` is more power draw. In a default you want
+  neither.
+- **CPU caps** — they cannot be set, see section 9.
+- **The thermal profile** — the mechanism is **unverified** and the system sets
+  that prop itself (during the measurement it was already on `camera`, because
+  the camera was running). A default must not cut across that.
+- **GPU** — stock `scaling_max_freq` is 890000 kHz, which **is** the hardware
+  maximum. There is nowhere up, and down is a loss of performance for no reason.
 - **vm** — stock `swappiness=60`, `dirty_ratio=20`, `dirty_background_ratio=10`,
-  `vfs_cache_pressure=100`, `page-cluster=0` (to poslední je pro zram už optimální).
-  Žádné měření neukazuje problém.
-- **I/O readahead** — není známá ani stock hodnota, ani žádné I/O měření.
-- **charge_stop_level** — je to tvoje rozhodnutí o dostupné kapacitě, ne oprava chyby.
+  `vfs_cache_pressure=100`, `page-cluster=0` (that last one is already optimal
+  for zram). No measurement shows a problem.
+- **I/O readahead** — neither the stock value nor any I/O measurement is known.
+- **charge_stop_level** — that is your decision about available capacity, not a
+  bug fix.
 
-### Jak jsou čísla v profilech odvozená
+### How the numbers in the profiles were derived
 
-Stojí za to to vědět, protože z toho plyne, **co od profilů čekat a co ne**.
+It is worth knowing, because it determines **what to expect from the profiles
+and what not**.
 
-#### Výchozí měření
+#### The baseline measurement
 
-Naměřeno při 150 s trvalé zátěže na 9 jádrech: systém se sám sráží na
-**Big 910 MHz (38 % HW maxima)** a **Prime 1164 MHz (40 %)** — a to už při junction
-jen 58 °C a skin 40,5 °C. Špička junction v prvních ~40 s je ale **81 °C**.
-Zotavení z throttlingu trvá **~84 s** a prvních 60 s se neuvolní nic.
+Measured during 150 s of sustained load on 9 cores: the system cuts itself down
+to **Big 910 MHz (38 % of the HW maximum)** and **Prime 1164 MHz (40 %)** — and
+that already at a junction of only 58 °C and a skin of 40.5 °C. The junction peak
+in the first ~40 s is however **81 °C**. Recovery from throttling takes **~84 s**
+and nothing is released during the first 60 s.
 
-Z toho plynou dvě pravidla, která profily dodržují:
+Two rules follow from that, which the profiles obey:
 
-1. **Trvalý výkon není co ořezávat — je už oříznutý.** Ořezává se **špička**
-   v prvních desítkách sekund. Proto má `powersave` strop `top-app.max=60`, což
-   leží **nad** naměřenými 40 % ustáleného stavu: dlouhodobý výkon nezhoršuje,
-   ubírá jen špičku, která se stejně draze zaplatí 84 sekundami škrcení.
-2. **Podlahy (`uclamp.min`) se drží POD 38 %.** `performance` má 25, `game` má 30.
-   Vyšší podlaha by tlačila proti škrticí smyčce a výsledkem by byl **trvale
-   zaškrcený, tedy pomalejší** telefon.
+1. **There is no sustained performance left to trim — it is already trimmed.**
+   What gets trimmed is the **peak** in the first tens of seconds. That is why
+   `powersave` has a cap of `top-app.max=60`, which lies **above** the measured
+   40 % steady state: it does not worsen long-term performance, it only removes
+   a peak that would be paid for with 84 seconds of throttling anyway.
+2. **Floors (`uclamp.min`) stay BELOW 38 %.** `performance` has 25, `game` has
+   30. A higher floor would push against the throttling loop and the result would
+   be a **permanently throttled, i.e. slower** phone.
 
-#### Co čísla uclampu fyzicky znamenají — naměřená capacity tabulka
+#### What the uclamp numbers physically mean — the measured capacity table
 
-Škála `uclamp` 0–100 je relativní ke kapacitě **nejsilnějšího** jádra, tedy 1024.
-Kapacity clusterů jsou **naměřené na zařízení**:
+The `uclamp` scale 0-100 is relative to the capacity of the **strongest** core,
+i.e. 1024. The cluster capacities are **measured on the device**:
 
-| Cluster | Jádra | `cpu_capacity` |
+| Cluster | Cores | `cpu_capacity` |
 |---|---|---|
-| Little (4×A510) | cpu0–3 | **182** |
-| Big (4×A715) | cpu4–7 | **725** |
+| Little (4×A510) | cpu0-3 | **182** |
+| Big (4×A715) | cpu4-7 | **725** |
 | Prime (1×X3) | cpu8 | **1024** |
 
-Z toho plynou **dva tvrdé prahy**, na kterých stojí všechny hodnoty v profilech:
+That gives **two hard thresholds** on which all the values in the profiles rest:
 
-| Práh | Důsledek |
+| Threshold | Consequence |
 |---|---|
-| `uclamp.max ≤ 17,8` | util ≤ 182 ⇒ úloha se vejde do Little ⇒ **nikdy nesáhne na Big ani Prime** |
-| `uclamp.max ≤ 70,8` | util ≤ 725 ⇒ úloha se vejde do Big ⇒ **nikdy nepotřebuje Prime (X3)** |
-| `uclamp.max > 70,8` | úloha může vytáhnout Prime |
+| `uclamp.max ≤ 17.8` | util ≤ 182 ⇒ the task fits on Little ⇒ **it never touches Big or Prime** |
+| `uclamp.max ≤ 70.8` | util ≤ 725 ⇒ the task fits on Big ⇒ **it never needs Prime (X3)** |
+| `uclamp.max > 70.8` | the task may pull in Prime |
 
-Uvnitř clusteru platí přibližně `frekvence ≈ (util / capacity_clusteru) × max_freq`.
-Pro Big (max 2367 MHz) tedy `frekvence ≈ (uclamp / 725) × 2367 MHz`:
+Inside a cluster, roughly `frequency ≈ (util / cluster_capacity) × max_freq`
+applies. For Big (max 2367 MHz) that is `frequency ≈ (uclamp / 725) × 2367 MHz`:
 
 | `uclamp` | util | Big ≈ |
 |---|---|---|
@@ -314,32 +348,32 @@ Pro Big (max 2367 MHz) tedy `frekvence ≈ (uclamp / 725) × 2367 MHz`:
 | 50 | 512 | ~1672 MHz |
 | 60 | 614 | ~2005 MHz |
 
-**Tohle je hlavní důvod, proč jsou v profilech zrovna tahle čísla, a ne jiná.**
+**This is the main reason why the profiles contain these numbers and not others.**
 
-#### Odůvodnění každé nastavené hodnoty
+#### The reasoning behind every value that is set
 
-| Profil | Klíč | Hodnota | Proč právě tolik |
+| Profile | Key | Value | Why exactly this much |
 |---|---|---|---|
-| `powersave` | `top-app.max` | 60 | 60 < 70,8 ⇒ popředí **nikdy nevytáhne Prime (X3)**, největší jednotlivý zdroj tepla. Zároveň ~2005 MHz na Big leží hluboko **nad** ustálenými 910 MHz, takže dlouhodobý výkon nezhoršuje — ubírá jen špičku, která stojí 84 s škrcení. |
-| `powersave` | `foreground.max` | 50 | O stupeň níž než top-app (~1672 MHz), pořád nad ustálenými 910 MHz. U neinteraktivních úloh je ztráta špičky ještě míň znát. Rovněž pod 70,8 ⇒ bez Prime. |
-| `powersave` | `background.max` | 30 | **Vědomý kompromis bez měření.** 30 je **nad** prahem 17,8, takže pozadí na Big smí — jen pomalu. Striktní ≤ 17 by ho zahnalo na Little, ale kvůli race-to-idle to může sežrat víc energie celkem a `powersave` je denní profil, kde má sync doběhnout. Kdo chce chladněji i ve dne, přepíše na 17. |
-| `powersave` | `system-bg.max` | 40 | 40 % je přesně úroveň, kterou si systém pod zátěží sám drží (Prime 1164 MHz = 40 %). Neberu tedy systémovým službám nic, co by jim HAL stejně nenechal. Níž ne, aby neutrpěly wakeupy a probouzení displeje. |
-| `powersave` | `GPU max` | 580000 | 5. krok shora, ~65 % stock maxima — odřezává tři napěťově nejdražší OPP. Konzervativní schválně: **měření GPU pod zátěží neexistuje**, takže se nejde na CPU-ekvivalent 40 % (~376000). |
-| `performance` | `top-app.min` | 25 | util 256 > 182 ⇒ popředí se **nevejde do Little**, scheduler ho rovnou dá na Big (~836 MHz) — to je ta hledaná svižnost. A 25 ≪ 70,8 ⇒ podlaha **sama nikdy neprobudí Prime**. Navíc 25 < 38 % ustáleného stavu ⇒ **nebojuje s thermal HAL** a nezvyšuje trvalou spotřebu. |
-| `game` | `top-app.min` | 30 | ~1002 MHz na Big ⇒ render vlákno mezi snímky nespadne na nízké OPP a další snímek nezačíná z nuly. Vyšší než `performance`, protože herní zátěž je trvalá a předvídatelná. Vědomě **ne 38–40+**: to už by tlačilo proti škrticí smyčce a skončilo trvale zaškrceným telefonem uprostřed hry. |
-| `game` | `background.max` | 30 | Hlavní zisk během hry: Prime vyloučen (30 < 70,8) ⇒ nejdražší jádro nepálí na úlohy v pozadí a nepřidává teplo. Striktní ≤ 17 nezvoleno — chybí měření, že to nerozhodí pomocné herní procesy. |
-| `game` | `system-bg.max` | 40 | Stejná logika jako v `powersave`. |
-| `game` | `thermal profil` | `game` | **Jediná páka, která může posunout ustálený strop** (Big 38 % / Prime 40 % při pouhých 58 °C je zjevně hodně konzervativní). Nastavuje se **jen tady, jen dočasně** — a je to **neověřený mechanismus**, viz sekci 11. |
-| `night` | `top-app.max` | 50 | Pojistka pro případ, že telefon vezmeš do ruky **dřív**, než automat přepne profil. ~1672 MHz na Big je pořád vysoko nad ustálenými 910 MHz, takže odemčení a pár doteků nepůsobí rozbitě. Prime vyloučen. |
-| `night` | `foreground.max` | 35 | Viditelné-ale-neaktivní procesy při zhasnutém displeji reálně nic neobsluhují ⇒ ~1170 MHz bohatě stačí. |
-| `night` | `background.max` | **17** | **Hlavní páka profilu.** 17 < 17,8 ⇒ sync, JobScheduler a údržba se vejdou do Little a scheduler je **nikdy nemusí přesunout na velká jádra**. Cena je malá: uvnitř Little to je ~1629 MHz ze 1704 MHz — omezuje se **umístění, ne takt**. |
-| `night` | `system-bg.max` | 35 | Výrazně víc než obyčejné pozadí a **smí na Big** schválně — přes system-background jdou wakeupy, notifikace a probouzení displeje. Zahnat i je na Little by riskovalo pomalé probuzení telefonu. |
-| `night` | `GPU max` | 419000 | ~47 % stock maxima. Při zhasnutém displeji se strop nedotkne ničeho, ale brání tomu, aby náhodné probuzení (widget, notifikace, AOD) vytáhlo GPU na nejvyšší OPP. Ne níž (302000/150000) ze stejného důvodu jako u top-app: odemykací animace při 300 MHz už by byla znát. **Kompromis, ne měření.** |
-| `night` | `charge_stop_level` | 80 | Baterie má **602 cyklů**, noc je jediná situace, kdy telefon předvídatelně stojí hodiny na nabíječce s plnou baterií — přesně stav, který kapacitu ničí. Zápis ověřen (viz sekci 8). |
+| `powersave` | `top-app.max` | 60 | 60 < 70.8 ⇒ the foreground **never pulls in Prime (X3)**, the largest single heat source. At the same time ~2005 MHz on Big lies far **above** the steady 910 MHz, so it does not worsen long-term performance — it only removes the peak, which costs 84 s of throttling. |
+| `powersave` | `foreground.max` | 50 | One step below top-app (~1672 MHz), still above the steady 910 MHz. For non-interactive work, losing the peak is even less noticeable. Also below 70.8 ⇒ no Prime. |
+| `powersave` | `background.max` | 30 | **A deliberate compromise without measurements.** 30 is **above** the 17.8 threshold, so the background may use Big — just slowly. A strict ≤ 17 would drive it onto Little, but because of race-to-idle that may consume more energy overall, and `powersave` is a daytime profile where a sync should finish. Anyone wanting it cooler during the day can rewrite it to 17. |
+| `powersave` | `system-bg.max` | 40 | 40 % is exactly the level the system holds by itself under load (Prime 1164 MHz = 40 %). So I take nothing from system services that the HAL would not leave them anyway. No lower, so that wakeups and display wake do not suffer. |
+| `powersave` | `GPU max` | 580000 | The 5th step from the top, ~65 % of the stock maximum — it cuts off the three most voltage-expensive OPPs. Deliberately conservative: **there is no GPU measurement under load**, so it does not go to the CPU equivalent of 40 % (~376000). |
+| `performance` | `top-app.min` | 25 | util 256 > 182 ⇒ the foreground **does not fit on Little**, so the scheduler puts it straight on Big (~836 MHz) — that is the snappiness being sought. And 25 ≪ 70.8 ⇒ the floor **never wakes Prime by itself**. On top of that 25 < the 38 % steady state ⇒ **it does not fight the thermal HAL** and does not raise sustained power draw. |
+| `game` | `top-app.min` | 30 | ~1002 MHz on Big ⇒ between frames the render thread does not fall to a low OPP and the next frame does not start from zero. Higher than `performance`, because a gaming load is sustained and predictable. Deliberately **not 38-40+**: that would push against the throttling loop and end with a permanently throttled phone mid-game. |
+| `game` | `background.max` | 30 | The main gain during a game: Prime is excluded (30 < 70.8) ⇒ the most expensive core does not burn on background work and does not add heat. A strict ≤ 17 was not chosen — there is no measurement that it would not disturb helper game processes. |
+| `game` | `system-bg.max` | 40 | The same logic as in `powersave`. |
+| `game` | `thermal profile` | `game` | **The only lever that can move the sustained ceiling** (Big 38 % / Prime 40 % at a mere 58 °C is clearly very conservative). It is set **only here, only temporarily** — and it is an **unverified mechanism**, see section 11. |
+| `night` | `top-app.max` | 50 | Insurance for the case where you pick the phone up **before** the daemon switches profiles. ~1672 MHz on Big is still far above the steady 910 MHz, so unlocking and a few taps do not feel broken. Prime excluded. |
+| `night` | `foreground.max` | 35 | With the screen off, visible-but-inactive processes are not really serving anything ⇒ ~1170 MHz is plenty. |
+| `night` | `background.max` | **17** | **The main lever of the profile.** 17 < 17.8 ⇒ syncs, the JobScheduler and maintenance fit on Little and the scheduler **never has to move them to the big cores**. The cost is small: inside Little that is ~1629 MHz out of 1704 MHz — what is restricted is **placement, not the clock**. |
+| `night` | `system-bg.max` | 35 | Considerably more than ordinary background work, and deliberately **allowed on Big** — wakeups, notifications and display wake go through system-background. Driving those onto Little as well would risk a slow phone wake. |
+| `night` | `GPU max` | 419000 | ~47 % of the stock maximum. With the screen off the cap touches nothing, but it prevents a random wakeup (widget, notification, AOD) from pulling the GPU to its highest OPP. Not lower (302000/150000) for the same reason as with top-app: the unlock animation at 300 MHz would already be noticeable. **A compromise, not a measurement.** |
+| `night` | `charge_stop_level` | 80 | The battery has **602 cycles**, and night is the only situation where the phone predictably sits on the charger for hours with a full battery — exactly the state that destroys capacity. The write is verified (see section 8). |
 
-#### Že `uclamp.max` opravdu funguje, je ověřeno měřením
+#### That `uclamp.max` really works is verified by measurement
 
-Měřeno se čtyřmi zátěžovými procesy v cgroup `top-app`, průměrné frekvence:
+Measured with four load processes in the `top-app` cgroup, average frequencies:
 
 | `uclamp.max` | Little | Big | Prime |
 |---|---|---|---|
@@ -347,34 +381,37 @@ Měřeno se čtyřmi zátěžovými procesy v cgroup `top-app`, průměrné frek
 | `50` | 1349 MHz | 1418 MHz | **1600 MHz** |
 | `25` | 1134 MHz | 1333 MHz | 1277 MHz |
 
-**Poctivá výhrada:** jednotlivé fáze běžely za sebou a telefon se během nich
-zahříval, takže **část poklesu jde na vrub souběžnému thermal throttlingu**, ne
-uclampu. Tohle měření samo o sobě tedy neříká, jak velký je efekt uclampu.
+**An honest caveat:** the individual phases ran one after another and the phone
+was heating up during them, so **part of the drop is down to concurrent thermal
+throttling**, not to uclamp. This measurement on its own therefore does not say
+how large the uclamp effect is.
 
-**Průkazné je něco jiného:** ve fázi 2 byl hardwarový strop Prime **1885 MHz**,
-ale naměřený průměr byl jen **1600 MHz**. Governor tedy šel **pod strop sám od sebe** —
-a to throttling vysvětlit nedokáže. Efekt uclampu je tím prokázaný jako reálný.
+**Something else is conclusive:** in phase 2 the hardware cap on Prime was
+**1885 MHz**, yet the measured average was only **1600 MHz**. The governor
+therefore went **below the cap of its own accord** — and throttling cannot
+explain that. The uclamp effect is thereby proven to be real.
 
-#### Zbylé výhrady k přesnosti
+#### The remaining caveats about accuracy
 
-- Přepočet uclamp → frekvence je **přibližný**; vztah util↔freq není přesně lineární
-  a governor `sched_pixel` má vlastní logiku.
-- **Energy model v debugfs není na tomhle zařízení dostupný**, takže se nedá spočítat,
-  jestli je zahnání úlohy na Little celkově úspornější — proti stojí race-to-idle
-  (na Little poběží úloha déle). Proto je striktní hodnota `≤ 17` použita jen v `night`,
-  kde na době doběhu nezáleží, a v `powersave` je ponecháno volnějších 30.
-- **Pro GPU není žádné měření pod trvalou zátěží** (naměřených 150 s bylo CPU-only).
-  Proto `powersave` nejde na GPU-ekvivalent 40 % (~376000 kHz), ale zůstává
-  konzervativně na 580000 kHz.
+- The uclamp → frequency conversion is **approximate**; the util↔freq relation is
+  not exactly linear and the `sched_pixel` governor has logic of its own.
+- **The energy model in debugfs is not available on this device**, so it cannot be
+  computed whether driving a task onto Little is more economical overall — against
+  it stands race-to-idle (on Little the task runs longer). That is why the strict
+  `≤ 17` value is used only in `night`, where completion time does not matter, and
+  a looser 30 is left in `powersave`.
+- **There is no GPU measurement under sustained load** (the measured 150 s were
+  CPU-only). That is why `powersave` does not go to the GPU equivalent of 40 %
+  (~376000 kHz) but stays conservatively at 580000 kHz.
 
-### Klíče profilu — kompletní reference
+### Profile keys — the complete reference
 
 ```sh
-# povinné
+# mandatory
 PROFILE_NAME="balanced"
-PROFILE_DESC="Vyvážený — stock chování"
+PROFILE_DESC="Balanced — stock behaviour"
 
-# uclamp (0-100, nebo "max"; prázdné = nesahat)
+# uclamp (0-100, or "max"; empty = leave alone)
 UCLAMP_TOPAPP_MIN=""     # /dev/cpuctl/top-app/cpu.uclamp.min
 UCLAMP_TOPAPP_MAX=""     #                     .../cpu.uclamp.max
 UCLAMP_FG_MIN=""         # /dev/cpuctl/foreground/
@@ -384,12 +421,12 @@ UCLAMP_BG_MAX=""
 UCLAMP_SYSBG_MIN=""      # /dev/cpuctl/system-background/
 UCLAMP_SYSBG_MAX=""
 
-# GPU (kHz, MUSÍ být hodnota z povoleného seznamu níže; prázdné = nesahat)
+# GPU (kHz, MUST be a value from the allowed list below; empty = leave alone)
 GPU_MAX_FREQ=""
 GPU_MIN_FREQ=""
 GPU_POWER_POLICY=""      # coarse_demand | adaptive | always_on
 
-# thermal HAL profil ("game" | "camera" | "" = default)
+# the thermal HAL profile ("game" | "camera" | "" = default)
 THERMAL_PROFILE_CPU_MID=""
 THERMAL_PROFILE_CPU_HIGH=""
 
@@ -400,294 +437,312 @@ VM_DIRTY_BG_RATIO=""
 VM_VFS_CACHE_PRESSURE=""
 
 # I/O
-IO_READAHEAD_KB=""       # aplikuje se na sda, sdb, sdc, sdd
+IO_READAHEAD_KB=""       # applied to sda, sdb, sdc, sdd
 
-# nabíjení
+# charging
 CHARGE_STOP_LEVEL=""     # 1-100
 ```
 
-**Povolené GPU frekvence** (kHz, sestupně — jiná hodnota se odmítne):
+**Allowed GPU frequencies** (kHz, descending — any other value is rejected):
 
 ```
 890000  850000  807000  723000  649000  580000  521000
 467000  419000  376000  337000  302000  150000
 ```
 
-Stock: `scaling_max_freq=890000`, `scaling_min_freq=150000`, `power_policy=adaptive`.
-GPU `scaling_max_freq` je **ověřeně zapisovatelné a drží** (zapsáno 649000, po 12 s
-stále 649000) — na rozdíl od cooling devices, které thermal HAL přepisuje.
+Stock: `scaling_max_freq=890000`, `scaling_min_freq=150000`,
+`power_policy=adaptive`. The GPU `scaling_max_freq` is **verifiably writable and
+holds** (649000 was written and was still 649000 after 12 s) — unlike the cooling
+devices, which the thermal HAL overwrites.
 
-**Poznámka k `camera-daemon` a `nnapi-hal`:** `pxtune revert` je zná a vrací,
-ale **kontrakt profilu je nevystavuje** — přes profil na ně nesáhneš. Je to záměr.
+**A note on `camera-daemon` and `nnapi-hal`:** `pxtune revert` knows about them
+and restores them, but **the profile contract does not expose them** — you cannot
+touch them through a profile. That is deliberate.
 
-### Co znamená uclamp v praxi
+### What uclamp means in practice
 
-| Nastavení | Efekt |
+| Setting | Effect |
 |---|---|
-| `uclamp.max < 100` | Strop na utilizaci ⇒ governor sáhne po nižších frekvencích ⇒ **chlazení a úspora**, ale i pomalejší běh. |
-| `uclamp.min > 0` | Podlaha ⇒ frekvence naskočí rychleji ⇒ **svižnost**, ale vyšší spotřeba. |
+| `uclamp.max < 100` | A cap on utilisation ⇒ the governor reaches for lower frequencies ⇒ **cooling and saving**, but also slower execution. |
+| `uclamp.min > 0` | A floor ⇒ the frequency ramps up sooner ⇒ **snappiness**, but higher power draw. |
 
-| cgroup | Co v ní běží |
+| cgroup | What runs in it |
 |---|---|
-| `top-app` | Aplikace, kterou máš právě na obrazovce. |
-| `foreground` | Viditelné/aktivní věci, které nejsou top-app. |
-| `background` | Věci na pozadí. Tady je strop nejlevnější — omezení skoro necítíš. |
-| `system-background` | Systémové úlohy na pozadí. Přes ně jdou i wakeupy a probouzení displeje — proto mají profily strop vyšší než u obyčejného pozadí. |
+| `top-app` | The app currently on your screen. |
+| `foreground` | Visible/active things that are not top-app. |
+| `background` | Things in the background. A cap is cheapest here — you hardly feel the restriction. |
+| `system-background` | System tasks in the background. Wakeups and display wake go through them too — which is why the profiles give them a higher cap than ordinary background work. |
 
 ---
 
-## 4. WebUI
+## 4. The WebUI
 
-WebUI je `webroot/index.html`, otevře se z KernelSU-Next manageru
-(Moduly → `Pixel Tune` → WebUI). Čte `pxtune status --json` a tlačítka volají
-odpovídající `pxtune` příkazy — **WebUI neumí nic, co neumí CLI.**
-Když ti něco nefunguje, zkus totéž z shellu; důvod bude v `pxtune log`.
+The WebUI is `webroot/index.html`; it opens from the KernelSU-Next manager
+(Modules → `Pixel Tune` → WebUI). It reads `pxtune status --json` and the buttons
+call the corresponding `pxtune` commands — **the WebUI cannot do anything the CLI
+cannot.** When something does not work for you, try the same thing from a shell;
+the reason will be in `pxtune log`.
 
-### Hlavička
+### The header
 
-| Prvek | Co dělá |
+| Element | What it does |
 |---|---|
-| **⟳ Obnovit** | Ruční načtení stavu. |
-| **⏱ 5 s** | Cykluje interval automatického obnovování: **vyp → 2 s → 5 s → 10 s → 30 s**. Výchozí je 5 s. Při skrytém okně se polling úplně zastaví. |
-| Tečka + text pod nadpisem | Stav posledního volání (OK / provádím / chyba). |
+| **⟳ Refresh** | A manual state read. |
+| **⏱ 5 s** | Cycles the automatic refresh interval: **off → 2 s → 5 s → 10 s → 30 s**. The default is 5 s. When the window is hidden, polling stops entirely. |
+| The dot + text under the title | The state of the last call (OK / working / error). |
 
-### Banner „⚠ Změna rozlišení čeká na potvrzení"
+### The "⚠ A resolution change is waiting for confirmation" banner
 
-Objeví se **jen když existuje `res_pending`**, s odpočtem od 60 s.
+It appears **only when `res_pending` exists**, with a countdown from 60 s.
 
-| Tlačítko | Volá | Co udělá |
+| Button | Calls | What it does |
 |---|---|---|
-| **✓ Potvrdit** | `pxtune res confirm` | Změna zůstane, automatický návrat se zruší. |
-| **Vrátit hned** | `pxtune res reset` | Nečeká na odpočet, vrátí nativní rozlišení okamžitě. |
+| **✓ Confirm** | `pxtune res confirm` | The change stays, the automatic revert is cancelled. |
+| **Revert now** | `pxtune res reset` | Does not wait for the countdown, restores the native resolution immediately. |
 
-### Karta „Profil"
+### The "Profile" card
 
-| Prvek | Volá | Co udělá |
+| Element | Calls | What it does |
 |---|---|---|
-| Dlaždice profilů | `pxtune profile <name>` | Přepne profil a **nastaví `manual_override`**. |
-| **🤖 Auto** | `pxtune profile auto` | Zruší `manual_override` — profil zase řídí automat. |
-| **Démon: on/off** | `pxtune auto on` / `pxtune auto off` | Zapne/vypne adaptivního démona. **Viz sekci 6.** |
+| The profile tiles | `pxtune profile <name>` | Switches the profile and **sets `manual_override`**. |
+| **🤖 Auto** | `pxtune profile auto` | Clears `manual_override` — the daemon controls the profile again. |
+| **Daemon: on/off** | `pxtune auto on` / `pxtune auto off` | Starts/stops the adaptive daemon. **See section 6.** |
 
-Pozor na rozdíl: **🤖 Auto** vrací automatu *právo rozhodovat*, **Démon** zapíná/vypíná
-*samotný proces*. Jsou to dvě různé věci.
+Mind the difference: **🤖 Auto** gives the daemon back the *right to decide*,
+**Daemon** starts/stops the *process itself*. Those are two different things.
 
-### Karty pouze pro čtení
+### The read-only cards
 
-| Karta | Co ukazuje |
+| Card | What it shows |
 |---|---|
-| **CPU — přiškrcení** | Aktuální strop vs. HW maximum pro každý cluster. Dopočítáno ze stavu cooling device. |
-| **Teploty** | Hodnoty z thermal zón. |
-| **GPU (Mali)** | Frekvence, utilizace, power policy. |
-| **Paměť** | zram — velikost, algoritmus, obsazení. |
+| **CPU — throttling** | The current cap vs. the HW maximum for each cluster. Computed from the cooling device state. |
+| **Temperatures** | The values from the thermal zones. |
+| **GPU (Mali)** | Frequency, utilisation, power policy. |
+| **Memory** | zram — size, algorithm, occupancy. |
 
-### Karta „Baterie"
+### The "Battery" card
 
-Nahoře stav (kapacita, teplota, cykly, proud). Dole ovládání stropu nabíjení:
+At the top the state (capacity, temperature, cycles, current). At the bottom the
+charge cap control:
 
-| Prvek | Volá | Poznámka |
+| Element | Calls | Note |
 |---|---|---|
-| Posuvník | — | Rozsah **50–100 %, krok 5**. Samotné tažení nic nenastaví. |
-| **Nastavit** | `pxtune charge <hodnota>` | Aktivní až po pohnutí posuvníkem. |
-| **Vypnout limit (100 %)** | `pxtune charge off` | Zpět na stock. |
+| The slider | — | Range **50-100 %, step 5**. Dragging alone sets nothing. |
+| **Apply** | `pxtune charge <value>` | Active only after you move the slider. |
+| **Disable the limit (100 %)** | `pxtune charge off` | Back to stock. |
 
-CLI umí i hodnoty pod 50 (rozsah 1–100), WebUI posuvník je schválně užší.
+The CLI also accepts values below 50 (the range is 1-100); the WebUI slider is
+deliberately narrower.
 
-### Karta „Rozlišení"
+### The "Resolution" card
 
-| Prvek | Volá | Co udělá |
+| Element | Calls | What it does |
 |---|---|---|
-| Tlačítka presetů | `pxtune res <preset>` | Přepne rozlišení **a spustí 60s pojistku**. |
-| **⤺ Reset na nativní (1080 × 2400)** | `pxtune res reset` | Vrátí nativní rozlišení. **Nastaví přitom DPI na 420, ne na tvých 353** — viz sekci 7. |
+| The preset buttons | `pxtune res <preset>` | Switches the resolution **and starts the 60 s safeguard**. |
+| **⤺ Reset to native (1080 × 2400)** | `pxtune res reset` | Restores the native resolution. **It sets the DPI to 420, not to your 353** — see section 7. |
 
-Presety se berou ze `status --json`; když je JSON nepošle, WebUI zobrazí
-záložní trojici `1080p / 900p / 720p`. **Ta jména ale `pxtune` nezná** — CLI presety
-se jmenují `native`, `900x2000`, `810x1800`, `720x1600` (a přijímají i zkratky
-`900` / `810` / `720`). Kliknutí na fallback preset tedy skončí návratovým kódem 1.
-Viz TODO na konci.
+The presets come from `status --json`; when the JSON does not send them, the
+WebUI shows the fallback trio `1080p / 900p / 720p`. **`pxtune` does not know
+those names though** — the CLI presets are called `native`, `900x2000`,
+`810x1800`, `720x1600` (and they also accept the shorthands `900` / `810` /
+`720`). Clicking a fallback preset therefore ends with return code 1. See the
+TODO at the end.
 
-### Karta „Nebezpečná zóna"
+### The "Danger zone" card
 
-| Prvek | Volá | Co udělá |
+| Element | Calls | What it does |
 |---|---|---|
-| **↺ Vrátit vše na stock** | `pxtune revert` | Ptá se na potvrzení. Obnoví všechno z `backup/stock.conf` a zruší aktivní profil. |
+| **↺ Restore everything to stock** | `pxtune revert` | Asks for confirmation. Restores everything from `backup/stock.conf` and clears the active profile. |
 
-### Co ve WebUI NENÍ
+### What is NOT in the WebUI
 
-Zobrazovač logu a ovládání Game Mode. Obojí jen z CLI (`pxtune log`, `pxtune game`).
+A log viewer and Game Mode controls. Both are CLI-only (`pxtune log`,
+`pxtune game`).
 
 ---
 
-## 5. CLI — `pxtune`
+## 5. The CLI — `pxtune`
 
-`/data/adb/modules/pixel_tune/bin/pxtune`, POSIX sh, běží pod `/system/bin/sh`.
-**Všechny příkazy vyžadují root** (`su -c '...'`).
+`/data/adb/modules/pixel_tune/bin/pxtune`, POSIX sh, runs under
+`/system/bin/sh`. **All commands require root** (`su -c '...'`).
 
-### Přehled
+### Overview
 
-| Příkaz | Co dělá |
+| Command | What it does |
 |---|---|
-| `pxtune status` | Stav: aktivní profil, teploty, frekvence, uclamp, zram, nabíjení, `auto`, `res_pending`. |
-| `pxtune status --json` | Totéž jako validní JSON (parsuje WebUI). |
-| `pxtune profile list` | Seznam profilů. |
-| `pxtune profile current` | Jméno aktivního profilu. |
-| `pxtune profile <name>` | Přepne profil. **Nastaví `manual_override`.** |
-| `pxtune profile <name> --auto` | Totéž, ale **na `manual_override` nesahá** a když existuje, neudělá nic (kód 0). Tímhle přepíná profil démon; ručně to nepotřebuješ. |
-| `pxtune profile auto` | Zruší `manual_override`, vrátí řízení automatu. Pošle démonovi `SIGHUP`, aby stav přehodnotil hned. |
-| `pxtune revert` | Vrátí **VŠE** na stock z `backup/stock.conf`. |
-| `pxtune res` \| `res status` \| `res current` | Vypíše aktuální rozlišení, DPI a stav `res_pending`. |
-| `pxtune res list` | Vypíše presety. |
-| `pxtune res <preset>` | Přepne rozlišení + spustí 60s pojistku. |
-| `pxtune res confirm` | Potvrdí změnu, zruší pojistku. |
-| `pxtune res reset` | Slepý návrat na nativní 1080×2400 **@ 420 dpi**. |
-| `pxtune charge <1-100>` | Strop nabíjení v procentech. |
-| `pxtune charge off` | Zpět na 100 %. |
-| `pxtune game <package>` | Vypíše `list-modes` + `list-configs` daného balíčku. |
-| `pxtune game <package> <mode> [--fps N] [--downscale 0.3..0.9\|disable]` | Nastaví Game Mode. |
-| `pxtune auto on` \| `off` \| `status` | Adaptivní automat — zapíše stav do `auto` **a zároveň** spustí/zastaví démona (`pxtune-auto start`/`stop`). Viz sekci 6. |
-| `pxtune log [-n N]` | Posledních N řádků logu (výchozí 50). |
-| `pxtune selftest` | Ověří všechny cesty ze SPEC. |
-| `pxtune -v` | Verze. |
-| `pxtune -h` \| `--help` | Nápověda. |
+| `pxtune status` | The state: active profile, temperatures, frequencies, uclamp, zram, charging, `auto`, `res_pending`. |
+| `pxtune status --json` | The same as valid JSON (parsed by the WebUI). |
+| `pxtune profile list` | List the profiles. |
+| `pxtune profile current` | The name of the active profile. |
+| `pxtune profile <name>` | Switch profile. **Sets `manual_override`.** |
+| `pxtune profile <name> --auto` | The same, but **does not touch `manual_override`**, and when it exists, does nothing (code 0). This is how the daemon switches profiles; you do not need it by hand. |
+| `pxtune profile auto` | Clears `manual_override`, hands control back to the daemon. Sends the daemon `SIGHUP` so it re-evaluates the state at once. |
+| `pxtune revert` | Restores **EVERYTHING** to stock from `backup/stock.conf`. |
+| `pxtune res` \| `res status` \| `res current` | Prints the current resolution, DPI and the `res_pending` state. |
+| `pxtune res list` | Lists the presets. |
+| `pxtune res <preset>` | Switches the resolution + starts the 60 s safeguard. |
+| `pxtune res confirm` | Confirms the change, cancels the safeguard. |
+| `pxtune res reset` | A blind return to native 1080×2400 **@ 420 dpi**. |
+| `pxtune charge <1-100>` | The charge cap in percent. |
+| `pxtune charge off` | Back to 100 %. |
+| `pxtune game <package>` | Prints `list-modes` + `list-configs` for the given package. |
+| `pxtune game <package> <mode> [--fps N] [--downscale 0.3..0.9\|disable]` | Sets Game Mode. |
+| `pxtune auto on` \| `off` \| `status` | The adaptive daemon — writes the state into `auto` **and at the same time** starts/stops the daemon (`pxtune-auto start`/`stop`). See section 6. |
+| `pxtune log [-n N]` | The last N lines of the log (default 50). |
+| `pxtune selftest` | Verifies all the paths from the SPEC. |
+| `pxtune -v` | The version. |
+| `pxtune -h` \| `--help` | Help. |
 
-### Presety rozlišení
+### Resolution presets
 
-| Preset | Rozlišení | DPI |
+| Preset | Resolution | DPI |
 |---|---|---|
 | `native` | 1080 × 2400 | **420** |
 | `900x2000` | 900 × 2000 | 350 |
 | `810x1800` | 810 × 1800 | 315 |
 | `720x1600` | 720 × 1600 | 280 |
 
-To jsou jména, která vypíše `pxtune res list`. Preset lze ale zadat i jen samotnou
-šířkou — `pxtune res 900`, `810`, `720` fungují taky.
-`native` se aplikuje **bez pojistky** (není proti čemu se jistit).
+Those are the names `pxtune res list` prints. A preset can also be given by width
+alone though — `pxtune res 900`, `810`, `720` work too.
+`native` is applied **without a safeguard** (there is nothing to guard against).
 
-### Režimy Game Mode
+### Game Mode modes
 
-| Hodnota | Význam |
+| Value | Meaning |
 |---|---|
-| `1` / `standard` | Standardní |
-| `2` / `performance` | Výkon |
-| `3` / `battery` | Baterie |
-| `4` / `custom` | Vlastní (kombinuje se s `--downscale` / `--fps`) |
+| `1` / `standard` | Standard |
+| `2` / `performance` | Performance |
+| `3` / `battery` | Battery |
+| `4` / `custom` | Custom (combined with `--downscale` / `--fps`) |
 
-### Návratové kódy
+### Return codes
 
-| Kód | Význam |
+| Code | Meaning |
 |---|---|
 | `0` | OK |
-| `1` | Chyba argumentů (neznámý příkaz, neznámý profil/preset, hodnota mimo rozsah) |
-| `2` | Chyba běhu (zápis selhal, chybí `settings`/`cmd`, selftest našel chybějící cesty) |
+| `1` | An argument error (unknown command, unknown profile/preset, a value out of range) |
+| `2` | A runtime error (a write failed, `settings`/`cmd` is missing, the selftest found missing paths) |
 
-`pxtune profile <name>` vrátí **2**, i když se aplikoval, ale aspoň jeden zápis selhal.
-Kolik zápisů prošlo a kolik ne, ti vypíše přímo na konci.
+`pxtune profile <name>` returns **2** even when it was applied but at least one
+write failed. How many writes went through and how many did not is printed right
+at the end.
 
-### Jak se zapisuje
+### How writing works
 
-Každý zápis do sysfs jde přes jednu funkci `wr <cesta> <hodnota>`, která:
+Every write into sysfs goes through a single function `wr <path> <value>`, which:
 
-1. ověří existenci cesty,
-2. ověří zapisovatelnost,
-3. zaloguje `stará → nová` hodnota,
-4. **při chybě pokračuje dál** — jeden nezapsatelný node nikdy neshodí skript.
+1. verifies that the path exists,
+2. verifies that it is writable,
+3. logs the `old → new` value,
+4. **carries on after an error** — one unwritable node never takes the script
+   down.
 
-Takže když se ti zdá, že se něco neaplikovalo, **odpověď je vždycky v logu**:
+So when it seems something was not applied, **the answer is always in the log**:
 
 ```sh
 su -c 'pxtune log -n 50'
 ```
 
-### Log
+### The log
 
-`/data/adb/pixel_tune/pxtune.log`, formát `[YYYY-MM-DD HH:MM:SS] [úroveň] zpráva`.
-Rotuje při **512 kB** — starý se přejmenuje na `pxtune.log.old`. Historii tedy máš
-maximálně dva soubory zpátky.
+`/data/adb/pixel_tune/pxtune.log`, in the format
+`[YYYY-MM-DD HH:MM:SS] [level] message`. It rotates at **512 kB** — the old one
+is renamed to `pxtune.log.old`. You therefore have at most two files of history.
 
 ---
 
-## 6. Adaptivní automat
+## 6. The adaptive daemon
 
-### Jak je postavený
+### How it is built
 
-`bin/pxtune-auto` **existuje a je funkční.** Zdroj pravdy o zapnutí je jediný soubor
-`/data/adb/pixel_tune/auto` — čte ho CLI, `service.sh` i sám démon.
+`bin/pxtune-auto` **exists and works.** The single source of truth about it being
+enabled is the file `/data/adb/pixel_tune/auto` — the CLI, `service.sh` and the
+daemon itself all read it.
 
-Klíčová vlastnost návrhu: **žádný polling.** Démon visí zablokovaný na `read()`
-z pojmenované roury a mezi událostmi **vůbec neběží**. Události bere z binárního
-event bufferu logd (`logcat -b events`), ne z accessibility služby:
+The key property of the design: **no polling.** The daemon hangs blocked on a
+`read()` from a named pipe and **does not run at all** between events. It takes
+the events from logd's binary event buffer (`logcat -b events`), not from an
+accessibility service:
 
-| Událost | Tag | K čemu |
+| Event | Tag | What for |
 |---|---|---|
-| Změna aplikace v popředí | `wm_resume_activity` | klasifikace zátěže |
-| Zhasnutí/rozsvícení displeje | `power_screen_state` | přepnutí do/z `night` |
+| A foreground app change | `wm_resume_activity` | load classification |
+| The display going off/on | `power_screen_state` | switching into/out of `night` |
 
-Jméno tagu pro popředí si démon **zjišťuje za běhu** z `/system/etc/event-log-tags` —
-od Androidu R se jmenuje `wm_resume_activity`, starší `am_resume_activity` na A16 už
-neexistuje.
+The daemon **looks the foreground tag name up at runtime** in
+`/system/etc/event-log-tags` — since Android R it is called
+`wm_resume_activity`; the older `am_resume_activity` no longer exists on A16.
 
-### Jak rozhoduje
+### How it decides
 
-Démon si o každé aplikaci vede statistiku v `appstats`: vzorkuje CPU čas hlavního
-procesu (`/proc/<pid>/stat`) a počítá EWMA v procentech **jednoho** jádra.
+The daemon keeps statistics about every app in `appstats`: it samples the CPU
+time of the main process (`/proc/<pid>/stat`) and computes an EWMA in percent of
+**one** core.
 
-| Třída | Podmínka | Profil |
+| Class | Condition | Profile |
 |---|---|---|
-| `game` | CPU ≥ 150 % **a zároveň** průměrná relace ≥ 90 s | `game` |
+| `game` | CPU ≥ 150 % **and at the same time** an average session ≥ 90 s | `game` |
 | `heavy` | CPU ≥ 80 % | `performance` |
 | `normal` | CPU ≥ 20 % | `balanced` |
-| `light` | zbytek | `powersave` |
+| `light` | the rest | `powersave` |
 
-Nad tím leží dvě tvrdší pravidla:
+Two harder rules sit on top of that:
 
-- **Zhasnutý displej ⇒ vždy `night`**, bez ohledu na klasifikaci.
-- **Skin ≥ 43,0 °C ⇒ dočasně `powersave`.** Uvolní se až při ≤ 41,0 °C (2 °C hystereze)
-  a nejdřív po 120 s. Práh je schválně **nad** naměřeným ustáleným stavem (skin 40,5 °C
-  při plné zátěži 9 jader) — jinak by automat sepnul při každé normální zátěži.
+- **A screen that is off ⇒ always `night`**, regardless of the classification.
+- **Skin ≥ 43.0 °C ⇒ temporarily `powersave`.** It is released only at ≤ 41.0 °C
+  (2 °C of hysteresis) and no sooner than after 120 s. The threshold is
+  deliberately **above** the measured steady state (a skin of 40.5 °C at full load
+  on 9 cores) — otherwise the daemon would trip on every normal load.
 
-Klasifikaci lze ručně přebít v `appstats.override` (`<balíček> <třída>`), konstanty
-lze přepsat v `auto.conf`.
+The classification can be overridden by hand in `appstats.override`
+(`<package> <class>`), and the constants can be overridden in `auto.conf`.
 
-### Dopad na baterii — konkrétně
+### The effect on battery — concretely
 
-Tohle je to podstatné a je to naměřitelné z návrhu:
+This is the important part and it follows from the design:
 
-- **Mezi událostmi démon nespotřebuje nic.** Blokovaný `read()` není wakeup.
-- **Jediný časovač v celém démonu je „tikař" s periodou 30 s** — a ten se zapíná
-  **jen** když svítí displej **a zároveň** běží `game`/`heavy` aplikace, nebo je horko,
-  nebo čeká odložené přepnutí. **Při zhasnutém displeji se okamžitě zabíjí, takže
-  v suspendu neexistuje žádný budík.**
-- Anti-flapping: profil se nepřepne častěji než jednou za **30 s**. To je schválně
-  víc než 7sekundová regulační perioda thermal HALu — automat mu nemá skákat do řízení.
-- Vzorkování se u aplikace zastaví po **20 vzorcích** (EWMA je dávno usazená), takže
-  dlouhodobě ubývá i těch pár forků.
+- **Between events the daemon consumes nothing.** A blocked `read()` is not a
+  wakeup.
+- **The only timer in the whole daemon is a "ticker" with a 30 s period** — and it
+  is enabled **only** when the display is on **and at the same time** a
+  `game`/`heavy` app is running, or it is hot, or a postponed switch is pending.
+  **When the display goes off it is killed immediately, so there is no alarm at
+  all during suspend.**
+- Anti-flapping: the profile is never switched more often than once every **30 s**.
+  That is deliberately more than the thermal HAL's 7-second control period — the
+  daemon should not cut across its control.
+- Sampling of an app stops after **20 samples** (the EWMA has long settled), so
+  even those few forks diminish over time.
 
-### Jak s ním zacházet
+### How to work with it
 
 ```sh
-su -c 'pxtune auto status'    # on / off (chybějící soubor = "on")
-su -c 'pxtune auto off'       # vypnout
-su -c 'pxtune auto on'        # zapnout
+su -c 'pxtune auto status'    # on / off (a missing file = "on")
+su -c 'pxtune auto off'       # disable
+su -c 'pxtune auto on'        # enable
 ```
 
-### Manuální override
+### The manual override
 
-Když přepneš profil ručně (`pxtune profile <name>` nebo dlaždice ve WebUI),
-vytvoří se `/data/adb/pixel_tune/manual_override` a **automat přestane profil měnit**.
-Tvoje volba drží, dokud neřekneš jinak.
+When you switch the profile by hand (`pxtune profile <name>` or a tile in the
+WebUI), `/data/adb/pixel_tune/manual_override` is created and **the daemon stops
+changing the profile**. Your choice holds until you say otherwise.
 
-Vrátit řízení automatu:
+To hand control back to the daemon:
 
 ```sh
 su -c 'pxtune profile auto'
 ```
 
-`pxtune auto off` **zakáže automatu přepínat**; `pxtune profile auto` **mu vrátí právo
-rozhodovat**. To jsou dvě různé věci a WebUI je má jako dvě různá tlačítka.
+`pxtune auto off` **forbids the daemon to switch**; `pxtune profile auto` **gives
+it back the right to decide**. Those are two different things and the WebUI has
+them as two different buttons.
 
-Přesně vzato: `pxtune auto on|off` jen přepíše soubor `/data/adb/pixel_tune/auto`.
-Démon si ho čte před každým přepnutím, takže při `off` dál pozoruje, ale nic nemění —
-**proces ale běží dál.** Když ho chceš opravdu ukončit (nebo naopak nastartovat, aniž
-bys rebootoval), použij přímo jeho binárku:
+Strictly speaking: `pxtune auto on|off` only rewrites the file
+`/data/adb/pixel_tune/auto`. The daemon reads it before every switch, so with
+`off` it keeps observing but changes nothing — **the process however keeps
+running.** When you want to really stop it (or conversely start it without
+rebooting), use its binary directly:
 
 ```sh
 su -c '/data/adb/modules/pixel_tune/bin/pxtune-auto status'
@@ -695,145 +750,158 @@ su -c '/data/adb/modules/pixel_tune/bin/pxtune-auto stop'
 su -c '/data/adb/modules/pixel_tune/bin/pxtune-auto start'
 ```
 
-Démon se jinak startuje **jen při bootu**, z `service.sh`, podle obsahu souboru `auto`
-(chybějící soubor = zapnuto).
+Otherwise the daemon is started **only at boot**, from `service.sh`, according to
+the contents of the `auto` file (a missing file = enabled).
 
-Ještě jedna drobnost: `pxtune profile auto` démonovi **neposílá SIGHUP**, takže stav
-nepřehodnotí okamžitě — udělá to až při nejbližší události (přepnutí aplikace,
-zhasnutí displeje) nebo tiku.
+One more detail: `pxtune profile auto` **does not send the daemon SIGHUP**, so it
+does not re-evaluate the state immediately — it does so at the next event (an app
+switch, the display going off) or at a tick.
 
-Pěkný detail: `service.sh` při bootu aplikuje uložený profil, ale **`manual_override`
-si předtím zapamatuje a po aplikaci obnoví do původního stavu.** Bez toho by tě
-každý reboot přehodil do ručního režimu — protože `pxtune profile <name>` ten příznak
-z definice nastavuje.
+A nice detail: at boot `service.sh` applies the stored profile, but **remembers
+`manual_override` beforehand and restores it to its original state afterwards.**
+Without that, every reboot would throw you into manual mode — because
+`pxtune profile <name>` sets that flag by definition.
 
-### Kamera
+### The camera
 
-Systém si prop `vendor.thermal.<SENZOR>.profile` **nastavuje sám** — při měření byl
-už na `camera`, protože běžela kamera. Automat s tím počítá: dokud je prop na `camera`,
-**přepnutí profilu odloží** a napíše to do logu.
+The system sets the `vendor.thermal.<SENSOR>.profile` prop **by itself** — during
+the measurement it was already on `camera`, because the camera was running. The
+daemon accounts for that: while the prop is on `camera`, it **postpones the
+profile switch** and writes that into the log.
 
-Pojistka pro opačný případ: prop na `camera` může **zůstat viset** i po zavření
-fotoaparátu (přesně to se při měření stalo). Kdyby v tom stavu vydržel déle než
-**600 s**, démon ho začne ignorovat a přepíná dál — jinak by se sám natrvalo umlčel.
+A safeguard for the opposite case: the prop can **stay stuck** on `camera` even
+after the camera app is closed (which is exactly what happened during the
+measurement). Should it stay that way for longer than **600 s**, the daemon
+starts ignoring it and switches anyway — otherwise it would silence itself
+permanently.
 
-Když ti automat přesto dělá vylomeniny při focení, `pxtune auto off` je legitimní
-odpověď.
+If the daemon still misbehaves while you take photos, `pxtune auto off` is a
+legitimate answer.
 
-### Proč automat neovládá cooling devices
+### Why the daemon does not control the cooling devices
 
-**Cooling devices přepisuje thermal HAL zhruba každých 7 sekund.** Kdyby je chtěl
-automat používat jako *páku* (a ne jen ke čtení), musel by běžet ve smyčce rychlejší
-než 7 s — a taková smyčka baterii měřitelně žere, čímž by padla celá bezpollingová
-konstrukce popsaná výš. Přesně proto se cooling devices v pixel_tune používají
-**výhradně ke čtení** a ovládá se přes uclamp, které thermal HAL nepřepisuje
-a watchdog nevyžaduje.
+**The thermal HAL rewrites the cooling devices roughly every 7 seconds.** If the
+daemon wanted to use them as a *lever* (and not just to read), it would have to
+run in a loop faster than 7 s — and such a loop measurably eats the battery,
+which would defeat the whole no-polling construction described above. That is
+precisely why the cooling devices are used in pixel_tune **for reading only**,
+and control goes through uclamp, which the thermal HAL does not overwrite and
+which needs no watchdog.
 
-**Praktické doporučení:** jestli chceš hlavně výdrž a jsi ochotný si profil přepnout
-ručně, **automat můžeš nechat vypnutý**. Ruční profil + `manual_override` má **nulovou
-režii** — zapíše se jednou a dál nic neběží. Automat má smysl tehdy, když ti vadí
-na profily myslet, nebo když chceš teplotní pojistku na 43 °C.
+**A practical recommendation:** if what you mainly want is battery life and you
+are willing to switch profiles by hand, **you can leave the daemon off**. A
+manual profile + `manual_override` has **zero overhead** — it is written once and
+nothing runs afterwards. The daemon makes sense when you do not want to think
+about profiles, or when you want the 43 °C thermal safeguard.
 
-> TODO: **dopad automatu na výdrž není změřený.** Z návrhu plyne, že je malý
-> (žádný polling, tikař 30 s jen při rozsvíceném displeji u náročné aplikace),
-> ale srovnávací měření výdrže s démonem a bez něj zatím nikdo neudělal.
+> TODO: **the daemon's effect on battery life is not measured.** From the design
+> it follows that it is small (no polling, a 30 s ticker only with the display on
+> and a demanding app), but nobody has yet done a comparative battery measurement
+> with and without it.
 
 ---
 
-## 7. Rozlišení displeje
+## 7. Display resolution
 
-> **Přečti si celou tuhle sekci PŘEDTÍM, než rozlišení poprvé změníš.**
-> Je to jediná věc v modulu, která tě může nechat koukat na nepoužitelnou obrazovku.
+> **Read this whole section BEFORE you change the resolution for the first
+> time.** It is the one thing in the module that can leave you staring at an
+> unusable screen.
 
-### Výchozí stav
+### The default state
 
-| Věc | Hodnota |
+| Thing | Value |
 |---|---|
-| Fyzický panel | 1080 × 2400 |
+| The physical panel | 1080 × 2400 |
 | `ro.sf.lcd_density` | 420 |
-| **Tvůj aktuální override density** | **353** |
-| `settings global display_size_forced` | **prázdné** |
+| **Your current density override** | **353** |
+| `settings global display_size_forced` | **empty** |
 | `settings secure display_density_forced` | **353** |
-| Obnovovací frekvence | adaptivní 60–120 Hz, mode 2 = 120 Hz |
+| Refresh rate | adaptive 60-120 Hz, mode 2 = 120 Hz |
 
-### ⚠ Číslo 353 vs. 420 — tohle je ta záludnost
+### ⚠ The number 353 vs. 420 — this is the catch
 
-Tvůj telefon má vlastní override hustoty **353**. Firmware hodnota je 420.
+Your phone has its own density override of **353**. The firmware value is 420.
 
-**`pxtune res reset` (i preset `native`, i 60sekundová pojistka, i tlačítko „Vrátit hned")
-nastaví DPI na 420, ne na 353.** Vrátí ti tedy správné *rozlišení*, ale **jiné DPI,
-než jsi měl** — všechno bude o něco menší.
+**`pxtune res reset` (and the `native` preset, and the 60-second safeguard, and
+the "Revert now" button) sets the DPI to 420, not to 353.** So it gives you back
+the right *resolution*, but **a different DPI than you had** — everything will be
+a bit smaller.
 
-Tvých 353 ti vrátí:
+Your 353 is restored by:
 
-- `pxtune revert` (bere hodnotu z `backup/stock.conf`), nebo
-- ruční `settings put secure display_density_forced 353`.
+- `pxtune revert` (it takes the value from `backup/stock.conf`), or
+- a manual `settings put secure display_density_forced 353`.
 
-**Pravidlo: `res reset` použij, když nevidíš. `revert` použij, když chceš přesně
-původní stav.**
+**The rule: use `res reset` when you cannot see. Use `revert` when you want
+exactly the original state.**
 
-### Jak rozlišení změnit
+### How to change the resolution
 
 ```sh
-su -c 'pxtune res list'      # vypíše presety
+su -c 'pxtune res list'      # lists the presets
 su -c 'pxtune res 900'       # 900 × 2000 @ 350 dpi
 ```
 
-| Preset | Rozlišení | DPI |
+| Preset | Resolution | DPI |
 |---|---|---|
 | `native` | 1080 × 2400 | 420 |
-| `900x2000` (nebo `900`) | 900 × 2000 | 350 |
-| `810x1800` (nebo `810`) | 810 × 1800 | 315 |
-| `720x1600` (nebo `720`) | 720 × 1600 | 280 |
+| `900x2000` (or `900`) | 900 × 2000 | 350 |
+| `810x1800` (or `810`) | 810 × 1800 | 315 |
+| `720x1600` (or `720`) | 720 × 1600 | 280 |
 
-Perzistence jde přes systémová nastavení, ne přes zásah do `/system`:
+Persistence goes through the system settings, not through a change to `/system`:
 
 ```sh
 settings put global display_size_forced "<W>,<H>"
 settings put secure display_density_forced <dpi>
 ```
 
-### 60sekundová pojistka — jak funguje
+### The 60-second safeguard — how it works
 
-1. `pxtune res <preset>` změní rozlišení **a zároveň** vytvoří `res_pending`
-   s jednorázovým tokenem.
-2. Na pozadí se spustí watchdog, který **za 60 sekund vrátí nativní rozlišení**.
-3. Když do 60 s potvrdíš:
+1. `pxtune res <preset>` changes the resolution **and at the same time** creates
+   `res_pending` with a one-off token.
+2. A watchdog starts in the background that **restores the native resolution
+   after 60 seconds**.
+3. When you confirm within 60 s:
 
    ```sh
    su -c 'pxtune res confirm'
    ```
 
-   `res_pending` zmizí, watchdog při probuzení zjistí, že jeho token už neplatí,
-   a **nic neudělá**. Změna zůstane.
-4. **Když nepotvrdíš** — protože nevidíš na displej nebo se ti UI rozsypalo —
-   po 60 sekundách se rozlišení **samo vrátí na 1080×2400 @ 420 dpi**.
-   Nemusíš dělat nic. Jen počkat minutu.
+   `res_pending` disappears, the watchdog wakes up, finds its token is no longer
+   valid and **does nothing**. The change stays.
+4. **When you do not confirm** — because you cannot see the display or the UI
+   fell apart — after 60 seconds the resolution **returns to 1080×2400 @ 420 dpi
+   by itself**. You do not have to do anything. Just wait a minute.
 
-Celý trik je: **když si nejsi jistý, nepotvrzuj.** Neúspěch se sám vyléčí.
+The whole trick is: **when you are not sure, do not confirm.** A failure heals
+itself.
 
-Preset `native` pojistku nespouští — není proti čemu se jistit.
+The `native` preset does not start the safeguard — there is nothing to guard
+against.
 
-### Vrácení naslepo přes ADB (když UI nevidíš)
+### A blind restore over ADB (when you cannot see the UI)
 
-Připoj telefon USB kabelem k počítači s `adb` a piš naslepo.
+Connect the phone to a computer with `adb` over USB and type blind.
 
-**Krok 0 — počkej minutu.** Vážně. Pokud jsi změnu nepotvrdil, pojistka to vyřeší sama.
+**Step 0 — wait a minute.** Seriously. If you did not confirm the change, the
+safeguard solves it by itself.
 
-**Krok 1 — nejjednodušší cesta, žádný root:**
+**Step 1 — the simplest route, no root:**
 
 ```sh
 adb shell wm size reset
 adb shell settings put secure display_density_forced 353
 ```
 
-První řádek zruší vynucené rozlišení. Druhý vrátí **tvoji** hustotu 353.
-Tyhle příkazy **nevyžadují root** — projdou z běžného `adb shell`, takže nemusíš
-na displeji odklikávat žádnou root výzvu (což bys stejně neviděl).
+The first line cancels the forced resolution. The second restores **your** density
+of 353. These commands **do not require root** — they work from an ordinary
+`adb shell`, so you do not have to tap through any root prompt on the display
+(which you would not see anyway).
 
-**`wm density reset` NEPOUŽÍVEJ** — vrátil by 420, ne tvých 353.
+**DO NOT USE `wm density reset`** — it would restore 420, not your 353.
 
-**Krok 2 — když to nestačilo, vyčisti perzistentní override přímo:**
+**Step 2 — when that was not enough, clear the persistent override directly:**
 
 ```sh
 adb shell settings delete global display_size_forced
@@ -841,105 +909,114 @@ adb shell settings put secure display_density_forced 353
 adb reboot
 ```
 
-**Krok 3 — nouzová brzda:**
+**Step 3 — the emergency brake:**
 
 ```sh
 adb reboot
 ```
 
-a při startu **drž Volume Down** → KernelSU safe mode → všechny moduly vypnuté.
-Pak vyřeš zbytek z klidného stavu.
+and **hold Volume Down** during startup → KernelSU safe mode → all modules
+disabled. Then sort the rest out from a calm state.
 
-> **Upozornění k `adb shell su -c '...'`:** KernelSU má pro root allowlist a shell
-> v něm ve výchozím stavu být nemusí. Když si `su` z ADB vyžádá schválení, musíš ho
-> odklikat **na displeji** — což je přesně to, co v tomhle scénáři nemůžeš.
-> Proto jsou kroky 1 a 2 schválně napsané tak, aby root **nepotřebovaly**.
+> **A warning about `adb shell su -c '...'`:** KernelSU has an allowlist for root
+> and the shell need not be on it by default. When `su` from ADB asks for
+> approval, you have to tap it **on the display** — which is exactly what you
+> cannot do in this scenario. That is why steps 1 and 2 are deliberately written
+> so that they do **not need** root.
 
-### Poctivě: snížení rozlišení ti mimo hry pravděpodobně nic nepřinese
+### Honestly: outside games, lowering the resolution will probably gain you nothing
 
-Tohle je nejčastější mýtus a je fér ho rozbít.
+This is the most common myth and it is fair to break it.
 
-V naměřeném zátěžovém testu — **150 sekund plné zátěže CPU na všech 9 jádrech** —
-zůstal **`cdev_gpu` (`cooling_device24`, `thermal-gpufreq-0`) celou dobu na hodnotě 0.**
-Ani jednou. To znamená, že **GPU nebyla během celého testu ani na okamžik termálně
-přiškrcená.**
+In the measured load test — **150 seconds of full CPU load on all 9 cores** —
+**`cdev_gpu` (`cooling_device24`, `thermal-gpufreq-0`) stayed at 0 the whole
+time.** Not once did it move. That means **the GPU was not thermally throttled
+for a single moment during the entire test.**
 
-Závěr: **GPU není na tomhle telefonu teplotní úzké hrdlo pro ne-herní zátěž.**
-Když GPU není to, co telefon brzdí ani hřeje, ubráním pixelů, které má vykreslit,
-si nic nekoupíš. Čekej, že úspora bude **neměřitelná**, zatímco obraz bude o poznání
-horší. Zdrojem tepla i brzdy jsou tady CPU clustery — v tomtéž testu spadl strop na
-Little ~1036 MHz (61 % HW maxima), Big 910 MHz (38 %) a Prime 1164 MHz (40 %).
+The conclusion: **the GPU is not the thermal bottleneck on this phone for
+non-gaming loads.** When the GPU is not what slows the phone down or heats it up,
+taking pixels away from it buys you nothing. Expect the saving to be
+**unmeasurable**, while the image will be noticeably worse. The source of both
+heat and the brake here are the CPU clusters — in the same test the cap dropped
+to Little ~1036 MHz (61 % of the HW maximum), Big 910 MHz (38 %) and Prime
+1164 MHz (40 %).
 
-**Pro hry je to jinak — a na hry je lepší nástroj Android Game Mode.**
-Ten škáluje rozlišení **per-app**, takže si nekazíš systémové UI ani ostatní aplikace:
+**For games it is different — and for games, Android Game Mode is the better
+tool.** It scales the resolution **per app**, so you do not spoil the system UI or
+other apps:
 
 ```sh
-su -c 'pxtune game com.priklad.hra custom --downscale 0.7 --fps 60'
-su -c 'pxtune game com.priklad.hra battery'
-su -c 'pxtune game com.priklad.hra'          # vypíše aktuální režimy a konfigy
+su -c 'pxtune game com.example.game custom --downscale 0.7 --fps 60'
+su -c 'pxtune game com.example.game battery'
+su -c 'pxtune game com.example.game'          # prints the current modes and configs
 ```
 
-Je to systémová funkce, zdarma, bez hacků. **Globální snížení rozlišení kvůli jedné
-hře nedává smysl.**
+It is a system feature, free, with no hacks. **Lowering the global resolution
+because of one game makes no sense.**
 
 ### Refresh rate
 
-Modul obnovovací frekvenci **globálně nesnižuje** a nebude. Viz sekci 9.
+The module **does not lower the refresh rate globally** and will not. See
+section 9.
 
 ---
 
-## 8. Nabíjení
+## 8. Charging
 
-Tvoje baterie má **602 nabíjecích cyklů**. To už je slušný nájezd a je to hlavní
-důvod, proč tahle funkce v modulu je.
+Your battery has **602 charge cycles**. That is a decent mileage and it is the
+main reason this feature is in the module.
 
-### Omezení stropu
+### Limiting the cap
 
 ```sh
-su -c 'pxtune charge 80'     # nabíjet jen do 80 %
-su -c 'pxtune charge off'    # zpět na 100 %
+su -c 'pxtune charge 80'     # charge only to 80 %
+su -c 'pxtune charge off'    # back to 100 %
 ```
 
-Zapisuje se do `/sys/devices/platform/google,charger/charge_stop_level`.
-Ten node má práva `0660 system:system`, ale **root do něj zapsat může** —
-ověřeno zápisem `80` a návratem na `100`.
+It is written into
+`/sys/devices/platform/google,charger/charge_stop_level`. That node has
+permissions `0660 system:system`, but **root can write to it** — verified by
+writing `80` and returning to `100`.
 
-Ve WebUI je posuvník **50–100 %, krok 5**. CLI bere celý rozsah 1–100.
+In the WebUI the slider is **50-100 %, step 5**. The CLI takes the whole 1-100
+range.
 
-Nebo přes profil — **`night` to dělá sám**:
+Or through a profile — **`night` does it by itself**:
 
 ```sh
 CHARGE_STOP_LEVEL="80"
 ```
 
-Pozor: **profil ti strop nastaví znovu při každém přepnutí.** Když si dáš
-`pxtune charge off` a pak přepneš na `night`, bude zase 80.
+Careful: **a profile sets the cap again on every switch.** If you run
+`pxtune charge off` and then switch to `night`, it will be 80 again.
 
-### Proč to dělat
+### Why do it
 
-Lithiové články stárnou rychleji, když se drží na vysokém napětí. Držet telefon
-v pásmu okolo 80 % místo 100 % zpomaluje degradaci kapacity. Užitečné hlavně tehdy,
-když telefon **nabíjíš přes noc** nebo ho máš dlouho v dokovací stanici — tam se to
-jinak celé hodiny drží na 100 %. Přesně proto je 80 % v profilu `night` a nikde jinde.
+Lithium cells age faster when held at a high voltage. Keeping the phone in a band
+around 80 % instead of 100 % slows the degradation of capacity. It is useful
+above all when you **charge the phone overnight** or keep it in a dock for a long
+time — otherwise it sits at 100 % for hours. That is exactly why 80 % is in the
+`night` profile and nowhere else.
 
-Cena je přímočará: **strop 80 % znamená, že máš k dispozici 80 % kapacity.**
-Když víš, že tě čeká dlouhý den, dej `pxtune charge off`.
+The price is straightforward: **a cap of 80 % means you have 80 % of the capacity
+available.** When you know a long day is ahead, run `pxtune charge off`.
 
-### Související stock hodnoty
+### Related stock values
 
-| Node | Stock | Poznámka |
+| Node | Stock | Note |
 |---|---|---|
-| `charge_stop_level` | 100 | Tohle měníme. |
-| `charge_start_level` | 0 | Kdy začít znovu nabíjet. Profily na to nesahají (`revert` ho vrací). |
-| `bd_trigger_temp` | 350 | Battery-defender: teplotní práh (35,0 °C). |
-| `bd_trigger_time` | 21600 | 6 hodin. |
+| `charge_stop_level` | 100 | This is what we change. |
+| `charge_start_level` | 0 | When to start charging again. The profiles do not touch it (`revert` does restore it). |
+| `bd_trigger_temp` | 350 | Battery Defender: the temperature threshold (35.0 °C). |
+| `bd_trigger_time` | 21600 | 6 hours. |
 | `bd_recharge_soc` | 79 | |
 | `bd_temp_enable` | 1 | |
 
-Google už má vlastní „battery defender", který dlouhé nabíjení na 100 % částečně
-řeší sám. `pxtune charge` je explicitnější a tvrdší varianta téhož.
+Google already has its own "battery defender", which partly handles long charging
+at 100 % by itself. `pxtune charge` is a more explicit and harder variant of the
+same thing.
 
-### Čtení stavu baterie
+### Reading the battery state
 
 ```
 /sys/class/power_supply/battery/capacity      # %
@@ -951,485 +1028,524 @@ Google už má vlastní „battery defender", který dlouhé nabíjení na 100 %
 
 ---
 
-## 9. Co to NEDĚLÁ a proč
+## 9. What it does NOT do, and why
 
-Tahle sekce je stejně důležitá jako všechny předchozí. Většina „kernel tuning" modulů
-slibuje věci, které na Tensoru **fyzicky nejdou** nebo jsou aktivně škodlivé.
+This section is as important as all the previous ones. Most "kernel tuning"
+modules promise things that on Tensor are **physically impossible** or actively
+harmful.
 
-### Žádný undervolting
+### No undervolting
 
-Na Tensoru řídí napětí **ACPM firmware**. **Kernel k tomu nemá přístup.**
-Neexistuje sysfs node, do kterého by šlo napětí zapsat.
+On Tensor, voltage is controlled by the **ACPM firmware**. **The kernel has no
+access to it.** There is no sysfs node a voltage could be written to.
 
-Jakýkoli modul, který ti na tomhle SoC slibuje undervolting, buď lže, nebo mění něco
-jiného a říká tomu undervolting. `pixel_tune` to nedělá a dělat nebude.
+Any module that promises you undervolting on this SoC is either lying or changing
+something else and calling it undervolting. `pixel_tune` does not do it and will
+not.
 
-### `scaling_max_freq` se nenastavuje — protože nejde
+### `scaling_max_freq` is not set — because it cannot be
 
-`/sys/devices/system/cpu/cpufreq/policy*/scaling_max_freq` má práva **0444**.
-To je read-only **i pro root**. Ověřeno.
+`/sys/devices/system/cpu/cpufreq/policy*/scaling_max_freq` has permissions
+**0444**. That is read-only **even for root**. Verified.
 
-Proto se stropy CPU řeší přes **uclamp**, ne přes frekvence. Je to nepřímější páka
-(omezuješ požadovanou utilizaci, ne frekvenci), ale je to jediná, která funguje
-a kterou nikdo nepřepisuje.
+That is why CPU caps are handled through **uclamp** rather than through
+frequencies. It is a more indirect lever (you limit the requested utilisation,
+not the frequency), but it is the only one that works and that nobody overwrites.
 
-Číst z cpufreq lze normálně: `scaling_cur_freq`, `scaling_max_freq`,
+Reading from cpufreq works normally: `scaling_cur_freq`, `scaling_max_freq`,
 `stats/time_in_state`, `stats/trans_table`.
 
-### Cooling devices se nepoužívají jako páka
+### Cooling devices are not used as a lever
 
-`/sys/class/thermal/cooling_deviceN/cur_state` sice **zapisovatelné je** (0644), ale
-vlastníkem je thermal HAL a ten **hodnoty přepisuje zhruba každých 7 sekund**.
-Držet je proti němu by znamenalo watcher smyčku rychlejší než 7 s — a to žere baterii.
+`/sys/class/thermal/cooling_deviceN/cur_state` **is** writable (0644), but its
+owner is the thermal HAL and it **overwrites the values roughly every 7 seconds**.
+Holding them against it would mean a watcher loop faster than 7 s — and that eats
+battery.
 
-Modul je používá **jen ke čtení**, aby ti ukázal aktuální throttling:
+The module uses them **for reading only**, to show you the current throttling:
 
-| Typ | max_state | Cluster | Index při jednom bootu |
+| Type | max_state | Cluster | The index during one boot |
 |---|---|---|---|
 | `thermal-cpufreq-0` | 9 | policy0 (Little, 4×A510) | `cooling_device8` |
 | `thermal-cpufreq-1` | 14 | policy4 (Big, 4×A715) | `cooling_device10` |
 | `thermal-cpufreq-2` | 14 | policy8 (Prime, 1×X3) | `cooling_device12` |
 | `thermal-gpufreq-0` | 12 | GPU | `cooling_device24` |
 
-> **Poslední sloupec neber jako platné číslo.** Číselné indexy `cooling_deviceN`
-> **nejsou stabilní přes reboot** — podrobně v sekci 11. `pxtune` si je proto
-> dohledává za běhu podle pole `type`.
+> **Do not take the last column as a valid number.** The numeric
+> `cooling_deviceN` indices **are not stable across a reboot** — details in
+> section 11. `pxtune` therefore looks them up at runtime by the `type` field.
 
-Převod na frekvenci: `cur_state = N` ⇒ strop je frekvence na indexu
-`(počet_frekvencí − 1 − N)` ve vzestupném seznamu frekvencí daného clusteru.
-Příklad pro policy8 (15 frekvencí): `cur_state=2` ⇒ index 12 ⇒ 2687000 kHz;
+The conversion to a frequency: `cur_state = N` ⇒ the cap is the frequency at
+index `(frequency_count − 1 − N)` in the ascending frequency list of that cluster.
+An example for policy8 (15 frequencies): `cur_state=2` ⇒ index 12 ⇒ 2687000 kHz;
 `cur_state=12` ⇒ index 2 ⇒ 1164000 kHz.
 
-**Tenhle převod je ověřený na zařízení**, a to na třech nezávislých bodech —
-dopočtená frekvence se pokaždé shodovala se skutečně naměřeným stropem:
+**This conversion is verified on the device**, at three independent points — the
+computed frequency matched the actually measured cap every time:
 
-| Cooling device | `cur_state` | Dopočteno | Naměřený strop | Shoda |
+| Cooling device | `cur_state` | Computed | Measured cap | Match |
 |---|---|---|---|---|
 | `thermal-cpufreq-0` | 8 / 9 | 610 MHz | `610000` | ✓ |
 | `thermal-cpufreq-1` | 10 / 14 | 910 MHz | `910000` | ✓ |
 | `thermal-cpufreq-2` | 12 / 14 | 1164 MHz | `1164000` | ✓ |
 
-Proto se dá kartě „CPU — přiškrcení" ve WebUI věřit: není to odhad, je to
-ověřený přepočet.
+That is why the "CPU — throttling" card in the WebUI can be trusted: it is not an
+estimate, it is a verified conversion.
 
-### Governor se nemění
+### The governor is not changed
 
-Všechny tři clustery jedou na `sched_pixel` — Googlem laděný governor integrovaný
-se schedulerem a s `power-service.pixel-libperfmgr`. Přepnutí na `schedutil`
-nebo cokoli jiného rozbíjí věci, které na něm stojí. **Nesahá se na něj.**
+All three clusters run `sched_pixel` — a governor tuned by Google and integrated
+with the scheduler and with `power-service.pixel-libperfmgr`. Switching to
+`schedutil` or anything else breaks the things built on it. **It is left alone.**
 
-### `sched_util_clamp_min` zůstává na 1024
+### `sched_util_clamp_min` stays at 1024
 
-`/proc/sys/kernel/sched_util_clamp_min` je **globální strop na to, jakou `uclamp.min`
-smí kdokoli v systému požádat.** **Není to vynucená podlaha frekvence** — je to limit
-požadavků. Stock hodnota **1024 znamená, že je tenhle strop naplno otevřený.**
+`/proc/sys/kernel/sched_util_clamp_min` is the **global ceiling on how high a
+`uclamp.min` anyone in the system may request.** **It is not an enforced frequency
+floor** — it is a limit on requests. The stock value of **1024 means that ceiling
+is fully open.**
 
-Občas se dá poradit „nastav to na 0, ušetříš baterii". **To je špatně a je to škodlivé:**
-nastavení na 0 by **zakázalo uclamp boost v celém systému**, včetně Googlího
-`power-service.pixel-libperfmgr`, který ho používá k tomu, aby UI reagovalo.
-Výsledek je celkově trhaný telefon.
+You will sometimes be advised to "set it to 0, you will save battery". **That is
+wrong and harmful:** setting it to 0 would **disable the uclamp boost across the
+whole system**, including Google's `power-service.pixel-libperfmgr`, which uses it
+to keep the UI responsive. The result is a generally stuttery phone.
 
-`pixel_tune` na tuhle hodnotu **nesahá.**
+`pixel_tune` **does not touch** this value.
 
-### zram algoritmus se nemění
+### The zram algorithm is not changed
 
-zram0 má po bootu **3969961984 B (3,70 GiB / 3,97 GB)** a algoritmus **`lz77eh`**.
+After a boot, zram0 has **3969961984 B (3.70 GiB / 3.97 GB)** and the algorithm
+**`lz77eh`**.
 
-`lz77eh` používá **hardwarový kompresní akcelerátor Emerald Hill** zabudovaný v Tensoru
-(`/sys/devices/platform/16d00000.eh`, driver `google,eh`). Komprese proto stojí
-**~0 CPU a ~0 tepla.**
+`lz77eh` uses the **Emerald Hill hardware compression accelerator** built into
+Tensor (`/sys/devices/platform/16d00000.eh`, driver `google,eh`). Compression
+therefore costs **~0 CPU and ~0 heat.**
 
-`zstd` i `lz4` běží **na CPU** a jsou tu jednoznačně horší — vyšší spotřeba, víc tepla,
-žádná kompenzující výhoda. **Modul algoritmus nikdy nemění.** Je to zapsané i v kódu:
-při resetu zramu se původní algoritmus přečte a po resetu **obnoví zpátky**.
+Both `zstd` and `lz4` run **on the CPU** and are clearly worse here — more power
+draw, more heat, no compensating advantage. **The module never changes the
+algorithm.** That is written into the code too: when zram is reset, the original
+algorithm is read and **restored** afterwards.
 
-(Mimochodem je to i důvod, proč nemá smysl snižovat `swappiness`: swap je na tomhle
-telefonu neobvykle levný. Proto ho nemění ani jeden z pěti profilů.)
+(Incidentally that is also why lowering `swappiness` makes no sense: swap is
+unusually cheap on this phone. Which is why none of the five profiles changes it.)
 
-**Velikost zramu měnit lze** — volitelně, přes `/data/adb/pixel_tune/zram.conf`:
+**The zram size can be changed** — optionally, via
+`/data/adb/pixel_tune/zram.conf`:
 
 ```sh
-ZRAM_DISKSIZE=3969961984      # v bajtech
+ZRAM_DISKSIZE=3969961984      # in bytes
 ```
 
-Soubor **standardně neexistuje** a bez něj se na zram nesáhne vůbec. Když existuje:
+The file **does not exist by default** and without it zram is not touched at all.
+When it does exist:
 
-- povolený rozsah je **268435456 B (256 MiB) až 7939923968 B** (fyzická RAM);
-- mění se **jen v `post-fs-data.sh`**, kde je swap prázdný — `swapoff` za běhu je
-  nebezpečný (riziko OOM);
-- před `swapoff` se kontroluje, jestli se obsah swapu vejde do volné RAM
-  (s rezervou); když ne, změna se **přeskočí**;
-- při `boot_count ≥ 2` se změna přeskočí úplně;
-- selže-li kterýkoli krok, provede se **rollback** na původní velikost i algoritmus.
+- the allowed range is **268435456 B (256 MiB) to 7939923968 B** (the physical
+  RAM);
+- it is changed **only in `post-fs-data.sh`**, where swap is empty — a `swapoff`
+  at runtime is dangerous (risk of OOM);
+- before the `swapoff` it is checked whether the contents of swap fit into free
+  RAM (with a margin); when they do not, the change is **skipped**;
+- at `boot_count ≥ 2` the change is skipped entirely;
+- if any step fails, a **rollback** to the original size and algorithm is
+  performed.
 
-### Pozor na jiné „optimalizátory" paměti
+### Beware of other memory "optimisers"
 
-Řada kernel managerů nabízí přepnutí zram algoritmu na `lz4` nebo `zstd` a zmenšení
-zramu, a prodává to jako optimalizaci. **Na tomhle telefonu je to krok zpátky**
-a stojí za to vědět proč:
+A number of kernel managers offer switching the zram algorithm to `lz4` or `zstd`
+and shrinking zram, and sell it as an optimisation. **On this phone that is a step
+backwards** and it is worth knowing why:
 
-| Věc | Stock na tomhle zařízení |
+| Thing | Stock on this device |
 |---|---|
-| zram velikost | **3969961984 B (3,70 GiB / 3,97 GB)** |
-| zram algoritmus | **`lz77eh`** |
-| `vm.swappiness` | **60** (píše `/vendor/etc/init/init.pixel-mm-gs.rc`) |
+| zram size | **3969961984 B (3.70 GiB / 3.97 GB)** |
+| zram algorithm | **`lz77eh`** |
+| `vm.swappiness` | **60** (written by `/vendor/etc/init/init.pixel-mm-gs.rc`) |
 
-`lz77eh` běží na **hardwarovém kompresním akcelerátoru Emerald Hill** zabudovaném
-v Tensoru (`/sys/devices/platform/16d00000.eh`, driver `google,eh`), takže komprese
-stojí **skoro nula CPU a nula tepla**. `lz4` i `zstd` běží **na CPU**. Přepnutí na ně
-tedy odpojí kompresi od hardwarové jednotky a přesune ji na procesor — víc spotřeby,
-víc tepla, žádná kompenzující výhoda. A zmenšení zramu k tomu ubere swap, který je
-na tomhle zařízení neobvykle levný.
+`lz77eh` runs on the **Emerald Hill hardware compression accelerator** built into
+Tensor (`/sys/devices/platform/16d00000.eh`, driver `google,eh`), so compression
+costs **almost zero CPU and zero heat**. Both `lz4` and `zstd` run **on the CPU**.
+Switching to them therefore disconnects compression from the hardware unit and
+moves it onto the processor — more power draw, more heat, no compensating
+advantage. And shrinking zram on top of that takes away swap, which is unusually
+cheap on this device.
 
-`pixel_tune` proto:
+`pixel_tune` therefore:
 
-- **algoritmus nikdy nemění** (a při resetu zramu ho výslovně obnovuje zpátky),
-- velikost zramu mění **jen** když si o to výslovně řekneš přes `zram.conf`,
-- `swappiness` nemá nastavený **ani v jednom z pěti profilů**.
+- **never changes the algorithm** (and explicitly restores it after a zram reset),
+- changes the zram size **only** when you explicitly ask for it via `zram.conf`,
+- has `swappiness` set in **none of the five profiles**.
 
-Jestli jsi na telefonu dřív používal jiný kernel manager, zkontroluj po jeho
-odinstalaci, že jsou obě hodnoty zpátky na stocku:
+If you used another kernel manager on the phone before, check after uninstalling
+it that both values are back at stock:
 
 ```sh
-su -c 'cat /sys/block/zram0/comp_algorithm'   # aktivní musí být [lz77eh]
+su -c 'cat /sys/block/zram0/comp_algorithm'   # the active one must be [lz77eh]
 su -c 'cat /sys/block/zram0/disksize'         # 3969961984
 su -c 'cat /proc/sys/vm/swappiness'           # 60
 ```
 
-### Refresh rate se globálně nesnižuje
+### The refresh rate is not lowered globally
 
-Adaptivní 60–120 Hz zůstává (mode 2 = 120 Hz). Snížení na fixních 60 Hz je zásah,
-který cítíš na každém swipu, a jeho přínos není na tomhle zařízení naměřený.
-Jestli to chceš, Android má vlastní přepínač „Plynulý displej" v Nastavení.
+The adaptive 60-120 Hz stays (mode 2 = 120 Hz). Dropping to a fixed 60 Hz is a
+change you feel on every swipe, and its benefit is not measured on this device.
+If you want it, Android has its own "Smooth display" switch in Settings.
 
-### Nesahá se na thermal trip pointy
+### The thermal trip points are not touched
 
-Zóny `BIG`, `MID`, `LITTLE`, `G3D`, `ISP`, `TPU`, `AUR` mají `mode=disabled` —
-jejich sysfs trip pointy jsou **mrtvé**, zápis do nich nemá žádný efekt.
-Reálně throttluje userspace HAL `android.hardware.thermal-service.pixel`
-podle `/vendor/etc/thermal_info_config.json`, který **neměníme**.
+The zones `BIG`, `MID`, `LITTLE`, `G3D`, `ISP`, `TPU`, `AUR` have
+`mode=disabled` — their sysfs trip points are **dead**, writing to them has no
+effect. The actual throttling is done by the userspace HAL
+`android.hardware.thermal-service.pixel` according to
+`/vendor/etc/thermal_info_config.json`, which **we do not change**.
 
-Teploty se odtud jen čtou (`/sys/class/thermal/thermal_zoneN/temp`, milicelsia):
+The temperatures are only read from there
+(`/sys/class/thermal/thermal_zoneN/temp`, millicelsius):
 
-| Zóna (`type`) | Význam | Index při jednom bootu |
+| Zone (`type`) | Meaning | The index during one boot |
 |---|---|---|
-| `BIG` | junction Big clusteru | 0 |
-| `MID` | junction Mid | 1 |
-| `LITTLE` | junction Little | 2 |
-| `G3D` | junction GPU | 3 |
-| `quiet_therm` | **skin (povrch)** — tohle je zóna, kterou hlídá automat | 8 |
-| `soc_therm` | SoC board | 11 |
-| `charger_therm` | nabíječka | 12 |
-| `display_therm` | displej | 13 |
-| `battery` | baterie | 16 |
+| `BIG` | the Big cluster junction | 0 |
+| `MID` | the Mid junction | 1 |
+| `LITTLE` | the Little junction | 2 |
+| `G3D` | the GPU junction | 3 |
+| `quiet_therm` | **the skin (surface)** — this is the zone the daemon watches | 8 |
+| `soc_therm` | the SoC board | 11 |
+| `charger_therm` | the charger | 12 |
+| `display_therm` | the display | 13 |
+| `battery` | the battery | 16 |
 
-> **Zase: poslední sloupec není platné číslo.** Indexy `thermal_zoneN` se mění
-> při každém rebootu — viz sekci 11. Zóna se identifikuje podle `type`, ne podle čísla.
+> **Again: the last column is not a valid number.** The `thermal_zoneN` indices
+> change on every reboot — see section 11. A zone is identified by its `type`,
+> not by its number.
 
-### Jak telefon throttluje ve stocku
+### How the phone throttles at stock
 
-Aby bylo jasné, s čím pracuješ — naměřeno při 150 s trvalé zátěže na 9 jádrech:
+So that it is clear what you are working with — measured during 150 s of
+sustained load on 9 cores:
 
-| Věc | Naměřeno |
+| Thing | Measured |
 |---|---|
-| Strop Little | ~1036 MHz = **61 %** HW maxima |
-| Strop Big | 910 MHz = **38 %** |
-| Strop Prime | 1164 MHz = **40 %** |
-| Junction při tom | jen **58 °C** |
-| Skin při tom | **40,5 °C** |
-| Špička junction v prvních ~40 s | **81 °C** |
-| GPU throttling (`cdev_gpu`) | **0 po celou dobu — vůbec** |
-| Zotavení (`MaxReleaseStep=1`) | **~84 s**; 60 s po konci zátěže se **nic** neuvolnilo |
+| The Little cap | ~1036 MHz = **61 %** of the HW maximum |
+| The Big cap | 910 MHz = **38 %** |
+| The Prime cap | 1164 MHz = **40 %** |
+| The junction at that point | only **58 °C** |
+| The skin at that point | **40.5 °C** |
+| The junction peak in the first ~40 s | **81 °C** |
+| GPU throttling (`cdev_gpu`) | **0 the whole time — none at all** |
+| Recovery (`MaxReleaseStep=1`) | **~84 s**; 60 s after the load ended **nothing** had been released |
 
-Tři věci, které stojí za zapamatování:
+Three things worth remembering:
 
-1. **Google throttluje agresivně a preventivně**, ne až když je horko. 38 % maxima
-   při 58 °C junction není teplotní nouze, to je konzervativní politika.
-2. **GPU tohle vůbec neřeší.** `cdev_gpu` zůstal celých 150 s na nule — GPU nebyla ani
-   jednou přiškrcená. Zdroj tepla i brzdy jsou CPU clustery, ne grafika. Proto profily
-   cílí na **teplotní špičku CPU**, ne na rozlišení nebo GPU (viz sekci 7).
-3. **Zotavení je pomalé.** `MaxReleaseStep=1` v HAL configu znamená uvolňování po
-   jednom kroku: po konci zátěže trvá ~84 s, než se stropy uvolní, a prvních
-   60 s se nestane nic. Když měříš efekt profilu benchmarkem, **nech mezi běhy aspoň
-   dvě minuty klidu**, jinak měříš zbytkový throttling, ne svůj profil.
+1. **Google throttles aggressively and pre-emptively**, not only once it is hot.
+   38 % of maximum at a 58 °C junction is not a thermal emergency, it is a
+   conservative policy.
+2. **The GPU has nothing to do with this.** `cdev_gpu` stayed at zero for all
+   150 s — the GPU was not throttled even once. The source of both heat and the
+   brake are the CPU clusters, not the graphics. That is why the profiles target
+   the **CPU thermal peak**, not the resolution or the GPU (see section 7).
+3. **Recovery is slow.** `MaxReleaseStep=1` in the HAL config means releasing one
+   step at a time: after the load ends it takes ~84 s before the caps are
+   released, and for the first 60 s nothing happens. When measuring the effect of
+   a profile with a benchmark, **leave at least two minutes of quiet between
+   runs**, otherwise you are measuring residual throttling, not your profile.
 
 ---
 
-## 10. Integrity a bankovnictví
+## 10. Integrity and banking
 
-Věcně, bez strašení a bez ujišťování.
+Factually, without scaremongering and without reassurance.
 
-### Co pixel_tune dělá a nedělá
+### What pixel_tune does and does not do
 
 | | |
 |---|---|
-| Zapisuje do `/system` nebo `/vendor` | **Ne.** Žádný overlay ani bind mount. |
-| Mění SELinux | **Ne.** Zůstává **Enforcing**. Žádné `setenforce 0`. |
-| Používá accessibility službu | **Ne.** |
-| Mění build props / fingerprint (`ro.*`) | **Ne.** Jediný prop, na který sahá, je `vendor.thermal.<SENZOR>.profile` — runtime prop thermal HALu, ne identita zařízení. |
-| Instaluje aplikaci | **Ne.** UI je WebUI uvnitř KernelSU manageru. |
-| Kam zapisuje | `sysfs`, `/dev/cpuctl`, `/proc/sys`, `settings` (rozlišení a hustota) a vlastní `/data/adb/pixel_tune/`. |
+| Writes into `/system` or `/vendor` | **No.** No overlay and no bind mount. |
+| Changes SELinux | **No.** It stays **Enforcing**. No `setenforce 0`. |
+| Uses an accessibility service | **No.** |
+| Changes build props / the fingerprint (`ro.*`) | **No.** The only prop it touches is `vendor.thermal.<SENSOR>.profile` — a runtime prop of the thermal HAL, not the device identity. |
+| Installs an app | **No.** The UI is a WebUI inside the KernelSU manager. |
+| Where it writes | `sysfs`, `/dev/cpuctl`, `/proc/sys`, `settings` (resolution and density) and its own `/data/adb/pixel_tune/`. |
 
-### Co z toho plyne
+### What follows from that
 
-Kromě `charge_stop_level` a nastavení displeje jsou všechny zásahy modulu
-**runtime hodnoty v `sysfs`, které restart smaže.** Nezanechávají v systémovém obrazu
-žádnou stopu.
+Apart from `charge_stop_level` and the display settings, all the module's
+interventions are **runtime values in `sysfs` that a restart wipes.** They leave
+no trace in the system image.
 
-**Ale buď realistický:** to, co detekce hledá, je **odemčený bootloader a root jako
-takový**, ne tenhle konkrétní modul. Ten na tvém telefonu už dávno je. Že `pixel_tune`
-nezapisuje do `/system`, znamená, že **nepřidává novou detekční plochu** — neznamená to,
-že by cokoli schovával.
+**But be realistic:** what detection looks for is **an unlocked bootloader and
+root as such**, not this particular module. Those have been on your phone for a
+long time. The fact that `pixel_tune` does not write into `/system` means it
+**adds no new detection surface** — it does not mean it hides anything.
 
-Skrývání řeší úplně jiné moduly, které už máš nainstalované: `playintegrityfix`,
-`tricky_store`, `susfs4ksu`, `zygisk-assistant`, `hma_oss_zygisk`.
-`pixel_tune` s nimi **nesoupeří ani je nenahrazuje** — nedělá nic, co by potřebovalo
-skrývat, ani nic, co by jejich práci narušilo.
+Hiding is handled by entirely different modules you already have installed:
+`playintegrityfix`, `tricky_store`, `susfs4ksu`, `zygisk-assistant`,
+`hma_oss_zygisk`. `pixel_tune` **neither competes with them nor replaces them** —
+it does nothing that would need hiding, and nothing that would disrupt their work.
 
-Když ti bankovní aplikace přestane fungovat po instalaci pixel_tune, **první podezřelý
-je něco jiného** (aktualizace Play Integrity, změna v `tricky_store`, aktualizace té
-aplikace). Ale ověř si to: `pxtune revert`, odinstaluj modul, restartuj, zkus znovu.
-Pokud problém zmizí, je to nález — podle návrhu by k tomu dojít nemělo.
+When a banking app stops working after installing pixel_tune, **the first suspect
+is something else** (a Play Integrity update, a change in `tricky_store`, an
+update of that app). But do verify it: `pxtune revert`, uninstall the module,
+reboot, try again. If the problem disappears, that is a finding — by design it
+should not happen.
 
 ---
 
-## 11. Řešení problémů
+## 11. Troubleshooting
 
-| Symptom | Co s tím |
+| Symptom | What to do |
 |---|---|
-| **Telefon nenaběhne / bootloop** | Drž **Volume Down** při startu → KernelSU safe mode. Pozn.: po **třech** neúspěšných bootech se modul vypne **sám** přes `boot_count`. |
-| **Nevidím na displej po změně rozlišení** | **Počkej 60 sekund** — pojistka vrátí nativní rozlišení sama. Když ne: `adb shell wm size reset` + `adb shell settings put secure display_density_forced 353`. Viz sekci 7. |
-| **Rozlišení se vrátilo, ale písmo je menší než dřív** | To je očekávané. `res reset` a pojistka nastaví DPI **420**, ne tvých **353**. Oprav: `su -c 'pxtune revert'` nebo `settings put secure display_density_forced 353`. |
-| **Profil se „neaplikoval"** | `su -c 'pxtune log -n 50'`. Každý zápis se loguje jako `stará → nová`; při chybě se pokračuje dál, takže důvod je v logu vždycky. Pak `su -c 'pxtune selftest'`. |
-| **Po bootu se profil aplikuje se zpožděním** | Tak to má být. `service.sh` čeká **20 s** (`SETTLE=20`), protože dřív neběží `system_server`. |
-| **`pxtune: not found`** | Modul není aktivní. Zkontroluj, že existuje `/data/adb/modules/pixel_tune/`, že tam **není** `DISABLE`, a že telefon není v safe mode. |
-| **Adaptivní automat nefunguje / nespustí se** | `su -c 'pxtune auto status'` → musí říct `on` **a** vypsat pid. Když neběží, hledej v logu řádky s `[auto]`. Nejčastější příčina: v `/system/etc/event-log-tags` nenašel tag pro popředí ani pro obrazovku — to démon loguje jako `ERROR` a bez tagů opravdu nic nepřepne. |
-| **Automat přepíná profily, i když nechci** | `su -c 'pxtune profile <name>'` (bez `--auto`) položí `manual_override` a automat se stáhne. Úplné vypnutí: `pxtune auto off`. |
-| **Automat mi zařadil aplikaci špatně** | Klasifikace je naučená v `appstats`. Přebij ji ručně: do `appstats.override` zapiš řádek `<balíček> <game\|heavy\|normal\|light>`. Override má přednost před měřením. |
-| **Ručně zvolený profil „nedrží"** | Zkontroluj, že existuje `/data/adb/pixel_tune/manual_override`. Když ne, spustil jsi někdy `pxtune profile auto`. |
-| **Telefon je horký / škube se při focení** | Systém si `vendor.thermal.*.profile` přepíná sám (kamera na `camera`). Nepoužívej profil `game`, který ten prop nastavuje. |
-| **Profil `game` nic nezměnil** | Očekávatelné. Thermal profil `game` je **neověřený mechanismus**. Ověření: po ~150 s zátěže porovnej `scaling_cur_freq` policy4/policy8 proti naměřeným 910000 / 1164000. Když se neliší, mechanismus nefunguje a `THERMAL_PROFILE_*` v `game.conf` vyprázdni. |
-| **Modul mi žere baterii** | Zkontroluj profil: `UCLAMP_*_MIN > 0` znamená vyšší spotřebu z definice (má ho `performance` a `game`). Přepni na `balanced`, `powersave` nebo `night`. |
-| **Benchmark ukazuje horší čísla než minule** | Zotavení z throttlingu trvá **~84 s** a prvních 60 s se neuvolní nic. Nech mezi běhy aspoň 2 minuty klidu. |
-| **Nabíjí se jen do 80 %** | `su -c 'pxtune charge off'`. Zkontroluj i profil — **`night` nastavuje 80 % sám** a udělá to znovu při každém přepnutí. |
-| **zram má jinou velikost, než čekám** | Zkontroluj `/data/adb/pixel_tune/zram.conf`. Bez něj se na zram nesahá. Důvod přeskočení (OOM guard, `boot_count ≥ 2`, hodnota mimo rozsah) je v logu. |
-| **`pxtune` skončil s kódem 1** | Chyba argumentů: neznámý příkaz, profil, preset, nebo hodnota mimo rozsah (např. GPU frekvence mimo povolený seznam). |
-| **`pxtune` skončil s kódem 2** | Chyba běhu: zápis selhal, chybí `settings`/`cmd`, nebo selftest našel chybějící cesty. Podrobnost v logu. |
-| **Něco je rozbité a nevím co** | `su -c 'pxtune revert'`. Vrátí všechno na stock a nic nesmaže. |
-| **Bankovní aplikace přestala fungovat** | Viz sekci 10. `pxtune revert` → odinstalovat → restart → otestovat. |
+| **The phone does not boot / bootloop** | Hold **Volume Down** during startup → KernelSU safe mode. Note: after **three** failed boots the module disables **itself** via `boot_count`. |
+| **I cannot see the display after a resolution change** | **Wait 60 seconds** — the safeguard restores the native resolution by itself. If not: `adb shell wm size reset` + `adb shell settings put secure display_density_forced 353`. See section 7. |
+| **The resolution came back, but the text is smaller than before** | That is expected. `res reset` and the safeguard set the DPI to **420**, not to your **353**. Fix: `su -c 'pxtune revert'` or `settings put secure display_density_forced 353`. |
+| **A profile "was not applied"** | `su -c 'pxtune log -n 50'`. Every write is logged as `old → new`; on an error it carries on, so the reason is always in the log. Then `su -c 'pxtune selftest'`. |
+| **The profile is applied late after a boot** | That is how it should be. `service.sh` waits **20 s** (`SETTLE=20`), because `system_server` is not running before that. |
+| **`pxtune: not found`** | The module is not active. Check that `/data/adb/modules/pixel_tune/` exists, that there is **no** `DISABLE` in it, and that the phone is not in safe mode. |
+| **The adaptive daemon does not work / does not start** | `su -c 'pxtune auto status'` → it must say `on` **and** print a pid. When it is not running, look for `[auto]` lines in the log. The most common cause: it did not find the foreground or the screen tag in `/system/etc/event-log-tags` — the daemon logs that as `ERROR`, and without the tags it really switches nothing. |
+| **The daemon switches profiles when I do not want it to** | `su -c 'pxtune profile <name>'` (without `--auto`) drops `manual_override` and the daemon backs off. To disable it entirely: `pxtune auto off`. |
+| **The daemon classified an app wrongly** | The classification is learned in `appstats`. Override it by hand: write a line `<package> <game\|heavy\|normal\|light>` into `appstats.override`. The override takes precedence over the measurement. |
+| **A manually chosen profile "does not stick"** | Check that `/data/adb/pixel_tune/manual_override` exists. If not, you ran `pxtune profile auto` at some point. |
+| **The phone is hot / stutters while taking photos** | The system switches `vendor.thermal.*.profile` by itself (the camera to `camera`). Do not use the `game` profile, which sets that prop. |
+| **The `game` profile changed nothing** | Expected. The `game` thermal profile is an **unverified mechanism**. To verify: after ~150 s of load, compare `scaling_cur_freq` on policy4/policy8 against the measured 910000 / 1164000. If they do not differ, the mechanism does not work and you should empty `THERMAL_PROFILE_*` in `game.conf`. |
+| **The module is eating my battery** | Check the profile: `UCLAMP_*_MIN > 0` means higher power draw by definition (`performance` and `game` have it). Switch to `balanced`, `powersave` or `night`. |
+| **A benchmark shows worse numbers than last time** | Recovery from throttling takes **~84 s** and nothing is released during the first 60 s. Leave at least 2 minutes of quiet between runs. |
+| **It only charges to 80 %** | `su -c 'pxtune charge off'`. Check the profile too — **`night` sets 80 % by itself** and does so again on every switch. |
+| **zram has a different size than I expect** | Check `/data/adb/pixel_tune/zram.conf`. Without it zram is not touched. The reason for a skip (the OOM guard, `boot_count ≥ 2`, a value out of range) is in the log. |
+| **`pxtune` exited with code 1** | An argument error: an unknown command, profile or preset, or a value out of range (e.g. a GPU frequency not on the allowed list). |
+| **`pxtune` exited with code 2** | A runtime error: a write failed, `settings`/`cmd` is missing, or the selftest found missing paths. Details are in the log. |
+| **Something is broken and I do not know what** | `su -c 'pxtune revert'`. It restores everything to stock and deletes nothing. |
+| **A banking app stopped working** | See section 10. `pxtune revert` → uninstall → reboot → test. |
 
-### Dvě pasti, do kterých spadneš, když si budeš psát vlastní skript
+### Two traps you will fall into when writing your own script
 
-Obojí je ověřené na tomhle zařízení a obojí vypadá jako fungující kód.
+Both are verified on this device and both look like working code.
 
-#### 1. Číselné indexy `thermal_zoneN` a `cooling_deviceN` se mění při každém rebootu
+#### 1. The numeric `thermal_zoneN` and `cooling_deviceN` indices change on every reboot
 
-Tohle není teoretická možnost, je to naměřené:
+This is not a theoretical possibility, it is measured:
 
-| Co | Před rebootem | Po rebootu |
+| What | Before the reboot | After the reboot |
 |---|---|---|
 | `soc_therm` | `thermal_zone11` | `thermal_zone13` |
 | `battery` | `thermal_zone16` | `thermal_zone12` |
 | `thermal-cpufreq-2` | `cooling_device12` | `cooling_device11` |
 
-**Zadrátovaný index tedy po restartu čte úplně jiné čidlo** — a nijak se to neprojeví,
-skript dál vesele vypisuje čísla. Jen jsou to čísla něčeho jiného.
+**A hard-coded index therefore reads a completely different sensor after a
+restart** — and nothing about it shows: the script happily keeps printing
+numbers. They are just numbers of something else.
 
-`pxtune` proto čísla **nezadrátovává**: při startu projde `/sys/class/thermal/*`
-a rozpozná zóny i cooling devices **za běhu podle pole `type`**. Zadrátované indexy
-v kódu existují jen jako fallback pro případ, že by scan selhal.
+`pxtune` therefore **does not hard-code the numbers**: at startup it walks
+`/sys/class/thermal/*` and recognises both the zones and the cooling devices **at
+runtime by the `type` field**. The hard-coded indices in the code exist only as a
+fallback in case the scan fails.
 
-Když si píšeš vlastní skript, **musíš dělat totéž** — nebo použít stabilní symlinky
-od Googlu, což je jednodušší:
+When writing your own script, **you have to do the same** — or use Google's
+stable symlinks, which is simpler:
 
 ```sh
 /dev/thermal/tz-by-name/quiet_therm/temp
 /dev/thermal/cdev-by-name/thermal-cpufreq-2/cur_state
 ```
 
-#### 2. `read -r v < /proc/sys/vm/swappiness` vrátí `4` místo `40`
+#### 2. `read -r v < /proc/sys/vm/swappiness` returns `4` instead of `40`
 
-Ano, opravdu. **Useknuté na první bajt.**
+Yes, really. **Truncated at the first byte.**
 
 ```sh
 cat  /proc/sys/vm/swappiness   # 40
-read -r v < /proc/sys/vm/swappiness; echo "$v"   # 4   ← ŠPATNĚ
+read -r v < /proc/sys/vm/swappiness; echo "$v"   # 4   ← WRONG
 ```
 
-> Pozn.: v době tohohle měření byla hodnota 40, ne stock 60 (viz sekci 9) — něco ji
-> na zařízení přepisovalo. Na podstatu pasti to nemá vliv: useknutí na první bajt
-> nastane u jakékoli hodnoty.
+> Note: at the time of this measurement the value was 40, not the stock 60 (see
+> section 9) — something on the device was overwriting it. That does not affect
+> the substance of the trap: the truncation at the first byte happens with any
+> value.
 
-Příčina: procfs systl hlásí `st_size=0`, takže mksh nemá jak zjistit délku a čte
-**po jednom bajtu**, přičemž skončí dřív, než by měl.
+The cause: procfs sysctl reports `st_size=0`, so mksh has no way to determine the
+length and reads **byte by byte**, stopping sooner than it should.
 
-**Postižené je jen `/proc/sys/*`.** Na `/sys/...`, `/proc/uptime` i `/proc/<pid>/stat`
-funguje `read` správně — proto to tak snadno unikne pozornosti:
+**Only `/proc/sys/*` is affected.** On `/sys/...`, `/proc/uptime` and
+`/proc/<pid>/stat` the `read` works correctly — which is why it escapes attention
+so easily:
 
-| Cesta | `cat` | `read` |
+| Path | `cat` | `read` |
 |---|---|---|
 | `/proc/sys/vm/swappiness` | `40` | `4` ✗ |
 | `/proc/sys/kernel/sched_util_clamp_min` | `1024` | `1` ✗ |
 | `/sys/class/thermal/.../temp` | `63000` | `63000` ✓ |
 
-**Používej `cat` nebo `head -n1`.** V `pxtune` jde proto veškeré čtení přes funkci
-`rd()`, která používá `head -n1`. Je to tam schválně jednotné pro všechny cesty:
-z těchhle hodnot se generuje `backup/stock.conf` a useknutá hodnota by při revertu
-zapsala třeba `swappiness=4` místo `40`.
+**Use `cat` or `head -n1`.** In `pxtune` all reading therefore goes through the
+`rd()` function, which uses `head -n1`. It is deliberately uniform for all paths:
+`backup/stock.conf` is generated from these values and a truncated value would
+write e.g. `swappiness=4` instead of `40` during a revert.
 
 ---
 
-## 12. Kompletní revert do původního stavu
+## 12. A complete revert to the original state
 
-Pořadí je důležité — modul se odinstaluje **až nakonec**, a to na **plně
-nabootovaném systému** (jinak se rozlišení nevrátí).
+The order matters — the module is uninstalled **last**, and on a **fully booted
+system** (otherwise the resolution will not be restored).
 
-### 1. Vrať runtime hodnoty na stock
+### 1. Restore the runtime values to stock
 
 ```sh
 su -c 'pxtune revert'
 ```
 
-Přehraje zpět snapshot z `backup/stock.conf`: uclamp (včetně `camera-daemon`
-a `nnapi-hal`), GPU (min → max → policy, v tomhle pořadí, aby se hodnoty nebránily),
-vm, I/O readahead, thermal profily, `charge_stop_level` i `charge_start_level`,
-a **displej včetně DPI 353**.
+It replays the snapshot from `backup/stock.conf`: uclamp (including
+`camera-daemon` and `nnapi-hal`), the GPU (min → max → policy, in that order so
+the values do not block each other), vm, the I/O readahead, the thermal profiles,
+`charge_stop_level` and `charge_start_level`, and **the display including DPI
+353**.
 
-### 2. Vypni automat
+### 2. Turn the daemon off
 
 ```sh
 su -c 'pxtune auto off'
 ```
 
-### 3. Zkontroluj displej
+### 3. Check the display
 
-`revert` už ho vrátil, ale ověř si to:
+`revert` has already restored it, but verify:
 
 ```sh
-adb shell settings get global display_size_forced      # očekáváno: null / prázdné
-adb shell settings get secure display_density_forced   # očekáváno: 353
+adb shell settings get global display_size_forced      # expected: null / empty
+adb shell settings get secure display_density_forced   # expected: 353
 ```
 
-Když nesedí, dorovnej ručně:
+If it does not match, fix it by hand:
 
 ```sh
 adb shell settings delete global display_size_forced
 adb shell settings put secure display_density_forced 353
 ```
 
-**Nepoužívej `pxtune res reset`** — ten nastaví 420.
+**Do not use `pxtune res reset`** — that one sets 420.
 
-### 4. Zkontroluj nabíjení
+### 4. Check charging
 
 ```sh
 su -c 'cat /sys/devices/platform/google,charger/charge_stop_level'   # 100
 su -c 'cat /sys/devices/platform/google,charger/charge_start_level'  # 0
 ```
 
-### 5. Vrať Game Mode u aplikací, kterým jsi ho měnil
+### 5. Restore Game Mode for the apps you changed it for
 
-`pxtune revert` **tohle nevrací** — Game Mode je systémové per-app nastavení mimo modul.
-Pro každý balíček zvlášť:
+`pxtune revert` **does not restore this** — Game Mode is a system per-app setting
+outside the module. For each package separately:
 
 ```sh
-su -c 'pxtune game <PACKAGE>'                              # co je nastaveno
+su -c 'pxtune game <PACKAGE>'                              # what is set
 cmd game set --downscale disable <PACKAGE>
 cmd game mode standard <PACKAGE>
 ```
 
-### 6. Rozhodni se o zramu a profilech
+### 6. Decide about zram and the profiles
 
-`uninstall.sh` **nemaže** `/data/adb/pixel_tune/`. Zůstanou ti profily,
-`backup/stock.conf`, `auto`, `zram.conf`, naučené `appstats` a log — schválně, abys
-o ně nepřišel při přeinstalaci nebo aktualizaci modulu.
+`uninstall.sh` **does not delete** `/data/adb/pixel_tune/`. You keep the profiles,
+`backup/stock.conf`, `auto`, `zram.conf`, the learned `appstats` and the log —
+deliberately, so you do not lose them on a reinstall or a module update.
 
-Chceš-li opravdu nulu, vytvoř **před** odinstalací:
+If you really want zero, create this **before** uninstalling:
 
 ```sh
 su -c 'touch /data/adb/pixel_tune/PURGE'
 ```
 
-Pak `uninstall.sh` smaže celý `/data/adb/pixel_tune/` včetně profilů a zálohy.
+`uninstall.sh` then deletes all of `/data/adb/pixel_tune/` including the profiles
+and the backup.
 
-> **Varování:** tím smažeš i `backup/stock.conf`. Dokud existuje, můžeš se ke stocku
-> vrátit i po přeinstalaci. Bez něj si nový `pixel_tune` udělá snapshot
-> **z aktuálního stavu** — a když ten aktuální stav nebude stock, uloží si jako „stock"
-> něco, co jím není. **Používej `PURGE` až tehdy, když víš, že je všechno v pořádku.**
+> **Warning:** that also deletes `backup/stock.conf`. While it exists you can
+> return to stock even after a reinstall. Without it a new `pixel_tune` takes its
+> snapshot **from the current state** — and when that current state is not stock,
+> it stores as "stock" something that is not. **Only use `PURGE` when you know
+> everything is in order.**
 
-### 7. Odinstaluj modul
+### 7. Uninstall the module
 
-KernelSU-Next manager → Moduly → `Pixel Tune` → Odinstalovat → **restart**.
+KernelSU-Next manager → Modules → `Pixel Tune` → Uninstall → **reboot**.
 
-`uninstall.sh` sám zabije démona, položí `DISABLE`, spustí `revert` a `res reset`
-a uklidí běhové soubory (`boot_count`, `res_pending`, `manual_override`).
-Kroky 1–5 jsi udělal proto, abys nebyl závislý na tom, v jaké fázi se `uninstall.sh`
-spustí — v post-fs-data fázi mu `settings` ani `cmd` nefungují.
+`uninstall.sh` kills the daemon itself, drops `DISABLE`, runs `revert` and
+`res reset` and cleans up the runtime files (`boot_count`, `res_pending`,
+`manual_override`). You did steps 1-5 so as not to depend on which phase
+`uninstall.sh` runs in — in the post-fs-data phase neither `settings` nor `cmd`
+works for it.
 
-**Pozor:** `uninstall.sh` volá `pxtune res reset`, takže ti po odinstalaci může
-zůstat **DPI 420**. Zkontroluj krok 3 znovu po restartu.
+**Careful:** `uninstall.sh` calls `pxtune res reset`, so you may be left with
+**DPI 420** after the uninstall. Check step 3 again after the reboot.
 
-### 8. Ověření po restartu
+### 8. Verification after a reboot
 
 ```sh
 adb shell getenforce                              # Enforcing
-adb shell cat /sys/block/zram0/comp_algorithm     # aktivní musí být [lz77eh]
-adb shell cat /sys/block/zram0/disksize           # 3969961984  (3,70 GiB)
-adb shell cat /proc/sys/vm/swappiness             # 60   (cat, ne read — viz sekci 11)
+adb shell cat /sys/block/zram0/comp_algorithm     # the active one must be [lz77eh]
+adb shell cat /sys/block/zram0/disksize           # 3969961984  (3.70 GiB)
+adb shell cat /proc/sys/vm/swappiness             # 60   (cat, not read — see section 11)
 adb shell settings get secure display_density_forced   # 353
 adb shell cat /sys/class/power_supply/battery/cycle_count
 ```
 
-zram se vrátí na vendor stock **sám při prvním bootu bez modulu** — velikost není
-perzistentní a `post-fs-data.sh` už neběží.
+zram returns to the vendor stock **by itself on the first boot without the
+module** — the size is not persistent and `post-fs-data.sh` no longer runs.
 
 ---
 
-## Otevřené body v této verzi
+## Open points in this version
 
-Věci, které v dokumentaci zůstaly nedořešené, protože je nemám z čeho ověřit:
+Things that remain unresolved in the documentation, because there is nothing to
+verify them against:
 
-1. **`pxtune res reset` nastaví DPI 420 místo tvých 353.** Sekce 7. Týká se i
-   60sekundové pojistky, tlačítek ve WebUI a `uninstall.sh`.
-2. **Jména presetů ve WebUI** (`1080p`/`900p`/`720p`) neodpovídají CLI
-   (`native`/`900x2000`/`810x1800`/`720x1600`). Fallback ve WebUI se použije jen tehdy,
-   když je `status --json` nepošle — ale když se použije, kliknutí skončí chybou. Sekce 4.
-3. **Jméno instalačního ZIPu** není nikde uvedeno. Sekce 2.
-4. **Thermal profil `game` je neověřený** — profil `game.conf` ho nastavuje s výslovným
-   varováním a postupem, jak ho ověřit. Sekce 11.
-5. **Dopad automatu na výdrž není změřený.** Z návrhu plyne, že je malý, ale srovnávací
-   měření (démon zapnutý vs. vypnutý) chybí. Sekce 6.
-6. **Stock hodnota I/O readahead není známá** a žádné I/O měření neexistuje. Proto
-   `IO_READAHEAD_KB` nenastavuje ani jeden z pěti profilů. Sekce 3.
-7. **Dopad `GPU_POWER_POLICY`** (`coarse_demand` vs. `adaptive` vs. `always_on`)
-   **na spotřebu není změřený.** Tematicky by `coarse_demand` seděl do profilu `night`,
-   ale bez měření se nehádá. Dá se změřit. Sekce 3.
-8. **Není měření GPU pod trvalou zátěží** — naměřených 150 s bylo CPU-only. Proto jsou
-   GPU stropy v `powersave`/`night` konzervativní odhad, ne odvozené číslo. Sekce 3.
-9. **Není změřeno, jestli je zahnání pozadí na Little celkově úspornější** —
-   proti stojí race-to-idle a energy model v debugfs není na zařízení dostupný.
-   Proto má `night` `background.max=17`, ale `powersave` volnějších `30`. Sekce 3.
-10. **`pxtune auto on|off` proces démona nestartuje ani nezastavuje** — jen přepíše
-    soubor `auto`. Funkčně to stačí (démon ho respektuje), ale proces běží dál.
-    Startovat/zastavovat se musí přes `pxtune-auto start|stop`. Sekce 6.
-11. **`pxtune profile auto` neposílá démonovi SIGHUP**, takže stav nepřehodnotí
-    okamžitě, ale až při nejbližší události nebo tiku. Sekce 6.
-12. **Konkrétní dvojice indexů thermal zón před/po rebootu** (např. `soc_therm`
-    `zone11` → `zone13`) **není ve SPEC.md.** Samotné pravidlo — že se indexy nesmí
-    zadrátovat a zóna se hledá podle `type` — **je ověřené v kódu** (`resolve_thermal_ids`
-    v `bin/pxtune`), takže na doporučení to nic nemění. Sekce 11.
+1. **`pxtune res reset` sets DPI 420 instead of your 353.** Section 7. It also
+   affects the 60-second safeguard, the WebUI buttons and `uninstall.sh`.
+2. **The preset names in the WebUI** (`1080p`/`900p`/`720p`) do not match the CLI
+   (`native`/`900x2000`/`810x1800`/`720x1600`). The WebUI fallback is only used
+   when `status --json` does not send them — but when it is used, a click ends in
+   an error. Section 4.
+3. **The name of the installation ZIP** is stated nowhere. Section 2.
+4. **The `game` thermal profile is unverified** — the `game.conf` profile sets it
+   with an explicit warning and a procedure for verifying it. Section 11.
+5. **The daemon's effect on battery life is not measured.** From the design it
+   follows that it is small, but a comparative measurement (daemon on vs. off) is
+   missing. Section 6.
+6. **The stock I/O readahead value is not known** and no I/O measurement exists.
+   That is why none of the five profiles sets `IO_READAHEAD_KB`. Section 3.
+7. **The effect of `GPU_POWER_POLICY`** (`coarse_demand` vs. `adaptive` vs.
+   `always_on`) **on power draw is not measured.** Thematically `coarse_demand`
+   would fit the `night` profile, but without a measurement there is no guessing.
+   It can be measured. Section 3.
+8. **There is no GPU measurement under sustained load** — the measured 150 s were
+   CPU-only. That is why the GPU caps in `powersave`/`night` are a conservative
+   estimate, not a derived number. Section 3.
+9. **It is not measured whether driving the background onto Little is more
+   economical overall** — race-to-idle argues against it and the energy model in
+   debugfs is not available on the device. That is why `night` has
+   `background.max=17` but `powersave` a looser `30`. Section 3.
+10. **`pxtune auto on|off` neither starts nor stops the daemon process** — it only
+    rewrites the `auto` file. Functionally that is enough (the daemon respects
+    it), but the process keeps running. Starting/stopping has to go through
+    `pxtune-auto start|stop`. Section 6.
+11. **`pxtune profile auto` does not send the daemon SIGHUP**, so it does not
+    re-evaluate the state immediately but only at the next event or tick.
+    Section 6.
+12. **The specific pairs of thermal zone indices before/after a reboot** (e.g.
+    `soc_therm` `zone11` → `zone13`) **are not in SPEC.md.** The rule itself —
+    that the indices must not be hard-coded and a zone is found by its `type` —
+    **is verified in the code** (`resolve_thermal_ids` in `bin/pxtune`), so it
+    changes nothing about the recommendation. Section 11.
 
-### Vyřešeno oproti dřívější verzi tohoto dokumentu
+### Resolved compared to an earlier version of this document
 
-- `bin/pxtune-auto` **už existuje a funguje** (dřív bylo uvedeno, že chybí). Sekce 6.
-- **Neshoda jména stavového souboru automatu je pryč** — CLI, `service.sh` i démon
-  dnes čtou tentýž `/data/adb/pixel_tune/auto`. Sekce 6.
-- **Efekt uclampu na Little cluster už není neznámý** — capacity tabulka je naměřená
-  (Little 182 / Big 725 / Prime 1024). Sekce 3.
-- **Velikost zramu opravena** na 3969961984 B = 3,70 GiB / 3,97 GB (dřívější
-  „3,79 GB" byl chybný údaj). Sekce 9.
-- **Verze CLI opravena** na `1.1.0` (`PXTUNE_VERSION` v `bin/pxtune`); modul samotný
-  je podle `module.prop` dál `v1.0`.
-- **Odstraněny údaje, které nejdou ověřit ve SPEC.md ani v souborech modulu** —
-  jmenovitě tabulka „přiškrcení v nečinnosti při skin 44,6 °C" (sekce 1 a 9)
-  a konkrétní hodnoty připisované dřívějšímu kernel manageru (sekce 9).
-  Technický závěr obou pasáží zůstal, protože ten ověřitelný je.
+- `bin/pxtune-auto` **now exists and works** (it used to say it was missing).
+  Section 6.
+- **The mismatch in the name of the daemon's state file is gone** — the CLI,
+  `service.sh` and the daemon all read the same `/data/adb/pixel_tune/auto`
+  today. Section 6.
+- **The effect of uclamp on the Little cluster is no longer unknown** — the
+  capacity table is measured (Little 182 / Big 725 / Prime 1024). Section 3.
+- **The zram size was corrected** to 3969961984 B = 3.70 GiB / 3.97 GB (the
+  earlier "3.79 GB" was wrong). Section 9.
+- **The CLI version was corrected** to `1.1.0` (`PXTUNE_VERSION` in
+  `bin/pxtune`); the module itself is still `v1.0` per `module.prop`.
+- **Figures that cannot be verified in SPEC.md or in the module files were
+  removed** — namely the "throttling while idle at a skin of 44.6 °C" table
+  (sections 1 and 9) and the specific values attributed to an earlier kernel
+  manager (section 9). The technical conclusion of both passages stayed, because
+  that part is verifiable.

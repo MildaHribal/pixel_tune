@@ -1,8 +1,8 @@
-# stavové/ladicí artefakty, sem nepatří
+# state/debug artefacts, they do not belong here
 *.log
 *.tmp
 .thermal_ids
-# lokální zálohy a archivy (velké, jen na laptopu)
+# local backups and archives (large, laptop only)
 .laptop-preV2-backup/
 *.tgz
 *.tar.zst
