@@ -1,2557 +1,534 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="light dark">
-<title>pixel_tune</title>
+<title>Pixel Tune</title>
 <style>
-/* ============================================================
-   pixel_tune WebUI — everything inline. No CDNs, fonts or images.
-   The device may have no network, and it is a security requirement.
-   ============================================================ */
-:root{
-  --bg:#f3f4f7; --card:#ffffff; --card2:#f8f9fb;
-  --fg:#14161a; --muted:#5c636e; --line:#dde1e7; --track:#e4e8ee;
-  --accent:#2f6fed; --accent-fg:#ffffff;
-  --ok:#12854a; --warn:#a86a00; --hot:#c25208; --crit:#c22a22;
-  --ok-bg:#e6f6ec; --warn-bg:#fcf3e0; --hot-bg:#fdeee2; --crit-bg:#fdeaea;
-  --shadow:0 1px 2px rgba(16,20,28,.06), 0 1px 8px rgba(16,20,28,.04);
-  --r:14px;
-}
-@media (prefers-color-scheme: dark){
   :root{
-    --bg:#0e1014; --card:#171a20; --card2:#1d2128;
-    --fg:#e9ebef; --muted:#98a1ae; --line:#272d36; --track:#232932;
-    --accent:#5c93ff; --accent-fg:#08121f;
-    --ok:#3cc973; --warn:#e2a72a; --hot:#ff8a44; --crit:#ff6058;
-    --ok-bg:#11291c; --warn-bg:#2a2211; --hot-bg:#2d1d11; --crit-bg:#2e1614;
-    --shadow:0 1px 2px rgba(0,0,0,.4);
+    --bg:#0c0e12; --bg2:#12151b; --card:#161a21; --card2:#1b212a; --line:#252c37;
+    --fg:#e7ebf0; --dim:#95a0ad; --faint:#5c6773;
+    --acc:#4db6ac; --acc2:#2b8f85; --amber:#e0a23a;
+    --ok:#5ec26a; --warn:#e0c04a; --hot:#e08a3a; --crit:#e05a52;
+    --mono:"JetBrains Mono","Roboto Mono",ui-monospace,monospace;
+    --sans:-apple-system,"Segoe UI",Roboto,system-ui,sans-serif;
   }
-}
-*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{margin:0;padding:0}
-body{
-  background:var(--bg); color:var(--fg);
-  font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans",sans-serif;
-  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
-  overflow-x:hidden;
-}
-.wrap{max-width:720px;margin:0 auto;padding:10px 12px 56px}
-h1{font-size:19px;margin:0;letter-spacing:-.2px}
-h2{font-size:13px;margin:0 0 10px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);font-weight:700}
-h3{font-size:14px;margin:0 0 8px}
-.sub{font-size:12px;color:var(--muted)}
-.mono{font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--fg);font-family:var(--sans);
+    display:flex;flex-direction:column;height:100dvh;overflow:hidden;-webkit-font-smoothing:antialiased}
 
-/* --- header --- */
-header{
-  position:sticky;top:0;z-index:30;background:var(--bg);
-  padding:8px 0 8px;margin:0;
-  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
-}
-header .grow{flex:1;min-width:110px}
-.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
-.dot.ok{background:var(--ok)} .dot.err{background:var(--crit)} .dot.busy{background:var(--warn)}
+  header{flex:0 0 auto;display:flex;align-items:center;gap:10px;
+    padding:calc(env(safe-area-inset-top) + 12px) 16px 12px;
+    background:linear-gradient(180deg,#12151b,#0c0e12);border-bottom:1px solid var(--line)}
+  header .logo{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;
+    background:linear-gradient(145deg,var(--acc),var(--acc2));color:#04110f;font-family:var(--mono);font-weight:700;font-size:16px}
+  header h1{font-size:16px;margin:0;font-weight:650;letter-spacing:.01em}
+  header .sub{font-family:var(--mono);font-size:10px;color:var(--faint);letter-spacing:.1em;text-transform:uppercase}
+  header .reload{margin-left:auto;width:38px;height:38px;border:1px solid var(--line);border-radius:10px;
+    background:var(--card);color:var(--acc);font-size:17px;display:grid;place-items:center}
+  header .reload:active{transform:scale(.92)}
 
-/* --- taby --- */
-nav.tabs{
-  position:sticky;top:46px;z-index:29;background:var(--bg);
-  display:flex;gap:4px;padding:0 0 8px;margin:0 0 4px;border-bottom:1px solid var(--line);
-  overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;
-}
-nav.tabs::-webkit-scrollbar{display:none}
-nav.tabs button{
-  flex:1 0 auto;white-space:nowrap;padding:8px 12px;font-size:13.5px;font-weight:600;
-  border-radius:9px;border:1px solid transparent;background:transparent;color:var(--muted);
-}
-nav.tabs button[aria-selected="true"]{background:var(--card);color:var(--fg);border-color:var(--line);box-shadow:var(--shadow)}
+  main{flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:14px 14px 90px}
+  .view{display:none} .view.on{display:block;animation:fade .2s}
+  @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 
-/* --- cards --- */
-.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin:12px 0;box-shadow:var(--shadow)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
+  .card h2{margin:0 0 12px;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);
+    font-family:var(--mono);display:flex;align-items:center;gap:8px}
+  .card h2 .r{margin-left:auto;font-family:var(--sans);letter-spacing:0;text-transform:none;color:var(--faint);font-size:12px}
 
-/* --- buttons --- */
-button{font:inherit;color:inherit;cursor:pointer;border-radius:10px;border:1px solid var(--line);background:var(--card2);padding:9px 13px;transition:filter .12s}
-button:active{filter:brightness(.92)}
-button:disabled{opacity:.45;cursor:default}
-.btn-p{background:var(--accent);color:var(--accent-fg);border-color:transparent;font-weight:600}
-.btn-d{background:transparent;color:var(--crit);border-color:var(--crit);font-weight:600}
-.btn-sm{padding:6px 10px;font-size:13px}
-.btn-row{display:flex;gap:8px;flex-wrap:wrap}
-select,input[type=text],input[type=number]{
-  font:inherit;color:inherit;background:var(--card2);border:1px solid var(--line);
-  border-radius:9px;padding:8px 10px;max-width:100%;
-}
-label.fld{display:block;margin:0 0 10px}
-label.fld > .lbl{display:block;font-size:12.5px;font-weight:600;margin-bottom:4px}
-label.fld > .hint{display:block;font-size:11.5px;color:var(--muted);margin-top:3px}
-label.fld select,label.fld input{width:100%}
+  /* profile segmented */
+  .profiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(88px,1fr));gap:8px}
+  .pf{padding:12px 8px;border:1px solid var(--line);background:var(--bg2);border-radius:11px;text-align:center;cursor:pointer;transition:all .14s}
+  .pf .ic{font-size:20px;line-height:1}
+  .pf .nm{font-size:12px;font-weight:600;margin-top:5px;color:var(--dim)}
+  .pf.on{background:linear-gradient(160deg,rgba(77,182,172,.22),rgba(77,182,172,.06));border-color:var(--acc);box-shadow:0 0 0 1px var(--acc) inset}
+  .pf.on .nm{color:var(--acc)}
+  .pf:active{transform:scale(.95)}
 
-/* --- profiles --- */
-.profiles{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-@media (max-width:359px){.profiles{grid-template-columns:repeat(2,1fr)}}
-.prof{
-  display:flex;flex-direction:column;align-items:center;gap:3px;
-  padding:13px 5px;border-radius:12px;border:1.5px solid var(--line);background:var(--card2);
-  text-align:center;line-height:1.2;min-height:74px;justify-content:center;position:relative;
-}
-.prof .ic{font-size:19px;line-height:1}
-.prof .nm{font-size:13px;font-weight:600}
-.prof .ds{font-size:10.5px;color:var(--muted)}
-.prof[aria-pressed="true"]{
-  background:var(--accent);color:var(--accent-fg);border-color:var(--accent);
-  box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent);
-}
-.prof[aria-pressed="true"] .ds{color:var(--accent-fg);opacity:.85}
-.prof.pending{border-style:dashed;border-color:var(--warn);opacity:.9}
+  /* freq/monitor bars */
+  .row{display:flex;align-items:center;gap:10px;padding:7px 0}
+  .row+.row{border-top:1px solid var(--line)}
+  .row .lab{width:78px;flex:0 0 auto;font-size:13px;color:var(--dim)}
+  .row .lab small{display:block;color:var(--faint);font-size:10px;font-family:var(--mono)}
+  .track{flex:1;height:8px;border-radius:5px;background:var(--bg);border:1px solid var(--line);overflow:hidden;position:relative}
+  .track i{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2));border-radius:5px;transition:width .5s}
+  .row .val{width:96px;flex:0 0 auto;text-align:right;font-family:var(--mono);font-size:12px}
+  .row .val b{color:var(--fg)} .row .val span{color:var(--faint)}
 
-/* --- throttle bary --- */
-.clu{margin:0 0 15px}
-.clu:last-child{margin-bottom:0}
-.clu .top{display:flex;align-items:baseline;gap:8px;margin-bottom:5px}
-.clu .nm{font-weight:650;font-size:14px}
-.clu .co{font-size:11px;color:var(--muted)}
-.clu .pct{margin-left:auto;font-weight:700;font-size:15px}
-.track{position:relative;height:16px;border-radius:8px;background:var(--track);overflow:hidden}
-.seg{position:absolute;top:0;bottom:0;left:0}
-.seg.blocked{background:repeating-linear-gradient(135deg,var(--crit) 0 5px,transparent 5px 10px);opacity:.55;left:auto;right:0}
-.seg.head{background:color-mix(in srgb, var(--accent) 30%, transparent)}
-.seg.cur{background:var(--accent);border-radius:8px 0 0 8px}
-.clu .lg{display:flex;justify-content:space-between;font-size:11.5px;color:var(--muted);margin-top:4px}
+  /* temperature grid */
+  .temps{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+  .temp{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:8px 4px;text-align:center}
+  .temp .t{font-family:var(--mono);font-size:15px;font-weight:600}
+  .temp .n{font-size:9px;color:var(--faint);text-transform:uppercase;margin-top:2px;letter-spacing:.06em}
+  .temp.ok .t{color:var(--ok)} .temp.warn .t{color:var(--warn)} .temp.hot .t{color:var(--hot)} .temp.crit .t{color:var(--crit)}
 
-/* --- temperatures --- */
-.tgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-@media (max-width:399px){.tgrid{grid-template-columns:repeat(2,1fr)}}
-.t{border-radius:11px;padding:9px 8px;text-align:center;border:1px solid var(--line);background:var(--card2)}
-.t .lb{font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);font-weight:600}
-.t .vl{font-size:22px;font-weight:700;line-height:1.15;margin-top:1px}
-.t .un{font-size:12px;font-weight:500;opacity:.65}
-.t.ok{background:var(--ok-bg);border-color:transparent} .t.ok .vl{color:var(--ok)}
-.t.warn{background:var(--warn-bg);border-color:transparent} .t.warn .vl{color:var(--warn)}
-.t.hot{background:var(--hot-bg);border-color:transparent} .t.hot .vl{color:var(--hot)}
-.t.crit{background:var(--crit-bg);border-color:transparent} .t.crit .vl{color:var(--crit)}
+  /* battery */
+  .bstat{display:flex;gap:14px;flex-wrap:wrap}
+  .bstat .b{flex:1;min-width:70px} .bstat .b .n{font-size:10px;color:var(--faint);text-transform:uppercase}
+  .bstat .b .v{font-family:var(--mono);font-size:16px;margin-top:2px}
 
-/* --- key/value rows --- */
-.kv{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--line);font-size:14px}
-.kv:last-child{border-bottom:0}
-.kv .k{color:var(--muted)}
-.kv .v{font-weight:600;text-align:right;word-break:break-word}
+  /* slider */
+  .slider{display:flex;align-items:center;gap:12px;margin-top:6px}
+  input[type=range]{-webkit-appearance:none;flex:1;height:6px;border-radius:4px;background:var(--line);outline:none}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;
+    background:var(--acc);border:2px solid #04110f;box-shadow:0 2px 6px rgba(0,0,0,.4)}
+  .slider .out{width:56px;text-align:right;font-family:var(--mono);font-size:14px;color:var(--acc)}
 
-/* --- mini bar --- */
-.mini{height:7px;border-radius:4px;background:var(--track);overflow:hidden;margin-top:7px}
-.mini i{display:block;height:100%;background:var(--accent);border-radius:4px}
+  /* tweaks */
+  .tw{padding:12px 0;border-top:1px solid var(--line)}
+  .tw:first-child{border-top:none}
+  .tw .head{display:flex;align-items:flex-start;gap:10px}
+  .tw .info{flex:1;min-width:0}
+  .tw .tn{font-size:14px;font-weight:550}
+  .tw .td{font-size:11.5px;color:var(--faint);margin-top:3px;line-height:1.4;max-height:2.9em;overflow:hidden}
+  .tw .td.open{max-height:none}
+  .tw .cur{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:4px}
+  .tw .cur b{color:var(--acc)} .tw .cur.mod b{color:var(--amber)}
+  .tw .ctl{flex:0 0 auto}
+  .riskdot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-left:6px;vertical-align:middle}
+  .r1{background:var(--ok)} .r2{background:var(--warn)} .r3{background:var(--crit)}
 
-/* --- slider --- */
-input[type=range]{width:100%;accent-color:var(--accent);height:30px}
+  /* toggle */
+  .sw{width:46px;height:27px;border-radius:20px;background:var(--line);position:relative;cursor:pointer;transition:background .18s;flex:0 0 auto}
+  .sw::after{content:"";position:absolute;top:3px;left:3px;width:21px;height:21px;border-radius:50%;background:#fff;transition:transform .18s}
+  .sw.on{background:var(--acc)} .sw.on::after{transform:translateX(19px)}
 
-/* --- bannery --- */
-.banner{border-radius:12px;padding:12px 13px;margin:10px 0;border:1px solid transparent;font-size:14px}
-.banner.err{background:var(--crit-bg);border-color:var(--crit);color:var(--crit)}
-.banner.warn{background:var(--warn-bg);border-color:var(--warn);color:var(--warn)}
-.banner.info{background:var(--card2);border-color:var(--line);color:var(--fg)}
-.banner .ttl{font-weight:700;margin-bottom:3px}
-.banner pre{white-space:pre-wrap;word-break:break-word;font-size:11.5px;margin:6px 0 0;opacity:.85;max-height:130px;overflow:auto}
-#resBanner{position:sticky;top:92px;z-index:25;background:var(--warn-bg);border:2px solid var(--warn);box-shadow:var(--shadow)}
-#resCount{font-size:30px;font-weight:800;color:var(--warn);line-height:1}
-#pendBar{
-  position:sticky;top:92px;z-index:24;display:flex;align-items:center;gap:9px;
-  background:var(--card);border:1px solid var(--warn);border-radius:12px;
-  padding:10px 12px;margin:10px 0;font-size:13.5px;box-shadow:var(--shadow);
-}
+  select,input[type=number]{background:var(--bg2);color:var(--fg);border:1px solid var(--line);border-radius:9px;
+    padding:8px 10px;font-family:var(--mono);font-size:13px;outline:none;max-width:130px}
+  .numset{display:flex;gap:6px;align-items:center}
+  .btn{border:1px solid var(--line);background:var(--card2);color:var(--acc);border-radius:9px;padding:8px 12px;font-size:13px;cursor:pointer}
+  .btn:active{transform:scale(.94)}
+  .btn.sm{padding:6px 10px;font-size:12px}
+  .reset{color:var(--faint);font-size:11px;background:none;border:none;cursor:pointer;margin-top:6px}
 
-/* --- badge --- */
-.badge{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:700;border:1px solid currentColor}
-.badge.ok{color:var(--ok)} .badge.warn{color:var(--warn)} .badge.hot{color:var(--hot)} .badge.crit{color:var(--crit)}
-.badge.mut{color:var(--muted)}
-.badge.fill{border-color:transparent;color:var(--accent-fg);background:var(--accent)}
+  /* category tabs */
+  .catbar{display:flex;gap:7px;overflow-x:auto;padding-bottom:10px;scrollbar-width:none}
+  .catbar::-webkit-scrollbar{display:none}
+  .catchip{flex:0 0 auto;padding:7px 13px;border:1px solid var(--line);border-radius:16px;background:var(--card);
+    font-size:12.5px;color:var(--dim);white-space:nowrap;cursor:pointer}
+  .catchip.on{background:var(--acc);color:#04110f;border-color:var(--acc);font-weight:600}
+  .advrow{display:flex;align-items:center;gap:10px;margin-bottom:12px;font-size:13px;color:var(--dim)}
 
-/* --- tweaks --- */
-.tw{padding:12px 0;border-bottom:1px solid var(--line)}
-.tw:last-child{border-bottom:0}
-.tw .hd{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap}
-.tw .nm{font-weight:650;font-size:14px;flex:1;min-width:130px}
-.tw .ds{font-size:12.5px;color:var(--muted);margin:4px 0 8px;line-height:1.4}
-.tw .ctl{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.tw .ctl select,.tw .ctl input[type=number]{flex:1;min-width:96px}
-.tw .val{font-size:12px;color:var(--muted)}
-.tw.changed{border-left:3px solid var(--accent);padding-left:9px;margin-left:-12px}
-.tw.risky{background:linear-gradient(to right,var(--crit-bg),transparent 60%);border-radius:8px;padding-left:9px;margin-left:-9px}
-.cat{margin:0 0 6px;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--accent)}
-.toggle{display:inline-flex;align-items:center;gap:7px;font-size:13.5px;cursor:pointer;user-select:none}
-.toggle input{width:18px;height:18px;accent-color:var(--accent)}
+  /* tabbar */
+  nav{flex:0 0 auto;display:flex;background:linear-gradient(0deg,#12151b,#0c0e12);border-top:1px solid var(--line);
+    padding:6px 6px calc(env(safe-area-inset-bottom) + 6px)}
+  nav button{flex:1;background:none;border:none;color:var(--faint);padding:8px 2px;cursor:pointer;
+    display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10px;border-radius:10px}
+  nav button .ni{font-size:19px;line-height:1}
+  nav button.on{color:var(--acc)}
+  nav button.on .ni{filter:drop-shadow(0 0 6px rgba(77,182,172,.5))}
 
-/* --- per-app --- */
-.rule{border:1px solid var(--line);border-radius:12px;padding:11px;margin:0 0 10px;background:var(--card2)}
-.rule .pkg{font-weight:650;font-size:14px;word-break:break-all}
-.rule .tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px}
-.scope{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:99px;vertical-align:1px;margin-left:5px}
-.scope.app{background:var(--ok-bg);color:var(--ok)}
-.scope.glob{background:var(--warn-bg);color:var(--warn)}
-
-/* --- modal --- */
-.mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;z-index:100;overflow:auto}
-.modal{background:var(--card);border-radius:16px;padding:18px;max-width:420px;width:100%;box-shadow:0 10px 40px rgba(0,0,0,.35);max-height:92vh;overflow:auto}
-.modal h3{margin:0 0 8px;font-size:17px}
-.modal p{margin:0 0 14px;color:var(--muted);font-size:14px}
-
-/* --- toast --- */
-#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(20px + env(safe-area-inset-bottom));z-index:200;background:#1e2229;color:#fff;padding:10px 16px;border-radius:10px;font-size:13.5px;max-width:88vw;text-align:center;opacity:0;transition:opacity .2s;pointer-events:none}
-#toast.on{opacity:.96}
-
-.hide{display:none !important}
-.spin{display:inline-block;width:13px;height:13px;border:2px solid var(--warn);border-top-color:transparent;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px;flex:none}
-@keyframes sp{to{transform:rotate(360deg)}}
-.scrollx{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .toast{position:fixed;left:50%;bottom:88px;transform:translateX(-50%) translateY(20px);opacity:0;pointer-events:none;
+    background:var(--card2);border:1px solid var(--acc);color:var(--fg);padding:10px 16px;border-radius:12px;font-size:13px;
+    transition:all .25s;z-index:50;max-width:88vw;text-align:center;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+  .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+  .muted{color:var(--faint);font-size:12px;text-align:center;padding:20px}
+  .apiwarn{background:rgba(224,90,82,.12);border:1px solid var(--crit);color:#f0a19b;padding:12px;border-radius:12px;font-size:13px;margin-bottom:12px;display:none}
 </style>
 </head>
 <body>
-<div class="wrap">
-
   <header>
-    <div class="grow">
-      <h1>pixel_tune</h1>
-      <div class="sub"><span class="dot" id="statDot"></span> <span id="statTxt">loading…</span></div>
+    <div class="logo">PT</div>
+    <div>
+      <h1>Pixel Tune</h1>
+      <div class="sub" id="hdrSub">Pixel 8a · Tensor G3</div>
     </div>
-    <button class="btn-sm" id="btnRefresh" title="Refresh">⟳</button>
-    <button class="btn-sm" id="btnAuto" aria-pressed="true" title="Automatic refresh">⏱ 5 s</button>
+    <button class="reload" id="btnReload" aria-label="Reload">↻</button>
   </header>
 
-  <nav class="tabs" id="tabs">
-    <button data-tab="over"   aria-selected="true">Overview</button>
-    <button data-tab="tweaks" aria-selected="false">Tweaks</button>
-    <button data-tab="apps"   aria-selected="false">Apps</button>
-    <button data-tab="daemon" aria-selected="false">Daemon</button>
+  <main>
+    <div class="apiwarn" id="apiWarn"></div>
+
+    <!-- ============ OVERVIEW ============ -->
+    <section class="view on" id="v-dash">
+      <div class="card">
+        <h2>Profile <span class="r" id="pfActive">—</span></h2>
+        <div class="profiles" id="profiles"></div>
+      </div>
+
+      <div class="card">
+        <h2>CPU <span class="r" id="cpuGov"></span></h2>
+        <div id="cpuRows"></div>
+      </div>
+
+      <div class="card">
+        <h2>GPU Mali</h2>
+        <div id="gpuRows"></div>
+      </div>
+
+      <div class="card">
+        <h2>Temperatures</h2>
+        <div class="temps" id="temps"></div>
+      </div>
+
+      <div class="card">
+        <h2>Battery</h2>
+        <div class="bstat" id="bstat"></div>
+        <div style="margin-top:14px">
+          <div style="display:flex;justify-content:space-between;font-size:13px;color:var(--dim)">
+            <span>Charge limit</span><span class="mono" id="chgLabel" style="font-family:var(--mono);color:var(--acc)">100 %</span>
+          </div>
+          <div class="slider">
+            <input type="range" id="chg" min="60" max="100" step="5" value="100">
+            <button class="btn sm" id="chgApply">Apply</button>
+          </div>
+          <div style="font-size:11px;color:var(--faint);margin-top:4px">100 % = no limit. A lower cap slows battery wear.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ GAMES / PER-APP ============ -->
+    <section class="view" id="v-apps">
+      <div id="apps"><div class="muted">Loading…</div></div>
+      <div style="font-size:11px;color:var(--faint);margin-top:2px;line-height:1.5">
+        These settings only apply while that app is in the foreground; otherwise the selected profile applies.
+        After changing downscale/FPS the game sometimes has to be restarted.
+      </div>
+    </section>
+
+    <!-- ============ TUNING ============ -->
+    <section class="view" id="v-tune">
+      <div class="advrow">
+        <div class="sw" id="advSw"></div>
+        <span>Show risky ones too (advanced)</span>
+      </div>
+      <div class="catbar" id="catbar"></div>
+      <div id="tweaks"><div class="muted">Loading…</div></div>
+    </section>
+  </main>
+
+  <nav>
+    <button class="on" data-v="dash"><span class="ni">📊</span>Overview</button>
+    <button data-v="apps"><span class="ni">🎮</span>Games</button>
+    <button data-v="tune"><span class="ni">🎛️</span>Tuning</button>
   </nav>
 
-  <!-- ACTION IN PROGRESS (never blocks the UI) -->
-  <div id="pendBar" class="hide">
-    <span class="spin"></span>
-    <span class="grow" id="pendTxt" style="flex:1">…</span>
-    <button class="btn-sm" id="pendCancel">Stop waiting</button>
-  </div>
-
-  <!-- a slot of its own, so the DEMO notice does not overwrite error banners -->
-  <div id="demoNote" class="hide"></div>
-
-  <div id="banners"></div>
-
-  <!-- RESOLUTION CONFIRMATION -->
-  <div class="banner hide" id="resBanner">
-    <div class="ttl">⚠ A resolution change is waiting for confirmation</div>
-    <div style="display:flex;align-items:center;gap:14px;margin:8px 0 10px">
-      <div><span id="resCount">60</span><span style="font-size:14px;color:var(--warn)"> s</span></div>
-      <div style="font-size:13px;color:var(--fg)">If you do not confirm, the resolution <b>reverts by itself</b> to native.</div>
-    </div>
-    <div class="btn-row">
-      <button class="btn-p" id="btnResConfirm">✓ Confirm</button>
-      <button id="btnResRevert">Revert now</button>
-    </div>
-  </div>
-
-  <!-- ================= TAB: OVERVIEW ================= -->
-  <section id="tab-over">
-
-    <div class="card">
-      <h2>Profile</h2>
-      <div class="profiles" id="profiles"></div>
-      <div class="btn-row" style="margin-top:10px">
-        <button id="btnProfAuto" style="flex:1">🤖 Auto <span class="sub" id="autoState"></span></button>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>CPU — throttling <span class="sub" style="text-transform:none;letter-spacing:0">(current cap vs. HW maximum)</span></h2>
-      <div id="clusters"><div class="sub">…</div></div>
-    </div>
-
-    <div class="card">
-      <h2>Temperatures</h2>
-      <div class="tgrid" id="temps"><div class="sub">…</div></div>
-      <div class="tgrid" id="temps2" style="margin-top:8px"></div>
-    </div>
-
-    <div class="card">
-      <h2>GPU (Mali)</h2>
-      <div id="gpu"><div class="sub">…</div></div>
-    </div>
-
-    <div class="card">
-      <h2>Memory</h2>
-      <div id="mem"><div class="sub">…</div></div>
-    </div>
-
-    <div class="card">
-      <h2>Battery</h2>
-      <div id="bat"><div class="sub">…</div></div>
-      <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
-        <div style="display:flex;justify-content:space-between;font-size:14px">
-          <span style="color:var(--muted)">Set the cap to</span>
-          <span style="font-weight:700"><span id="chgVal" class="mono">—</span> %</span>
-        </div>
-        <input type="range" id="chgSlider" min="50" max="100" step="5" value="100">
-        <div class="btn-row">
-          <button class="btn-sm btn-p" id="btnChgApply" disabled>Apply</button>
-          <button class="btn-sm" id="btnChgOff">Disable the limit (100 %)</button>
-        </div>
-        <div class="sub" style="margin-top:6px">Stock = 100 %. A lower cap extends the life of the cell.</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Resolution</h2>
-      <div id="disp"><div class="sub">…</div></div>
-      <div class="banner warn" style="margin:12px 0 8px">
-        <div class="ttl">⚠ Changing the resolution is risky</div>
-        <div style="font-size:13px">
-          A non-native resolution can break the layout of system elements and of some apps.
-          After switching, a <b>60 s safeguard</b> runs: if you do not press <b>Confirm</b>
-          within that time, the system returns to native 1080 × 2400 by itself. If the UI
-          cannot be operated after the change, <b>wait a minute</b> and the resolution comes
-          back on its own.
-        </div>
-      </div>
-      <div class="btn-row" id="resPresets"></div>
-      <button class="btn-p" id="btnResReset" style="width:100%;margin-top:10px;padding:13px">⤺ Reset to native (1080 × 2400)</button>
-      <div class="sub" style="margin-top:6px">The <code>native</code> preset is applied without a safeguard. The reset sets DPI 420.</div>
-    </div>
-
-    <div class="card" style="border-color:var(--crit)">
-      <h2 style="color:var(--crit)">Danger zone</h2>
-      <button class="btn-d" id="btnRevert" style="width:100%;padding:13px">↺ Restore everything to stock</button>
-      <div class="sub" style="margin-top:6px">Restores all values from the backup in <code>backup/stock.conf</code>.</div>
-    </div>
-  </section>
-
-  <!-- ================= TAB: TWEAKS ================= -->
-  <section id="tab-tweaks" class="hide">
-    <div class="card">
-      <h2>Tweaks</h2>
-      <div class="sub" style="margin-bottom:10px">
-        Individual tuning knobs beyond the profiles. Each one states its risk and the stock
-        value it can be returned to at any time.
-      </div>
-      <div class="btn-row">
-        <label class="toggle"><input type="checkbox" id="twAdv"> Advanced</label>
-        <button class="btn-sm" id="btnTwReload" style="margin-left:auto">⟳ Load</button>
-        <button class="btn-sm btn-d" id="btnTwResetAll">Reset all</button>
-      </div>
-    </div>
-    <div id="tweaksHost"><div class="card"><div class="sub">Loading…</div></div></div>
-  </section>
-
-  <!-- ================= TAB: APPS ================= -->
-  <section id="tab-apps" class="hide">
-    <div class="card">
-      <h2>What is genuinely per-app</h2>
-      <div style="font-size:13.5px;line-height:1.5">
-        <p style="margin:0 0 10px">
-          <b><span class="scope app">PER-APP</span> the FPS limit and downscale</b> — these
-          are held by the system Game Mode at the app itself. They apply <b>always</b> while
-          that app runs and do not touch any other app. This is real isolation.
-        </p>
-        <p style="margin:0 0 10px">
-          <b><span class="scope glob">GLOBAL</span> the performance profile, GPU and resolution</b> —
-          the phone can only have these set <b>once for the whole system</b>.
-          pixel_tune therefore merely <b>switches</b> them when you enter an app and
-          <b>switches them back</b> when you leave. While the app is in the foreground they
-          affect the entire system, including everything running in the background.
-        </p>
-        <p style="margin:0;color:var(--muted)">
-          So do not expect isolation that does not exist: two apps running with two
-          different profiles at once is not possible. The one in the foreground wins, and
-          with fast switching the change may lag a little behind.
-        </p>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="btn-row">
-        <button class="btn-p" id="btnAppAdd">+ Add a rule</button>
-        <button class="btn-sm" id="btnAppReload" style="margin-left:auto">⟳ Load</button>
-      </div>
-      <div class="sub" style="margin-top:8px" id="appResState">…</div>
-    </div>
-
-    <div id="appsHost"><div class="card"><div class="sub">Loading…</div></div></div>
-  </section>
-
-  <!-- ================= TAB: DAEMON ================= -->
-  <section id="tab-daemon" class="hide">
-    <div class="card">
-      <h2>The adaptive daemon</h2>
-      <div id="daemonBox"><div class="sub">…</div></div>
-      <div class="btn-row" style="margin-top:12px">
-        <button class="btn-p" id="btnDaemonToggle" style="flex:1">…</button>
-        <button class="btn-sm" id="btnDaemonReload">⟳ Load</button>
-      </div>
-      <div class="sub" style="margin-top:8px">
-        <b>Daemon: off</b> forbids the daemon to switch profiles.
-        <b>Profile auto</b> (in Overview) only clears the manual lock and gives it back the
-        right to decide.
-      </div>
-    </div>
-    <div class="card">
-      <h2>Output of <code>pxtune auto status</code></h2>
-      <pre id="daemonRaw" style="white-space:pre-wrap;word-break:break-word;font-size:12px;margin:0;color:var(--muted)">…</pre>
-    </div>
-  </section>
-
-  <div class="sub" style="text-align:center;margin-top:14px">
-    <span id="apiInfo">—</span> · last update <span id="lastUpd">—</span>
-  </div>
-</div>
-
-<div id="toast"></div>
-<div id="modalHost"></div>
+  <div class="toast" id="toast"></div>
 
 <script>
 "use strict";
-/* ==========================================================================
-   THE NON-BLOCKING MODEL — why it is like this
-   --------------------------------------------------------------------------
-   Measured on the device: a profile switch takes ~5 s, `status --json` 1.6-3 s.
-   Every bridge call creates a new root shell. Previously we waited for the
-   command to finish, so the WebView froze for several seconds.
+var BIN="/data/adb/modules/pixel_tune/bin/pxtune";
+var STATE_DIR="/data/adb/pixel_tune";
+var OUT_LOG=STATE_DIR+"/webui.out";
+var DEMO=/[?&]demo=1/.test(location.search);
 
-   Now:
-   1) ACTIONS are fire-and-forget. The command is launched via `nohup ... &` and
-      the bridge returns immediately (tens of ms), because the shell exits at
-      once. The command's output goes into a file, so it can be shown on error.
-   2) The button switches to the "working" state immediately and the UI shows
-      the target state OPTIMISTICALLY.
-   3) Then RECONCILIATION runs: the state is read after ~1 s (the next query is
-      scheduled only AFTER the previous one finishes, so they never overlap)
-      until the predicate says "done", for at most 15 s.
-   4) When that does not happen in time, a comprehensible error arrives plus
-      "Retry".
-   5) All bridge calls go through ONE queue (Bridge.q) — two never run at once,
-      not even while waiting.
-
-   ==========================================================================
-   THE `pxtune status --json` CONTRACT — verified against bin/pxtune (status_json)
-   --------------------------------------------------------------------------
-   {
-     "profile": {"active":"balanced","manual_override":false,
-                 "available":["balanced","game","night","performance","powersave"]},
-     "auto":    {"enabled":true},
-     "thermal": {"big":58.2,"mid":55.1,"little":52.0,"g3d":49.5,"skin":40.5,
-                 "soc":45.0,"charger":33.0,"display":38.0,"battery":31.5},
-     "cpu": {"policy0":{"cur":..,"max":..,"hw_max":..,"cdev_cur_state":..},
-             "policy4":{...},"policy8":{...}},
-     "gpu": {"cur":..,"max":..,"min":..,"util":..,"power_policy":"adaptive"},
-     "mem": {"zram_disksize":..,"zram_algorithm":"lz77eh","zram_used":..,
-             "zram_orig":..,"swappiness":60},
-     "battery": {"capacity":..,"status":"..","temp":..,"cycle_count":..,
-                 "charge_stop_level":..,"charge_start_level":..},
-     "display": {"width":..,"height":..,"density":..,
-                 "presets":["native","900x2000","810x1800","720x1600"],
-                 "res_pending":false,"res_pending_seconds":0}
-   }
-
-   The parser is deliberately TOLERANT (it also tries alternative key names and
-   normalises units), so that a small CLI change does not take the whole UI down.
-   ========================================================================== */
-
-var BIN = "/data/adb/modules/pixel_tune/bin/pxtune";
-var STATE_DIR = "/data/adb/pixel_tune";
-var OUT_LOG = STATE_DIR + "/webui_last.log";   /* the sink for fire-and-forget */
-
-/* Verified HW tables from SPEC.md — a fallback for when status --json does not
-   send hw_max, and for converting a cooling-device state into a frequency
-   (cur_state = N  =>  index (count-1-N) in the ascending list). */
-var FREQS = {
-  policy0:[324000,610000,820000,955000,1098000,1197000,1328000,1425000,1548000,1704000],
-  policy4:[402000,578000,697000,712000,910000,1065000,1221000,1328000,1418000,1572000,1836000,1945000,2130000,2245000,2367000],
-  policy8:[500000,880000,1164000,1298000,1557000,1745000,1885000,2049000,2147000,2294000,2363000,2556000,2687000,2850000,2914000],
-  gpu:[150000,302000,337000,376000,419000,467000,521000,580000,649000,723000,807000,850000,890000]
-};
-
-var CLUSTERS = [
-  { id:"policy0", alt:["little","cpu0","l"],      nm:"Little", co:"4× Cortex-A510", freqs:FREQS.policy0 },
-  { id:"policy4", alt:["big","mid","cpu4","b"],   nm:"Big",    co:"4× Cortex-A715", freqs:FREQS.policy4 },
-  { id:"policy8", alt:["prime","cpu8","p"],       nm:"Prime",  co:"1× Cortex-X3",   freqs:FREQS.policy8 }
-];
-
-var PROFILES = [
-  { id:"powersave",   ic:"🍃", nm:"Powersave",   ds:"minimum heat" },
-  { id:"balanced",    ic:"⚖️", nm:"Balanced",    ds:"stock" },
-  { id:"performance", ic:"🚀", nm:"Performance", ds:"max snappiness" },
-  { id:"game",        ic:"🎮", nm:"Game",        ds:"less throttling" },
-  { id:"night",       ic:"🌙", nm:"Night",       ds:"quiet running" }
-];
-
-/* FIX: this used to say 1080p/900p/720p — the CLI does not know such presets and
-   it ended in an error. These are the real names from bin/pxtune (RES_PRESETS). */
-var RES_FALLBACK = ["native","900x2000","810x1800","720x1600"];
-var RES_LABEL = {
-  "native":"Native · 1080 × 2400 · 420 dpi",
-  "900x2000":"900 × 2000 · 350 dpi",
-  "810x1800":"810 × 1800 · 315 dpi",
-  "720x1600":"720 × 1600 · 280 dpi"
-};
-
-/* Risk 0-3 */
-var RISK = [
-  { lb:"safe",          cls:"ok",   ds:"Reversible, with no known effect on stability." },
-  { lb:"low risk",      cls:"warn", ds:"May show slightly in battery life or smoothness." },
-  { lb:"elevated risk", cls:"hot",  ds:"May noticeably change system behaviour. Test one at a time." },
-  { lb:"high risk",     cls:"crit", ds:"May cause stalls, overheating or app crashes." }
-];
-
-/* Per-app keys: what the phone holds at the app and what it only switches globally. */
-var APP_KEYS = [
-  { k:"GAME_MODE",       scope:"app",  nm:"Game mode",
-    hint:"The system Game Mode of the given app. It stays with that app.",
-    type:"enum", opts:["","standard","performance","battery","custom"],
-    optLb:{ "":"— leave alone —","standard":"Standard","performance":"Performance","battery":"Battery","custom":"Custom" } },
-  { k:"GAME_FPS",        scope:"app",  nm:"FPS limit",
-    hint:"A frames-per-second cap for this app only. Works with the Custom mode.",
-    type:"enum", opts:["","0","30","40","45","60","90","120"],
-    optLb:{ "":"— leave alone —","0":"no limit" } },
-  { k:"GAME_DOWNSCALE",  scope:"app",  nm:"Downscale",
-    hint:"The app renders at a lower resolution and the system upscales the image. For this app only.",
-    type:"enum", opts:["","disable","0.9","0.8","0.7","0.6","0.5","0.4","0.3"],
-    optLb:{ "":"— leave alone —","disable":"off" } },
-  { k:"APP_PROFILE",     scope:"glob", nm:"Performance profile",
-    hint:"GLOBAL. Switched when you enter the app and switched back when you leave.",
-    type:"profile" },
-  { k:"APP_REFRESH_MIN", scope:"glob", nm:"Minimum refresh rate",
-    hint:"GLOBAL. The lower bound of the adaptive range while the app is in the foreground.",
-    type:"enum", opts:["","60","90","120"], optLb:{ "":"— leave alone —" }, unit:" Hz" },
-  { k:"APP_REFRESH_PEAK",scope:"glob", nm:"Peak refresh rate",
-    hint:"GLOBAL. The upper bound of the adaptive range.",
-    type:"enum", opts:["","60","90","120"], optLb:{ "":"— leave alone —" }, unit:" Hz" },
-  { k:"APP_RES",         scope:"glob", nm:"Display resolution",
-    hint:"GLOBAL and RISKY. It changes the resolution of the whole system, not just the app.",
-    type:"res", risky:true },
-  { k:"APP_RES_ENABLE",  scope:"glob", nm:"Allow resolution switching",
-    hint:"OFF by default. While it is off, the APP_RES key is ignored.",
-    type:"bool", risky:true }
-];
-
-var DEMO = /[?&]demo=1/.test(location.search);
-
-/* ==========================================================================
-   1) THE KERNELSU BRIDGE — variant detection + a serialised queue
-   --------------------------------------------------------------------------
-   Verified against the source of the `kernelsu` package (npm, v3.0.2), which is
-   a thin wrapper around the global `ksu` object:
-
-     ksu.exec(cmd)                              -> synchronous, returns stdout
-     ksu.exec(cmd, callbackName)                -> window[cb](errno,stdout,stderr)
-     ksu.exec(cmd, optionsJSON, callbackName)   -> the same + cwd/env
-     ksu.spawn(cmd, argsJSON, optionsJSON, cbName)
-         -> window[cbName] must be an object shaped like ChildProcess:
-            { stdout:{emit(ev,data)}, stderr:{emit(ev,data)}, emit(ev,arg) }
-            the native side calls .stdout.emit("data", …) and .emit("exit", code)
-
-   `spawn` is STREAMED and does not hold the bridge for the duration of the
-   command, which is why we prefer it for READING state. Feature-detected; the
-   fallback works without it too.
-   ========================================================================== */
-var API = { mode:"none", label:"not detected", spawn:false };
-var cbSeq = 0;
-function uniq(p){ return p + "_" + Date.now().toString(36) + "_" + (cbSeq++); }
-
+/* ---------- the KernelSU bridge (verified variant) ---------- */
+var API={mode:"none",label:"not detected"};var cbSeq=0;
+function uniq(p){return p+"_"+Date.now().toString(36)+"_"+(cbSeq++);}
 function detectApi(){
-  if (DEMO){ API = { mode:"demo", label:"DEMO (made-up data)", spawn:false }; return; }
-  var k = window.ksu;
-  if (!k){ API = { mode:"none", label:"the `ksu` bridge is not available", spawn:false }; return; }
-  /* CAUTION - VERIFIED ON THE DEVICE (KernelSU-Next, ksud 3.3.0):
-     `ksu.spawn("sh", JSON.stringify(["-c", cmd]), ...)` DOES NOT WORK. The native
-     side does not process that JSON argument string the way the npm package
-     `kernelsu` assumes - only the FIRST token of the command reaches `sh -c`.
-     In practice that meant `pxtune` was run without arguments and returned the
-     help text instead of JSON; the WebUI then reported "Invalid JSON ...
-     position 2".
-
-     `ksu.exec` is verified to work. Its synchronicity no longer matters: the CLI
-     was sped up from 9.7 s to ~250 ms (status --json), so the UI does not freeze.
-     Actions additionally run through `fire()` = `nohup ... &`, so the bridge
-     returns immediately.
-
-     spawn is kept only as an emergency fallback in case exec were missing. */
-  API.spawn = typeof k.spawn === "function";
-  if (typeof k.exec === "function"){ API.mode = "cb3"; API.label = "ksu.exec(cmd, options, cb)"; }
-  else if (API.spawn){ API.mode = "spawn"; API.label = "ksu.spawn (emergency fallback)"; }
-  else { API.mode = "none"; API.label = "the `ksu` bridge has neither exec nor spawn"; }
+  if(DEMO){API={mode:"demo"};return;}
+  var k=window.ksu;
+  if(!k){API={mode:"none"};return;}
+  if(typeof k.exec==="function"){API={mode:"cb3"};}
+  else{API={mode:"none"};}
+}
+function viaExec(cmd,t){return new Promise(function(res,rej){
+  var name=uniq("cb"),done=false;
+  var timer=setTimeout(function(){if(done)return;done=true;clean();rej(new Error("timeout"));},t);
+  function clean(){try{delete window[name];}catch(e){window[name]=undefined;}}
+  window[name]=function(errno,stdout,stderr){if(done)return;done=true;clearTimeout(timer);clean();
+    res({errno:Number(errno),stdout:String(stdout==null?"":stdout),stderr:String(stderr==null?"":stderr)});};
+  try{window.ksu.exec(cmd,"{}",name);}
+  catch(e){done=true;clearTimeout(timer);clean();
+    try{res({errno:0,stdout:String(window.ksu.exec(cmd)||""),stderr:""});}catch(e3){rej(e3);}}
+});}
+var Q={q:[],running:false};
+function bridge(cmd,t){t=t||20000;
+  if(API.mode==="none")return Promise.reject(new Error("Open the module from the KernelSU manager (com.rifsxd.ksunext)."));
+  if(API.mode==="demo")return Promise.resolve({errno:0,stdout:demo(cmd),stderr:""});
+  return new Promise(function(res,rej){Q.q.push({cmd:cmd,t:t,res:res,rej:rej});pump();});
+}
+function pump(){if(Q.running||!Q.q.length)return;var j=Q.q.shift();Q.running=true;
+  viaExec(j.cmd,j.t).then(j.res,j.rej).then(function(){Q.running=false;setTimeout(pump,0);},function(){Q.running=false;setTimeout(pump,0);});}
+function shq(s){return "'"+String(s).replace(/'/g,"'\\''")+"'";}
+function fire(args){
+  var inner="exec >"+OUT_LOG+" 2>&1; "+BIN+" "+args;
+  var cmd="mkdir -p "+STATE_DIR+" 2>/dev/null; nohup sh -c "+shq(inner)+" </dev/null >/dev/null 2>&1 &";
+  return bridge(cmd,8000);
 }
 
-/* --- the individual variants; each returns Promise<{errno,stdout,stderr}> --- */
-
-function viaSpawn(cmd, timeoutMs){
-  return new Promise(function(resolve, reject){
-    var name = uniq("pxtSp"), out = [], err = [], done = false, timer;
-    function fin(){ if (timer) clearTimeout(timer); try{ delete window[name]; }catch(e){ window[name] = undefined; } }
-    function mk(buf){
-      return { listeners:{}, on:function(){},
-               emit:function(ev, data){ if (ev === "data" && data != null) buf.push(String(data)); } };
-    }
-    var child = {
-      listeners:{}, stdin:mk([]), stdout:mk(out), stderr:mk(err),
-      on:function(){},
-      emit:function(ev, arg){
-        if (done) return;
-        if (ev === "exit"){ done = true; fin(); resolve({ errno:Number(arg) || 0, stdout:out.join(""), stderr:err.join("") }); }
-        else if (ev === "error"){ done = true; fin(); reject(new Error("ksu.spawn: " + (arg && arg.message ? arg.message : arg))); }
-      }
-    };
-    timer = setTimeout(function(){
-      if (done) return; done = true; fin();
-      reject(new Error("The time limit of " + Math.round(timeoutMs/1000) + " s expired.\nCommand: " + cmd));
-    }, timeoutMs);
-    window[name] = child;
-    try { window.ksu.spawn("sh", JSON.stringify(["-c", cmd]), "{}", name); }
-    catch (e){ if (!done){ done = true; fin(); reject(e); } }
-  });
-}
-
-function viaExec(cmd, timeoutMs){
-  return new Promise(function(resolve, reject){
-    var name = uniq("pxtCb"), done = false;
-    var timer = setTimeout(function(){
-      if (done) return; done = true; clean();
-      reject(new Error("The time limit of " + Math.round(timeoutMs/1000) + " s expired.\nCommand: " + cmd));
-    }, timeoutMs);
-    function clean(){ try{ delete window[name]; }catch(e){ window[name] = undefined; } }
-    /* The manager calls the callback via evaluateJavascript in the global scope,
-       so it MUST live on window. */
-    window[name] = function(errno, stdout, stderr){
-      if (done) return; done = true; clearTimeout(timer); clean();
-      resolve({ errno:Number(errno), stdout:String(stdout == null ? "" : stdout), stderr:String(stderr == null ? "" : stderr) });
-    };
-    try {
-      if (API.mode === "cb3")      window.ksu.exec(cmd, "{}", name);
-      else if (API.mode === "cb2") window.ksu.exec(cmd, name);
-      else throw new Error("no async mode");
-    } catch (e1){
-      if (API.mode === "cb3"){
-        /* an older bridge without the 3-arg variant */
-        try { API.mode = "cb2"; API.label = "ksu.exec(cmd, cb)"; window.ksu.exec(cmd, name); return; } catch(e2){}
-      }
-      done = true; clearTimeout(timer); clean();
-      /* The last resort: the synchronous exec(cmd) — it returns only stdout, no
-         errno. Here the bridge really does block, which is why actions use nohup. */
-      try {
-        var o = window.ksu.exec(cmd);
-        API.mode = "sync"; API.label = "ksu.exec(cmd) — synchronous, no errno";
-        resolve({ errno:0, stdout:String(o == null ? "" : o), stderr:"" });
-      } catch (e3){
-        reject(new Error("The ksu.exec call failed: " + (e3 && e3.message ? e3.message : e3)));
-      }
-    }
-  });
-}
-
-function viaSync(cmd){
-  try { return Promise.resolve({ errno:0, stdout:String(window.ksu.exec(cmd) || ""), stderr:"" }); }
-  catch (e){ return Promise.reject(new Error("The ksu.exec call failed: " + (e && e.message ? e.message : e))); }
-}
-
-/* --- the serialised queue: two bridge calls never run at once --- */
-var Bridge = { q:[], running:false };
-
-function bridge(cmd, timeoutMs){
-  timeoutMs = timeoutMs || 25000;
-  if (API.mode === "none")
-    return Promise.reject(new Error("The WebUI `ksu` bridge is not available.\nOpen the module through the KernelSU manager (com.rifsxd.ksunext), not in an ordinary browser."));
-  return new Promise(function(resolve, reject){
-    Bridge.q.push({ cmd:cmd, t:timeoutMs, res:resolve, rej:reject });
-    pump();
-  });
-}
-
-function pump(){
-  if (Bridge.running || !Bridge.q.length) return;
-  var job = Bridge.q.shift();
-  Bridge.running = true;
-  var p;
-  if (API.mode === "demo")      p = demoExec(job.cmd);   /* demo goes through the queue too, so the same path gets tested */
-  else if (API.mode === "spawn")p = viaSpawn(job.cmd, job.t);
-  else if (API.mode === "sync") p = viaSync(job.cmd);
-  else                          p = viaExec(job.cmd, job.t);
-  p.then(job.res, function(e){
-    /* spawn may be missing/throw on some builds — degrade to exec */
-    if (API.mode === "spawn" && window.ksu && typeof window.ksu.exec === "function"){
-      API.mode = "cb3"; API.label = "ksu.exec(cmd, options, cb) — spawn failed";
-      $("apiInfo").textContent = "API: " + API.label;
-      viaExec(job.cmd, job.t).then(job.res, job.rej);
-      return;
-    }
-    job.rej(e);
-  }).then(function(){ Bridge.running = false; setTimeout(pump, 0); },
-          function(){ Bridge.running = false; setTimeout(pump, 0); });
-}
-
-/* Fire-and-forget: the shell detaches the process and exits at once, so the
-   bridge returns within tens of ms. The output goes into OUT_LOG so it can be
-   shown on failure. */
-function fire(args, raw){
-  /* `exec >LOG 2>&1` redirects the ENTIRE inner shell. If the redirect were
-     written after the command (`cmd >LOG`), then for chained commands
-     (`a && b >LOG`) only the output of the last one would be captured and the
-     error of the first would be lost. */
-  var inner = "exec >" + OUT_LOG + " 2>&1; " + (raw ? raw : BIN + " " + args);
-  var cmd = "mkdir -p " + STATE_DIR + " 2>/dev/null; nohup sh -c " + shq(inner) + " </dev/null >/dev/null 2>&1 &";
-  return bridge(cmd, 8000);
-}
-/* Quoting for sh. The arguments are additionally whitelisted beforehand (safeTok). */
-function shq(s){ return "'" + String(s).replace(/'/g, "'\\''") + "'"; }
-
-function toast(msg){
-  if (!DEMO && window.ksu && typeof window.ksu.toast === "function"){
-    try { window.ksu.toast(msg); return; } catch(e){}
-  }
-  var t = $("toast");
-  t.textContent = msg; t.classList.add("on");
-  clearTimeout(t._h); t._h = setTimeout(function(){ t.classList.remove("on"); }, 2600);
-}
+/* ---------- helpers ---------- */
+function $(id){return document.getElementById(id);}
+function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e;}
+function clr(n){while(n&&n.firstChild)n.removeChild(n.firstChild);return n;}
+function num(v){if(v==null||v==="")return null;var n=parseFloat(String(v).replace(",","."));return isFinite(n)?n:null;}
+function mhz(kh){return kh==null?"—":Math.round(kh/1000).toLocaleString("en-US");}
+function safeId(s){return /^[A-Za-z0-9_.\-]{1,64}$/.test(String(s));}
+function safeVal(s){return /^[A-Za-z0-9_.\- ]{1,80}$/.test(String(s));}
+function tempClass(kind,c){if(c==null)return"";
+  var th=kind==="j"?[55,70,85]:kind==="b"?[35,40,45]:[38,43,48];
+  return c<th[0]?"ok":c<th[1]?"warn":c<th[2]?"hot":"crit";}
+function toast(m){if(!DEMO&&window.ksu&&window.ksu.toast){try{window.ksu.toast(m);return;}catch(e){}}
+  var t=$("toast");t.textContent=m;t.classList.add("on");clearTimeout(t._h);t._h=setTimeout(function(){t.classList.remove("on");},2400);}
 
 /* ==========================================================================
-   2) HELPER FUNCTIONS
+   OVERVIEW
    ========================================================================== */
-function $(id){ return document.getElementById(id); }
-function el(tag, cls, txt){ var e = document.createElement(tag); if(cls) e.className = cls; if(txt != null) e.textContent = txt; return e; }
-function clear(n){ while (n && n.firstChild) n.removeChild(n.firstChild); return n; }
-
-/* Picks the first defined key from an object (case-insensitive). */
-function pick(obj){
-  if (!obj || typeof obj !== "object") return undefined;
-  var lower = null;
-  for (var i = 1; i < arguments.length; i++){
-    var k = arguments[i];
-    if (obj[k] !== undefined && obj[k] !== null && obj[k] !== "") return obj[k];
-    if (!lower){ lower = {}; for (var kk in obj) lower[kk.toLowerCase()] = obj[kk]; }
-    var v = lower[String(k).toLowerCase()];
-    if (v !== undefined && v !== null && v !== "") return v;
-  }
-  return undefined;
-}
-function num(v){
-  if (v === undefined || v === null || v === "") return null;
-  if (typeof v === "boolean") return v ? 1 : 0;
-  var n = parseFloat(String(v).replace(",", "."));
-  return isFinite(n) ? n : null;
-}
-function bool(v){
-  if (v === undefined || v === null || v === "") return null;
-  if (typeof v === "boolean") return v;
-  var s = String(v).toLowerCase();
-  if (s === "0" || s === "false" || s === "no" || s === "off" || s === "disabled") return false;
-  return s === "1" || s === "true" || s === "yes" || s === "on" || s === "enabled";
-}
-/* Temperature: pxtune returns °C, but sysfs uses millicelsius — normalise both. */
-function toC(v){ var n = num(v); if (n === null) return null; return Math.abs(n) > 200 ? n / 1000 : n; }
-/* Frequency: both kHz (sysfs) and MHz. The lowest real one is 150000 kHz. */
-function mhz(kh){ return kh === null || kh === undefined ? "—" : Math.round(kh / 1000).toLocaleString("en-GB"); }
-function gib(b){ var n = num(b); return n === null ? "—" : (n / 1073741824).toFixed(2) + " GB"; }
-function fx(n, d){ return n === null || n === undefined ? "—" : n.toFixed(d === undefined ? 1 : d); }
-
-/* Colour thresholds. The junction (silicon) tolerates more than the skin (the surface in your hand). */
-function tempClass(kind, c){
-  if (c === null) return "";
-  var th = kind === "junction" ? [55,70,85] : kind === "battery" ? [35,40,45] : [38,43,48];
-  return c < th[0] ? "ok" : c < th[1] ? "warn" : c < th[2] ? "hot" : "crit";
-}
-function throtClass(p){ return p === null ? "" : p >= 90 ? "ok" : p >= 70 ? "warn" : p >= 50 ? "hot" : "crit"; }
-function throtColor(p){ var c = throtClass(p); return c ? "var(--" + c + ")" : "var(--fg)"; }
-
-/* A whitelist against shell injection. The tokens go straight onto the command line. */
-function safeTok(s){ return /^[A-Za-z0-9_.\-]{1,32}$/.test(String(s)); }
-/* The same character class, only longer — tweak ids reach 41 characters
-   (e.g. power.adaptive_battery_management_enabled), so a 32-character limit is
-   not enough for them. */
-function safeId(s){ return /^[A-Za-z0-9_.\-]{1,64}$/.test(String(s)); }
-/* Tweak values: numbers, enum items (mq-deadline, 0.25, always…). */
-function safeVal(s){ return /^[A-Za-z0-9_.\-]{1,64}$/.test(String(s)); }
-/* Package names are longer than 32 characters, but stricter character-wise. */
-function safePkg(s){ return /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/.test(String(s)) && String(s).length <= 128; }
-
-function kv(k, v){
-  var r = el("div", "kv");
-  r.appendChild(el("span", "k", k));
-  var vv = el("span", "v mono"); vv.appendChild(document.createTextNode(v));
-  r.appendChild(vv);
-  return r;
-}
-function badge(cls, txt, title){
-  var b = el("span", "badge " + cls, txt);
-  if (title) b.title = title;
-  return b;
-}
-
-/* A tolerant JSON parse of a command's output. It never lets a blank page through. */
-function parseJson(r, what){
-  var raw = (r.stdout || "").trim();
-  if (!raw && r.errno !== 0)
-    throw new Error(what + " exited with code " + r.errno + (r.stderr ? "\n" + r.stderr : ""));
-  var i = raw.indexOf("{"), j = raw.lastIndexOf("}");
-  if (i < 0 || j <= i){
-    var a = raw.indexOf("["), b = raw.lastIndexOf("]");
-    if (a >= 0 && b > a){ i = a; j = b; }
-    else throw new Error("The output of `" + what + "` is not JSON.\n\n" + raw.slice(0, 400));
-  }
-  try { return JSON.parse(raw.slice(i, j + 1)); }
-  catch (e){ throw new Error("Invalid JSON from `" + what + "`:\n" + e.message + "\n\n" + raw.slice(0, 400)); }
-}
-
-/* ==========================================================================
-   3) STATE
-   ========================================================================== */
-var S = {
-  data:null, err:null, inFlight:false, sticky:false,
-  loopT:null, fails:0,
-  resDeadline:0, resTimer:null, chgDirty:false,
-  tab:"over",
-  tweaks:null, tweaksErr:null, tweaksLoaded:false,
-  apps:null, appsErr:null, appsLoaded:false,
-  daemonRaw:null, daemonLoaded:false
-};
-
-/* The normal interval is 5 s: the thermal HAL rewrites the cooling devices every
-   ~7 s (SPEC), so polling faster tells us nothing new — we would only create root
-   shells for nothing, and one read costs 1.6-3 s.
-   During reconciliation it switches to 1 s (see PEND_POLL_MS). */
-var INTERVALS = [
-  { ms:0,     lb:"off" },
-  { ms:2000,  lb:"2 s" },
-  { ms:5000,  lb:"5 s" },
-  { ms:10000, lb:"10 s" },
-  { ms:30000, lb:"30 s" }
+var PROFILES=[
+  {id:"powersave",ic:"🔋",nm:"Powersave"},
+  {id:"balanced",ic:"⚖️",nm:"Balanced"},
+  {id:"performance",ic:"🚀",nm:"Performance"},
+  {id:"game",ic:"🎮",nm:"Game"},
+  {id:"night",ic:"🌙",nm:"Night"}
 ];
-var intervalIdx = 2;
-
-var PEND_POLL_MS = 1000;   /* the delay AFTER a read completes, not a fixed interval */
-var PEND_TIMEOUT = 15000;  /* a profile switch takes ~5 s -> 3x margin */
-
-/* ==========================================================================
-   4) RECONCILIATION — the core of the non-blocking model
-   --------------------------------------------------------------------------
-   PEND = { label, deadline, poll(), retry(), onDone(ok) }
-   poll() returns Promise<bool> = "is it done yet?"
-   ========================================================================== */
-var PEND = null;
-
-function startAction(o){
-  /* o: { args | raw, label, kind, target, poll, timeout }
-     - args  = the arguments for `pxtune <args>`
-     - raw   = the whole command (for chaining several `pxtune` calls in one shell)
-     - kind/target = for the optimistic render
-     - poll  = Promise<bool> "is it done yet?" */
-  if (PEND){ toast("Please wait, running: " + PEND.label); return Promise.resolve(false); }
-  S.sticky = false; banner(null);
-  PEND = {
-    label: o.label,
-    args: o.args || o.raw,
-    kind: o.kind || null,
-    target: (o.target === undefined ? null : o.target),
-    poll: o.poll,
-    deadline: Date.now() + (o.timeout || PEND_TIMEOUT),
-    started: Date.now()
-  };
-  showPend(true);
-  renderAll();                       /* the optimistic re-render */
-  return fire(o.args, o.raw).then(function(){
-    scheduleLoop(400);               /* the first check sooner, so it feels snappy */
-    return true;
-  }).catch(function(e){
-    PEND = null; showPend(false);
-    renderAll();
-    failAction(o.label, o.args || o.raw, e && e.message ? e.message : String(e));
-    return false;
-  });
-}
-
-function showPend(on){
-  $("pendBar").classList.toggle("hide", !on);
-  if (on) $("pendTxt").textContent = PEND.label + " — waiting for confirmation from the system…";
-}
-
-function finishPending(ok, err){
-  var pe = PEND; PEND = null; showPend(false);
-  if (!pe) return;
-  /* Re-render first (which drops the optimistic state), and only then show any
-     message — otherwise renderAll() would wipe it straight away. */
-  renderAll();
-  if (ok){
-    S.fails = 0; S.sticky = false; banner(null);
-    toast(pe.label + " — done");
-  } else {
-    failAction(pe.label, pe.args,
-      "The system did not confirm the change within " + Math.round((Date.now() - pe.started)/1000) + " s." +
-      (err ? "\n" + err : ""));
-  }
-  scheduleLoop();
-}
-
-function failAction(label, args, detail){
-  S.sticky = true;   /* an ordinary re-render must not wipe this message */
-  banner("err", "Failed: " + label,
-    "The command `pxtune " + args + "` either failed or is taking longer than usual.",
-    detail,
-    [{ lb:"Retry", cls:"btn-p", fn:function(){ S.sticky = false; banner(null); rerun(); } },
-     { lb:"Show output", cls:"", fn:showLastOutput },
-     { lb:"Close", cls:"", fn:function(){ S.sticky = false; banner(null); } }]);
-  toast("The action failed");
-}
-
-/* A retry has to recreate the predicate — we keep it with the action. */
-var LAST_ACTION = null;
-function rerun(){ if (LAST_ACTION) LAST_ACTION(); }
-
-function showLastOutput(){
-  bridge("tail -n 40 " + OUT_LOG + " 2>/dev/null || echo '(the log is empty)'", 10000)
-    .then(function(r){
-      dialog("Output of the last command", (r.stdout || "").trim() || "(empty)", true);
-    })
-    .catch(function(e){ toast("The log could not be read"); });
-}
-
-/* ==========================================================================
-   5) THE LOOP — one setTimeout, never two reads at once
-   ========================================================================== */
-function scheduleLoop(delay){
-  clearTimeout(S.loopT); S.loopT = null;
-  var d = delay;
-  if (d === undefined){
-    if (PEND) d = PEND_POLL_MS;
-    else {
-      d = INTERVALS[intervalIdx].ms;
-      if (!d) return;
-      /* backoff after repeated errors: 2x, 3x, at most 4x */
-      if (S.fails >= 3) d = d * Math.min(4, S.fails - 1);
-    }
-  }
-  S.loopT = setTimeout(tick, d);
-}
-
-function tick(){
-  if (S.inFlight){ scheduleLoop(200); return; }
-  if (PEND){ pollPending().then(function(){ scheduleLoop(); }); return; }
-  if (document.hidden){ scheduleLoop(); return; }   /* a hidden page = do not poll */
-  refresh().then(function(){ scheduleLoop(); });
-}
-
-function pollPending(){
-  var pe = PEND;
-  if (!pe) return Promise.resolve();
-  var left = Math.max(0, Math.ceil((pe.deadline - Date.now()) / 1000));
-  $("pendTxt").textContent = pe.label + " — waiting for confirmation from the system… (" + left + " s)";
-  return Promise.resolve().then(pe.poll).then(function(done){
-    if (PEND !== pe) return;
-    if (done) finishPending(true);
-    else if (Date.now() >= pe.deadline) finishPending(false);
-  }).catch(function(e){
-    if (PEND !== pe) return;
-    if (Date.now() >= pe.deadline) finishPending(false, e && e.message ? e.message : String(e));
-  });
-}
-
-/* ==========================================================================
-   6) READING THE STATE
-   ========================================================================== */
-function refresh(manual){
-  if (S.inFlight) return Promise.resolve();
-  S.inFlight = true;
-  setStatus("busy", "loading…");
-  return bridge(BIN + " status --json", 20000).then(function(r){
-    var obj = parseJson(r, "pxtune status --json");
-    S.data = obj; S.err = null; S.fails = 0;
-    setStatus("ok", PEND ? "working…" : "OK");
-    renderAll();
-    $("lastUpd").textContent = new Date().toLocaleTimeString("en-GB");
-    return obj;
-  }).catch(function(e){
-    S.fails++;
-    S.err = e && e.message ? e.message : String(e);
-    setStatus("err", "error");
-    if (!PEND) renderStatusError(S.err);
-    if (manual) toast("Loading failed");
-    throw e;
-  }).then(function(v){ S.inFlight = false; return v; },
-          function(e){ S.inFlight = false; return null; });
-}
-
-function setStatus(kind, txt){
-  $("statDot").className = "dot " + (kind || "");
-  $("statTxt").textContent = txt;
-}
-
-/* --- the universal banner --- */
-function banner(kind, title, text, detail, actions){
-  var b = clear($("banners"));
-  if (!kind) return;
-  var d = el("div", "banner " + kind);
-  if (title) d.appendChild(el("div", "ttl", title));
-  if (text)  d.appendChild(el("div", null, text));
-  if (detail) d.appendChild(el("pre", null, detail));
-  if (actions && actions.length){
-    var row = el("div", "btn-row"); row.style.marginTop = "10px";
-    actions.forEach(function(a){
-      var bt = el("button", "btn-sm " + (a.cls || ""), a.lb);
-      bt.onclick = a.fn;
-      row.appendChild(bt);
-    });
-    d.appendChild(row);
-  }
-  b.appendChild(d);
-}
-
-function renderStatusError(msg){
-  banner("err", "Could not read the state",
-    "Check that the pixel_tune module is running and that " + BIN + " is executable.",
-    msg,
-    [{ lb:"Try again", cls:"btn-p", fn:function(){ refresh(true); } }]);
-}
-
-/* ==========================================================================
-   7) RENDERING — THE OVERVIEW
-   ========================================================================== */
-function renderAll(){
-  try {
-    if (S.data){
-      if (!S.err && !S.sticky) banner(null);
-      renderProfiles(S.data);
-      renderClusters(S.data);
-      renderTemps(S.data);
-      renderGpu(S.data);
-      renderMem(S.data);
-      renderBattery(S.data);
-      renderDisplay(S.data);
-      renderDaemon();
-      syncResPending(S.data);
-    }
-    if (S.tab === "tweaks") renderTweaks();
-    if (S.tab === "apps")   renderApps();
-  } catch (e){
-    /* A rendering error must never leave a blank page. */
-    banner("err", "Rendering error", "The UI could not be built from the received data.",
-      (e && e.stack) || String(e), [{ lb:"Try again", cls:"btn-p", fn:function(){ refresh(true); } }]);
-  }
-}
-
-function activeProfile(d){
-  var p = pick(d, "profile", "profiles") || {};
-  if (typeof p === "string") return p;
-  return pick(p, "active", "current", "name") || pick(d, "active_profile") || "";
-}
-
-function renderProfiles(d){
-  var p = pick(d, "profile", "profiles") || {};
-  var active = activeProfile(d);
-  var manual = bool(pick(p, "manual_override", "manual", "override"));
-  if (manual === null) manual = bool(pick(d, "manual_override"));
-
-  var target = (PEND && PEND.kind === "profile") ? PEND.target : null;
-
-  var host = clear($("profiles"));
-  var list = pick(p, "available", "list");
-  var ids = Array.isArray(list) && list.length
-    ? list.map(function(x){ return typeof x === "string" ? x : pick(x, "name", "id"); }).filter(Boolean)
-    : PROFILES.map(function(x){ return x.id; });
-
-  ids.forEach(function(id){
-    var meta = PROFILES.filter(function(x){ return x.id === id; })[0] || { ic:"•", nm:id, ds:"" };
-    var b = el("button", "prof");
-    /* OPTIMISTICALLY: while a switch is running, pretend the target profile already applies. */
-    var shown = target || active;
-    b.setAttribute("aria-pressed", String(id === shown));
-    if (target === id) b.className += " pending";
-    b.appendChild(el("div", "ic", meta.ic));
-    b.appendChild(el("div", "nm", meta.nm));
-    if (target === id) b.appendChild(el("div", "ds", "switching…"));
-    else if (meta.ds)  b.appendChild(el("div", "ds", meta.ds));
-    b.disabled = !!PEND;
-    b.onclick = function(){ switchProfile(id, meta.nm); };
-    host.appendChild(b);
-  });
-
-  $("autoState").textContent = manual === true ? "(off — manual profile)" : manual === false ? "(active)" : "";
-  $("btnProfAuto").disabled = !!PEND;
-}
-
-function renderClusters(d){
-  var cpu = pick(d, "cpu", "cpus", "clusters", "policies") || {};
-  var host = clear($("clusters"));
-
-  CLUSTERS.forEach(function(c){
-    var o = pick.apply(null, [cpu, c.id].concat(c.alt));
-    if (o === undefined) o = {};
-    if (typeof o !== "object") o = { cur:o };
-
-    var freqs = c.freqs;
-    var hwMax = toKHz(pick(o, "hw_max", "hwmax", "cpuinfo_max_freq")) || freqs[freqs.length - 1];
-    var cur   = toKHz(pick(o, "cur", "cur_freq", "scaling_cur_freq", "current"));
-    var cap   = toKHz(pick(o, "max", "max_freq", "scaling_max_freq", "cap", "limit"));
-
-    /* When only the cooling device state arrives, work the cap out using the
-       verified rule from the SPEC: index = (count - 1 - cur_state). */
-    var cst = num(pick(o, "cdev_cur_state", "cooling_cur_state", "cur_state"));
-    if (cap === null && cst !== null){
-      var idx = freqs.length - 1 - Math.round(cst);
-      if (idx >= 0 && idx < freqs.length) cap = freqs[idx];
-    }
-    if (cap === null) cap = hwMax;
-
-    var pct  = hwMax ? Math.max(0, Math.min(100, cap / hwMax * 100)) : null;
-    var curP = (hwMax && cur !== null) ? Math.max(0, Math.min(100, cur / hwMax * 100)) : 0;
-    var capP = pct === null ? 100 : pct;
-
-    var box = el("div", "clu");
-    var top = el("div", "top");
-    top.appendChild(el("span", "nm", c.nm));
-    top.appendChild(el("span", "co", c.co));
-    var pc = el("span", "pct", pct === null ? "—" : Math.round(pct) + " %");
-    pc.style.color = throtColor(pct);
-    pc.title = "The current cap as a fraction of the hardware maximum";
-    top.appendChild(pc);
-    box.appendChild(top);
-
-    var tr = el("div", "track");
-    var head = el("div", "seg head");    head.style.width = capP + "%";
-    var blocked = el("div", "seg blocked"); blocked.style.width = (100 - capP) + "%";
-    var curSeg = el("div", "seg cur");   curSeg.style.width = curP + "%";
-    tr.appendChild(head); tr.appendChild(blocked); tr.appendChild(curSeg);
-    tr.title = "Blue = the current frequency · light = the available band · hatched = blocked by throttling";
-    box.appendChild(tr);
-
-    var lg = el("div", "lg");
-    lg.appendChild(el("span", null, "now " + mhz(cur) + " MHz"));
-    lg.appendChild(el("span", null,
-      "cap " + mhz(cap) + " / HW " + mhz(hwMax) + " MHz" + (cst !== null ? "  (cdev " + Math.round(cst) + ")" : "")));
-    box.appendChild(lg);
-    host.appendChild(box);
-  });
-
-  if (!host.children.length) host.appendChild(el("div", "sub", "No CPU data is available."));
-}
-
-function renderTemps(d){
-  var t = pick(d, "thermal", "temps", "temperature", "temperatures") || {};
-  var bat = pick(d, "battery", "batt") || {};
-
-  var main = [
-    { k:["big","cpu_big"],           lb:"BIG",     kind:"junction" },
-    { k:["mid","cpu_mid"],           lb:"MID",     kind:"junction" },
-    { k:["little","cpu_little"],     lb:"LITTLE",  kind:"junction" },
-    { k:["g3d","gpu"],               lb:"GPU",     kind:"junction" },
-    { k:["skin","quiet_therm"],      lb:"Skin",    kind:"skin" },
-    { k:["battery","battery_temp"],  lb:"Battery", kind:"battery" }
-  ];
-  var extra = [
-    { k:["soc","soc_therm"],         lb:"SoC",       kind:"skin" },
-    { k:["display","display_therm"], lb:"Display", kind:"skin" },
-    { k:["charger","charger_therm"], lb:"Charger", kind:"skin" }
-  ];
-
-  function tile(spec){
-    var v = pick.apply(null, [t].concat(spec.k));
-    if (v === undefined && spec.lb === "Battery") v = pick(bat, "temp", "temperature");
-    var c = toC(v);
-    var box = el("div", "t " + tempClass(spec.kind, c));
-    box.appendChild(el("div", "lb", spec.lb));
-    var vl = el("div", "vl");
-    vl.appendChild(document.createTextNode(fx(c, 1)));
-    vl.appendChild(el("span", "un", " °C"));
-    box.appendChild(vl);
-    return { box:box, has:c !== null };
-  }
-
-  var h1 = clear($("temps"));
-  main.forEach(function(s){ h1.appendChild(tile(s).box); });
-  var h2 = clear($("temps2"));
-  extra.forEach(function(s){ var r = tile(s); if (r.has) h2.appendChild(r.box); });
-}
-
-function renderGpu(d){
-  var g = pick(d, "gpu", "mali") || {};
-  var host = clear($("gpu"));
-
-  var cur = toKHz(pick(g, "cur", "cur_freq", "current"));
-  var cap = toKHz(pick(g, "max", "max_freq", "scaling_max_freq", "cap"));
-  var min = toKHz(pick(g, "min", "min_freq", "scaling_min_freq"));
-  var hw  = toKHz(pick(g, "hw_max", "hwmax")) || FREQS.gpu[FREQS.gpu.length - 1];
-  var cst = num(pick(g, "cdev_cur_state", "cur_state"));
-  if (cap === null && cst !== null){
-    var idx = FREQS.gpu.length - 1 - Math.round(cst);
-    if (idx >= 0 && idx < FREQS.gpu.length) cap = FREQS.gpu[idx];
-  }
-  var util = num(pick(g, "util", "utilization", "load"));
-  var pol  = pick(g, "power_policy", "policy");
-  var pct = cap !== null && hw ? cap / hw * 100 : null;
-
-  host.appendChild(kv("Frequency", mhz(cur) + " MHz"));
-  var capRow = kv("Cap", mhz(cap) + " / " + mhz(hw) + " MHz");
-  if (pct !== null){
-    var b = badge(throtClass(pct), Math.round(pct) + " %");
-    b.style.marginLeft = "6px";
-    capRow.querySelector(".v").appendChild(b);
-  }
-  host.appendChild(capRow);
-  if (min !== null) host.appendChild(kv("Minimum", mhz(min) + " MHz"));
-  if (pol) host.appendChild(kv("Power policy", String(pol)));
-  host.appendChild(kv("Utilisation", util === null ? "—" : Math.round(util) + " %"));
-  if (util !== null){
-    var m = el("div", "mini"), i = el("i");
-    i.style.width = Math.max(0, Math.min(100, util)) + "%";
-    m.appendChild(i); host.appendChild(m);
-  }
-}
-
-function renderMem(d){
-  var m = pick(d, "mem", "memory", "zram", "vm") || {};
-  var host = clear($("mem"));
-
-  var size = num(pick(m, "zram_disksize", "disksize", "zram_size"));
-  var alg  = pick(m, "zram_algorithm", "comp_algorithm", "algorithm");
-  var used = num(pick(m, "zram_used", "mem_used_total", "compr_data_size"));
-  var orig = num(pick(m, "zram_orig", "orig_data_size"));
-  var swp  = num(pick(m, "swappiness", "vm_swappiness"));
-  if (swp === null) swp = num(pick(d, "swappiness"));
-
-  host.appendChild(kv("zram size", gib(size)));
-
-  var algRow = kv("Algorithm", alg ? String(alg) : "—");
-  if (alg){
-    var okAlg = String(alg).toLowerCase() === "lz77eh";
-    var b = badge(okAlg ? "ok" : "crit", okAlg ? "HW acceleration" : "no HW acceleration!",
-      okAlg ? "lz77eh runs on the Emerald Hill accelerator — compression costs ~0 CPU and ~0 heat."
-            : "Per the SPEC it must never be switched away from lz77eh — zstd/lz4 run on the CPU and generate heat.");
-    b.style.marginLeft = "6px";
-    algRow.querySelector(".v").appendChild(b);
-  }
-  host.appendChild(algRow);
-
-  if (used !== null){
-    var pct = size ? Math.max(0, Math.min(100, used / size * 100)) : null;
-    host.appendChild(kv("Used", gib(used) + (pct !== null ? " (" + Math.round(pct) + " %)" : "")));
-    if (pct !== null){
-      var mm = el("div", "mini"), ii = el("i"); ii.style.width = pct + "%"; mm.appendChild(ii); host.appendChild(mm);
-    }
-  }
-  if (orig !== null && used) host.appendChild(kv("Compression ratio", (orig / used).toFixed(2) + "x"));
-  host.appendChild(kv("swappiness", swp === null ? "—" : String(Math.round(swp))));
-}
-
-function renderBattery(d){
-  var b = pick(d, "battery", "batt") || {};
-  var host = clear($("bat"));
-
-  var cap = num(pick(b, "capacity", "level"));
-  var st  = pick(b, "status", "state");
-  var tp  = toC(pick(b, "temp", "temperature"));
-  var cyc = num(pick(b, "cycle_count", "cycles"));
-  var stop  = num(pick(b, "charge_stop_level", "stop_level"));
-  if (stop === null) stop = num(pick(d, "charge_stop_level"));
-  var start = num(pick(b, "charge_start_level", "start_level"));
-
-  var STAT = { Charging:"charging", Discharging:"discharging", Full:"full", "Not charging":"not charging", Unknown:"unknown" };
-
-  host.appendChild(kv("Level", cap === null ? "—" : Math.round(cap) + " %"));
-  if (cap !== null){
-    var m = el("div", "mini"), i = el("i");
-    i.style.width = Math.max(0, Math.min(100, cap)) + "%";
-    i.style.background = cap <= 15 ? "var(--crit)" : cap <= 30 ? "var(--warn)" : "var(--ok)";
-    m.appendChild(i); host.appendChild(m);
-  }
-  host.appendChild(kv("Status", st ? (STAT[st] || String(st)) : "—"));
-
-  var tr = kv("Temperature", fx(tp, 1) + " °C");
-  var tc = tempClass("battery", tp);
-  if (tc) tr.querySelector(".v").style.color = "var(--" + tc + ")";
-  host.appendChild(tr);
-
-  if (cyc !== null) host.appendChild(kv("Cycles", String(Math.round(cyc))));
-  if (start !== null) host.appendChild(kv("Charge start", Math.round(start) + " %"));
-
-  /* OPTIMISTICALLY: while a cap change is running, show the target value. */
-  var shownStop = (PEND && PEND.kind === "charge") ? PEND.target : stop;
-  var sr = kv("Charge cap", shownStop === null || shownStop === undefined ? "—" : Math.round(shownStop) + " %");
-  if (shownStop !== null && shownStop !== undefined && shownStop < 100) sr.querySelector(".v").style.color = "var(--accent)";
-  if (PEND && PEND.kind === "charge") sr.querySelector(".v").appendChild(badge("warn", " applying…"));
-  host.appendChild(sr);
-
-  if (!S.chgDirty && stop !== null && !PEND){
-    var sl = $("chgSlider");
-    sl.value = String(Math.max(50, Math.min(100, Math.round(stop / 5) * 5)));
-    $("chgVal").textContent = sl.value;
-    $("btnChgApply").disabled = true;
-  }
-  $("btnChgOff").disabled = !!PEND;
-}
-
-function renderDisplay(d){
-  var s = pick(d, "display", "res", "resolution", "screen") || {};
-  var host = clear($("disp"));
-
-  var w = num(pick(s, "width", "w")), h = num(pick(s, "height", "h"));
-  var cur = pick(s, "current", "size");
-  if ((w === null || h === null) && typeof cur === "string"){
-    var mm2 = cur.match(/(\d+)\s*[x×,]\s*(\d+)/);
-    if (mm2){ w = num(mm2[1]); h = num(mm2[2]); }
-  }
-  var dens = num(pick(s, "density", "dpi", "density_forced"));
-  var nat = (w === 1080 && h === 2400) || (w === null && h === null);
-
-  var r = kv("Current", (w && h ? w + " × " + h : "—") + (dens !== null ? "  ·  " + Math.round(dens) + " dpi" : ""));
-  if (!nat){ var bd = badge("warn", "non-native"); bd.style.marginLeft = "6px"; r.querySelector(".v").appendChild(bd); }
-  host.appendChild(r);
-  host.appendChild(kv("Native", "1080 × 2400  ·  420 dpi"));
-
-  var pr = pick(s, "presets", "available", "list");
-  var ids = Array.isArray(pr) && pr.length
-    ? pr.map(function(x){ return typeof x === "string" ? x : pick(x, "name", "id"); }).filter(Boolean)
-    : RES_FALLBACK;
-
-  var ph = clear($("resPresets"));
-  ids.forEach(function(id){
-    if (id === "native") return;   /* it has its own big button */
-    var b = el("button", "btn-sm");
-    b.style.flex = "1 0 45%";
-    b.appendChild(el("div", null, id));
-    if (RES_LABEL[id]) b.appendChild(el("div", "sub", RES_LABEL[id]));
-    b.disabled = !!PEND;
-    b.onclick = function(){ changeRes(id); };
-    ph.appendChild(b);
-  });
-  if (!ph.children.length) ph.appendChild(el("div", "sub", "No presets are available."));
-  $("btnResReset").disabled = !!PEND;
-}
-
-/* ==========================================================================
-   8) OVERVIEW ACTIONS
-   ========================================================================== */
-function switchProfile(id, nm){
-  if (!safeTok(id)){ toast("Invalid profile name"); return; }
-  LAST_ACTION = function(){ switchProfile(id, nm); };
-  startAction({
-    args: "profile " + id,
-    label: "Profile " + (nm || id),
-    kind: "profile", target: id,
-    poll: function(){
-      return refresh().then(function(dd){ return !!dd && activeProfile(dd) === id; });
-    }
-  });
-}
-
-function setCharge(v){
-  var args = (v === "off") ? "charge off" : "charge " + v;
-  var want = (v === "off") ? 100 : parseInt(v, 10);
-  if (v !== "off" && !(want >= 1 && want <= 100)){ toast("Invalid value"); return; }
-  LAST_ACTION = function(){ setCharge(v); };
-  S.chgDirty = false;
-  startAction({
-      kind:"charge", target:want,
-    args: args,
-    label: "Charge cap " + want + " %",
-    poll: function(){
-      return refresh().then(function(dd){
-        if (!dd) return false;
-        var b = pick(dd, "battery", "batt") || {};
-        return num(pick(b, "charge_stop_level", "stop_level")) === want;
-      });
-    }
-  });
-}
-
-function changeRes(preset){
-  if (!safeTok(preset)){ toast("Invalid preset name"); return; }
-  LAST_ACTION = function(){ changeRes(preset); };
-  startAction({
-      kind:"res", target:preset,
-    args: "res " + preset,
-    label: "Resolution " + preset,
-    timeout: 20000,
-    poll: function(){
-      return refresh().then(function(dd){
-        if (!dd) return false;
-        var s = pick(dd, "display", "res", "resolution") || {};
-        /* Done when the CLI reports a pending confirmation, or when the width already matches. */
-        if (bool(pick(s, "res_pending", "pending")) === true) return true;
-        var w = num(pick(s, "width", "w"));
-        var want = parseInt(String(preset).split("x")[0], 10);
-        return preset === "native" ? w === 1080 : (isFinite(want) && w === want);
-      });
-    }
-  });
-}
-
-function resAction(sub, label){
-  if (!safeTok(sub)) return;
-  LAST_ACTION = function(){ resAction(sub, label); };
-  startAction({
-      kind:"res", target:null,
-    args: "res " + sub,
-    label: label,
-    timeout: 20000,
-    poll: function(){
-      return refresh().then(function(dd){
-        if (!dd) return false;
-        var s = pick(dd, "display", "res", "resolution") || {};
-        if (sub === "confirm") return bool(pick(s, "res_pending", "pending")) === false;
-        return num(pick(s, "width", "w")) === 1080;
-      });
-    }
-  });
-}
-
-/* ==========================================================================
-   9) RESOLUTION — the 60 s safeguard
-   ========================================================================== */
-function startResCountdown(secs){
-  S.resDeadline = Date.now() + secs * 1000;
-  $("resBanner").classList.remove("hide");
-  tickRes();
-  clearInterval(S.resTimer);
-  S.resTimer = setInterval(tickRes, 250);
-  try { window.scrollTo({ top:0, behavior:"smooth" }); } catch(e){ window.scrollTo(0, 0); }
-}
-function tickRes(){
-  var left = Math.max(0, Math.ceil((S.resDeadline - Date.now()) / 1000));
-  $("resCount").textContent = String(left);
-  if (left <= 0){
-    stopResCountdown();
-    toast("Time is up — the resolution is returning to native");
-    scheduleLoop(1500);
-  }
-}
-function stopResCountdown(){
-  clearInterval(S.resTimer); S.resTimer = null; S.resDeadline = 0;
-  $("resBanner").classList.add("hide");
-}
-/* When the page loads while a confirmation is pending, take the countdown over from the state. */
-function syncResPending(d){
-  var s = pick(d, "display", "res", "resolution") || {};
-  var pend = bool(pick(s, "res_pending", "pending"));
-  if (pend === null) pend = bool(pick(d, "res_pending"));
-  var left = num(pick(s, "res_pending_seconds", "pending_seconds"));
-  if (pend === true){
-    if (!S.resTimer) startResCountdown(left !== null && left > 0 ? left : 60);
-    else if (left !== null && left > 0) S.resDeadline = Date.now() + left * 1000;
-  } else if (pend === false && S.resTimer){
-    stopResCountdown();
-  }
-}
-
-/* ==========================================================================
-   10) TWEAKS
-   --------------------------------------------------------------------------
-   The data comes from `pxtune tweak json` — a SEPARATE command, NOT part of
-   status --json. It is loaded only when the tab is opened and after a change,
-   never in the poll.
-   ========================================================================== */
-/* `--live` additionally reads the real current values from sysfs (the `current`
-   key). That costs time, but the tab is opened manually and is not polled — and
-   without it we would only show the user what is written in the config, not reality. */
-function loadTweaks(force){
-  if (S.tweaksLoaded && !force) return Promise.resolve(S.tweaks);
-  return bridge(BIN + " tweak json --live", 30000).then(function(r){
-    var o = parseJson(r, "pxtune tweak json --live");
-    if (pick(o, "error") === "registry_missing")
-      throw new Error("The tweak registry is missing (tweaks/registry.def). Reinstall the module.");
-    S.tweaks = normTweaks(o);
-    S.tweaksErr = null; S.tweaksLoaded = true;
-    return S.tweaks;
-  }).catch(function(e){
-    S.tweaksErr = e && e.message ? e.message : String(e);
-    S.tweaks = null; S.tweaksLoaded = true;
-    throw e;
-  });
-}
-
-/* The real shape from bin/pxtune-tweaks (cmd_tweak_json):
-   { version, live, tweaks:[{id,cat,mech,target,type,risk,flags:[],name,desc,
-                             set,value,stock[,current]}],
-     categories:[{id,name,n}], count:{active,errors,ts} }
-   - `cat` is the category ID, the readable name is only in `categories[]`
-   - `flags` is an ARRAY (boot | reapply | unverified | adv)
-   - `set` says whether the tweak is explicitly set; `value` is "" otherwise    */
-function normTweaks(o){
-  var cats = {}, order = [];
-  (pick(o, "categories") || []).forEach(function(c){
-    var id = String(pick(c, "id") || "");
-    if (!id) return;
-    cats[id] = String(pick(c, "name") || id);
-    order.push(id);
-  });
-  var arr = Array.isArray(o) ? o : (pick(o, "tweaks", "items", "list") || []);
-  if (!Array.isArray(arr)) arr = [];
-  var list = arr.map(function(t){
-    var flags = pick(t, "flags") || [];
-    if (!Array.isArray(flags)) flags = String(flags).split(",");
-    function hasFlag(f){ return flags.indexOf(f) >= 0; }
-    var catId = String(pick(t, "cat", "category") || "");
-    var set = bool(t.set) === true;
-    var live = (t.current !== undefined) ? t.current : undefined;
-    return {
-      id:    String(pick(t, "id", "key") || ""),
-      catId: catId,
-      cat:   cats[catId] || catId || "Other",
-      mech:  String(pick(t, "mech") || ""),
-      target:String(pick(t, "target") || ""),
-      name:  String(pick(t, "name", "title") || pick(t, "id") || "?"),
-      desc:  String(pick(t, "desc", "description") || ""),
-      type:  String(pick(t, "type", "kind") || "bool"),
-      set:   set,
-      value: (t.value === undefined || t.value === null) ? "" : t.value,
-      stock: (t.stock === undefined || t.stock === null) ? "" : t.stock,
-      live:  (live === undefined || live === null) ? null : live,
-      risk:  Math.max(0, Math.min(3, Math.round(num(pick(t, "risk")) || 0))),
-      unverified: hasFlag("unverified"),
-      adv:        hasFlag("adv"),
-      boot:       hasFlag("boot"),
-      reapply:    hasFlag("reapply")
+var curProfile="";
+function renderProfiles(){
+  var box=clr($("profiles"));
+  PROFILES.forEach(function(p){
+    var d=el("div","pf"+(p.id===curProfile?" on":""));
+    d.appendChild(el("div","ic",p.ic));
+    d.appendChild(el("div","nm",p.nm));
+    d.onclick=function(){
+      if(p.id===curProfile)return;
+      toast("Switching to "+p.nm+"…");
+      fire("profile "+p.id).then(function(){setTimeout(loadStatus,900);});
     };
-  }).filter(function(t){ return t.id && safeId(t.id); });
-  list._catOrder = order;
-  return list;
+    box.appendChild(d);
+  });
 }
-
-/* What to show as "current": first the actually read value (--live), then the
-   explicitly set one, otherwise the stock value. */
-function effVal(t){
-  if (t.live !== null && t.live !== "") return t.live;
-  if (t.set && t.value !== "") return t.value;
-  return t.stock;
+function cpuRow(lab,sub,cur,max,hwmax){
+  var r=el("div","row");
+  var l=el("div","lab",lab);var s=el("small",null,sub);l.appendChild(s);r.appendChild(l);
+  var tr=el("div","track");var i=el("i");
+  var pct=hwmax?Math.min(100,Math.round(cur/hwmax*100)):0;
+  i.style.width=pct+"%";tr.appendChild(i);r.appendChild(tr);
+  var v=el("div","val");v.innerHTML="<b>"+mhz(cur)+"</b> <span>/ "+mhz(max)+"</span>";
+  r.appendChild(v);return r;
 }
-
-function parseType(type){
-  var s = String(type || "bool");
-  if (s === "bool") return { k:"bool" };
-  if (s === "ro")   return { k:"ro" };
-  var m = s.match(/^int:(-?\d+):(-?\d+)$/);
-  if (m) return { k:"int", min:parseInt(m[1],10), max:parseInt(m[2],10) };
-  m = s.match(/^enum:(.+)$/);
-  if (m) return { k:"enum", opts:m[1].split(",").map(function(x){ return x.trim(); }).filter(Boolean) };
-  m = s.match(/^enumf:(.+)$/);
-  /* The options are read from the device and are not in the JSON -> a free field with validation. */
-  if (m) return { k:"enumf", src:m[1] };
-  return { k:"text" };
+function loadStatus(){
+  return bridge(BIN+" status --json").then(function(o){
+    var d;try{d=JSON.parse(o.stdout);}catch(e){warnApi("Invalid JSON from status. "+(o.stderr||""));return;}
+    $("apiWarn").style.display="none";
+    // profile
+    curProfile=(d.profile&&d.profile.active)||"";
+    var pf=PROFILES.filter(function(x){return x.id===curProfile;})[0];
+    $("pfActive").textContent=pf?pf.nm:(curProfile||"—");
+    renderProfiles();
+    // cpu
+    var cpu=d.cpu||{};var cr=clr($("cpuRows"));
+    var clusters=[["policy0","Little","4×A510"],["policy4","Big","4×A715"],["policy8","Prime","1×X3"]];
+    clusters.forEach(function(c){var p=cpu[c[0]];if(!p)return;
+      cr.appendChild(cpuRow(c[1],c[2],p.cur,p.max,p.hw_max));});
+    // gpu
+    var g=d.gpu||{};var gr=clr($("gpuRows"));
+    gr.appendChild(cpuRow("Mali","G715 MC","cur"in g?g.cur:null,g.max,890000));
+    var ur=el("div","row");ur.innerHTML='<div class="lab">Load</div><div class="track"><i style="width:'+(g.util||0)+'%"></i></div><div class="val"><b>'+(g.util||0)+'%</b></div>';
+    gr.appendChild(ur);
+    if(g.power_policy){var pr=el("div","row");pr.innerHTML='<div class="lab">Policy</div><div class="val" style="width:auto;flex:1;text-align:left"><b>'+g.power_policy+'</b></div>';gr.appendChild(pr);}
+    // temperatures
+    var th=d.thermal||{};var tb=clr($("temps"));
+    var tmap=[["big","CPU B","j"],["prime","Prime","j"],["g3d","GPU","j"],["skin","Skin","s"],
+              ["soc","SoC","s"],["battery","Bat","b"],["charger","Chgr","s"],["display","Disp","s"]];
+    tmap.forEach(function(t){var c=th[t[0]];if(c==null&&t[0]==="prime")c=th.mid;if(c==null)return;
+      var cls=tempClass(t[2],c);var e=el("div","temp "+cls);
+      e.appendChild(el("div","t",(Math.round(c*10)/10).toString()+"°"));
+      e.appendChild(el("div","n",t[1]));tb.appendChild(e);});
+    // battery
+    var b=d.battery||{};var bs=clr($("bstat"));
+    function bb(n,v){var d2=el("div","b");d2.appendChild(el("div","n",n));d2.appendChild(el("div","v",v));return d2;}
+    bs.appendChild(bb("Level",(b.capacity!=null?b.capacity+" %":"—")));
+    bs.appendChild(bb("Temp",(b.temp!=null?(Math.round(b.temp*10)/10).toString()+"°":"—")));
+    bs.appendChild(bb("Status",b.status||"—"));
+    bs.appendChild(bb("Cycles",b.cycle_count!=null?b.cycle_count:"—"));
+    if(b.charge_stop_level!=null){var cs=b.charge_stop_level;$("chg").value=cs;$("chgLabel").textContent=cs+" %";}
+    $("hdrSub").textContent="Pixel 8a · profile "+(pf?pf.nm:curProfile);
+  }).catch(function(e){warnApi(e.message);});
 }
+function warnApi(m){var w=$("apiWarn");w.style.display="block";w.textContent="⚠ "+m;}
 
-function fmtVal(t, v){
-  if (v === undefined || v === null || v === "") return "—";
-  var ty = parseType(t.type);
-  if (ty.k === "bool") return bool(v) ? "on" : "off";
-  return String(v);
+$("chg").oninput=function(){$("chgLabel").textContent=this.value+" %";};
+$("chgApply").onclick=function(){var v=this.parentNode.querySelector("#chg").value;
+  toast("Charge limit "+v+" %");fire("charge "+v).then(function(){setTimeout(loadStatus,700);});};
+
+/* ==========================================================================
+   TUNING (tweaks)
+   ========================================================================== */
+var TW=[],CATS=[],curCat="all",showAdv=false,descOpen={};
+var CATNAMES={io:"I/O",vm:"Memory",mem:"Memory",sched:"Scheduler",cpu:"CPU",gpu:"GPU",net:"Network",batt:"Battery",zram:"zRAM",ui:"Interface",power:"Power",disp:"Display",exp:"System"};
+function loadTweaks(){
+  return bridge(BIN+" tweak json --live",25000).then(function(o){
+    var d;try{d=JSON.parse(o.stdout);}catch(e){$("tweaks").innerHTML='<div class="muted">Could not load the tweaks.</div>';return;}
+    TW=d.tweaks||[];
+    var seen={};CATS=[];
+    TW.forEach(function(t){if(!seen[t.cat]){seen[t.cat]=1;CATS.push(t.cat);}});
+    renderCats();renderTweaks();
+  }).catch(function(e){$("tweaks").innerHTML='<div class="muted">'+e.message+'</div>';});
 }
-
+function renderCats(){
+  var bar=clr($("catbar"));
+  var all=el("div","catchip"+(curCat==="all"?" on":""),"All");
+  all.onclick=function(){curCat="all";renderCats();renderTweaks();};bar.appendChild(all);
+  CATS.forEach(function(c){var chip=el("div","catchip"+(curCat===c?" on":""),CATNAMES[c]||c);
+    chip.onclick=function(){curCat=c;renderCats();renderTweaks();};bar.appendChild(chip);});
+}
+function tweakCtl(t){
+  var wrap=el("div","ctl");
+  var type=t.type||"";
+  if(type==="bool"){
+    var on=(String(t.current)==="1"||String(t.current).toLowerCase()==="true"||String(t.value)==="1");
+    var sw=el("div","sw"+(on?" on":""));
+    sw.onclick=function(){var nv=sw.classList.contains("on")?"0":"1";applyTweak(t,nv);};
+    wrap.appendChild(sw);
+  } else if(type.indexOf("enum:")===0){
+    var opts=type.slice(5).split(",");
+    var sel=el("select");
+    opts.forEach(function(op){var o=el("option",null,op);o.value=op;
+      if(String(t.current)===op||String(t.value)===op)o.selected=true;sel.appendChild(o);});
+    sel.onchange=function(){applyTweak(t,sel.value);};wrap.appendChild(sel);
+  } else if(type.indexOf("enumf")===0){
+    var sel2=el("select");var cur=el("option",null,(t.current||"?")+" (now)");cur.value="";sel2.appendChild(cur);
+    sel2.onchange=function(){if(sel2.value)applyTweak(t,sel2.value);};
+    // options from the current list, when they come as [a] b c
+    var raw=String(t.current||"");var m=raw.match(/[A-Za-z0-9_.\-]+/g)||[];
+    m.forEach(function(op){var o=el("option",null,op);o.value=op;sel2.appendChild(o);});
+    wrap.appendChild(sel2);
+  } else if(type.indexOf("int:")===0){
+    var parts=type.split(":");
+    var box=el("div","numset");
+    var inp=el("input");inp.type="number";inp.min=parts[1];inp.max=parts[2];
+    inp.value=(t.value!=null?t.value:(t.current!=null?String(t.current).split(" ")[0]:""));
+    inp.style.width="88px";
+    var bset=el("button","btn sm","Set");bset.onclick=function(){applyTweak(t,inp.value);};
+    box.appendChild(inp);box.appendChild(bset);wrap.appendChild(box);
+  } else {
+    wrap.appendChild(el("span",null,""));
+  }
+  return wrap;
+}
+function applyTweak(t,val){
+  if(!safeId(t.id)||!safeVal(val)){toast("Invalid value");return;}
+  toast(t.name+" → "+val);
+  fire("tweak set "+t.id+" "+shq(val)).then(function(){setTimeout(function(){loadTweaks();},700);});
+}
+function resetTweak(t){toast("Reverting "+t.name);fire("tweak reset "+t.id).then(function(){setTimeout(loadTweaks,700);});}
 function renderTweaks(){
-  var host = clear($("tweaksHost"));
-  var adv = $("twAdv").checked;
-
-  if (S.tweaksErr){
-    var c = el("div", "card");
-    var d = el("div", "banner err");
-    d.appendChild(el("div", "ttl", "The tweaks could not be loaded"));
-    d.appendChild(el("div", null, "The command `pxtune tweak json` failed or did not return valid JSON. The rest of the WebUI keeps working."));
-    d.appendChild(el("pre", null, S.tweaksErr));
-    var row = el("div", "btn-row"); row.style.marginTop = "10px";
-    var rb = el("button", "btn-sm btn-p", "Try again");
-    rb.onclick = function(){ S.tweaksLoaded = false; renderTweaks(); loadTweaks(true).then(renderTweaks, renderTweaks); };
-    row.appendChild(rb); d.appendChild(row);
-    c.appendChild(d); host.appendChild(c);
-    return;
-  }
-  if (!S.tweaks){ host.appendChild(el("div", "card")).appendChild(el("div", "sub", "Loading…")); return; }
-  if (!S.tweaks.length){
-    host.appendChild(el("div", "card")).appendChild(el("div", "sub", "The tweak registry is empty."));
-    return;
-  }
-
-  var stable = S.tweaks.filter(function(t){ return !t.unverified && (adv || !t.adv); });
-  var exper  = S.tweaks.filter(function(t){ return  t.unverified && (adv || !t.adv); });
-  var hiddenAdv = S.tweaks.filter(function(t){ return t.adv; }).length;
-
-  /* grouping by category; the order comes from `categories[]` from the CLI */
-  function groups(list){
-    var order = [], map = {};
-    list.forEach(function(t){ if (!map[t.cat]){ map[t.cat] = []; order.push(t.cat); } map[t.cat].push(t); });
-    var pref = (S.tweaks && S.tweaks._catOrder) || [];
-    order.sort(function(a, b){
-      function rank(nm){
-        for (var i = 0; i < pref.length; i++){
-          var t0 = list.filter(function(x){ return x.cat === nm; })[0];
-          if (t0 && t0.catId === pref[i]) return i;
-        }
-        return 999;
-      }
-      return rank(a) - rank(b);
-    });
-    return order.map(function(c){ return { cat:c, items:map[c] }; });
-  }
-
-  groups(stable).forEach(function(g){
-    var c = el("div", "card");
-    c.appendChild(el("div", "cat", g.cat));
-    g.items.forEach(function(t){ c.appendChild(tweakRow(t)); });
-    host.appendChild(c);
+  var box=clr($("tweaks"));
+  var list=TW.filter(function(t){
+    if(curCat!=="all"&&t.cat!==curCat)return false;
+    if(!showAdv&&(t.risk||0)>=2)return false;
+    return true;
   });
-
-  if (exper.length){
-    var wc = el("div", "card");
-    wc.style.borderColor = "var(--warn)";
-    var w = el("div", "banner warn");
-    w.appendChild(el("div", "ttl", "⚠ Experimental — unverified"));
-    w.appendChild(el("div", null,
-      "These tweaks have not been verified on this device. They may have no effect at all, " +
-      "or behave differently from what the description promises. Enable them one at a time and " +
-      "watch what happens. If something goes wrong, 'Reset all' or 'Restore everything to stock' will help."));
-    wc.appendChild(w);
-    groups(exper).forEach(function(g){
-      wc.appendChild(el("div", "cat", g.cat));
-      g.items.forEach(function(t){ wc.appendChild(tweakRow(t)); });
-    });
-    host.appendChild(wc);
-  }
-
-  if (!adv && hiddenAdv){
-    var n = el("div", "card");
-    n.appendChild(el("div", "sub", "Hidden: " + hiddenAdv + " advanced tweaks. Turn on the 'Advanced' switch at the top."));
-    host.appendChild(n);
-  }
-}
-
-function tweakRow(t){
-  var ty = parseType(t.type);
-  var cur = effVal(t);
-  var row = el("div", "tw" + (t.set ? " changed" : "") + (t.risk >= 3 ? " risky" : ""));
-
-  var hd = el("div", "hd");
-  hd.appendChild(el("div", "nm", t.name));
-  var r = RISK[t.risk];
-  hd.appendChild(badge(r.cls, r.lb, r.ds));
-  if (ty.k === "ro")  hd.appendChild(badge("mut", "read only", "pixel_tune deliberately does not set this item — the reason is in the description."));
-  if (t.adv)          hd.appendChild(badge("mut", "advanced"));
-  if (t.unverified)   hd.appendChild(badge("warn", "unverified"));
-  if (t.set)          hd.appendChild(badge("ok", "set", "This value is held by pixel_tune, it is not stock."));
-  if (t.boot)         hd.appendChild(badge("mut", "at boot", "Applied when the system starts."));
-  row.appendChild(hd);
-
-  if (t.desc) row.appendChild(el("div", "ds", t.desc));
-
-  var ctl = el("div", "ctl");
-  var pending = PEND && PEND.kind === "tweak" && PEND.target === t.id;
-
-  if (ty.k === "ro"){
-    /* Read-only: no controls, just the value. */
-    ctl.appendChild(el("span", "val", "Value: " + fmtVal(t, cur)));
-  } else if (ty.k === "bool"){
-    var on = bool(cur) === true;
-    var b = el("button", on ? "btn-p" : "", on ? "On" : "Off");
-    b.disabled = !!PEND;
-    b.onclick = function(){ setTweak(t, on ? "0" : "1", (on ? "Turning off " : "Turning on ") + t.name); };
-    ctl.appendChild(b);
-  } else if (ty.k === "int"){
-    var inp = el("input"); inp.type = "number";
-    inp.min = ty.min; inp.max = ty.max;
-    /* The value may be a list (e.g. read_ahead_kb has 4 disks) — then do not edit it as a number. */
-    inp.value = /^-?\d+$/.test(String(cur)) ? String(cur) : "";
-    inp.placeholder = ty.min + "–" + ty.max;
-    inp.disabled = !!PEND;
-    var ap = el("button", "btn-p btn-sm", "Apply");
-    ap.disabled = !!PEND;
-    ap.onclick = function(){
-      var v = parseInt(inp.value, 10);
-      if (!isFinite(v) || v < ty.min || v > ty.max){ toast("Enter a whole number " + ty.min + "-" + ty.max); return; }
-      setTweak(t, String(v), t.name + " → " + v);
-    };
-    ctl.appendChild(inp); ctl.appendChild(ap);
-  } else if (ty.k === "enum"){
-    var sel = el("select");
-    var seen = false;
-    ty.opts.forEach(function(o){
-      var op = el("option", null, o); op.value = o;
-      if (String(cur) === o){ op.selected = true; seen = true; }
-      sel.appendChild(op);
-    });
-    if (!seen){
-      var un = el("option", null, "(" + (String(cur) || "unknown") + ")");
-      un.value = ""; un.selected = true; un.disabled = true;
-      sel.insertBefore(un, sel.firstChild);
-    }
-    sel.disabled = !!PEND;
-    sel.onchange = function(){
-      var v = sel.value;
-      if (!safeVal(v)){ toast("Invalid value"); return; }
-      setTweak(t, v, t.name + " → " + v);
-    };
-    ctl.appendChild(sel);
-  } else if (ty.k === "enumf"){
-    /* Only the device knows the options (they are read from `ty.src`), they do not come in the JSON. */
-    var ti = el("input"); ti.type = "text";
-    ti.value = String(cur || "");
-    ti.autocapitalize = "off"; ti.spellcheck = false;
-    ti.disabled = !!PEND;
-    var ab = el("button", "btn-p btn-sm", "Apply");
-    ab.disabled = !!PEND;
-    ab.onclick = function(){
-      var v = String(ti.value).trim();
-      if (!safeVal(v)){ toast("Invalid value"); return; }
-      setTweak(t, v, t.name + " → " + v);
-    };
-    ctl.appendChild(ti); ctl.appendChild(ab);
-  } else {
-    ctl.appendChild(el("span", "val", "Unknown type '" + t.type + "' — no control is available."));
-  }
-
-  if (t.set && ty.k !== "ro"){
-    var rb = el("button", "btn-sm", "↺ Stock");
-    rb.title = "Restore to " + fmtVal(t, t.stock);
-    rb.disabled = !!PEND;
-    rb.onclick = function(){ resetTweak(t); };
-    ctl.appendChild(rb);
-  }
-  if (pending) ctl.appendChild(el("span", "spin"));
-  row.appendChild(ctl);
-
-  if (ty.k === "enumf"){
-    var hint = el("div", "val", "You can read the allowed values on the device from " + ty.src + ".");
-    hint.style.marginTop = "5px";
-    row.appendChild(hint);
-  }
-
-  var info = el("div", "val");
-  info.textContent = "now: " + fmtVal(t, cur) +
-    (t.stock !== "" ? "   ·   stock: " + fmtVal(t, t.stock) : "") +
-    "   ·   " + t.id;
-  info.style.marginTop = "6px";
-  info.title = t.target ? t.mech + ": " + t.target : t.mech;
-  row.appendChild(info);
-  return row;
-}
-
-function setTweak(t, value, label){
-  if (!safeId(t.id) || !safeVal(value)){ toast("Invalid input"); return; }
-  LAST_ACTION = function(){ setTweak(t, value, label); };
-  startAction({
-    kind:"tweak", target:t.id,
-    args: "tweak set " + t.id + " " + value,
-    label: label,
-    timeout: 20000,
-    poll: function(){
-      return loadTweaks(true).then(function(list){
-        renderTweaks();
-        var n = (list || []).filter(function(x){ return x.id === t.id; })[0];
-        if (!n) return false;
-        var ty = parseType(n.type);
-        var got = effVal(n);
-        if (ty.k === "bool") return (bool(got) === true) === (bool(value) === true);
-        return String(got) === String(value) || (n.set && String(n.value) === String(value));
-      });
-    }
+  if(!list.length){box.appendChild(el("div","muted","No items in this category."));return;}
+  list.forEach(function(t){
+    var d=el("div","tw");
+    var head=el("div","head");
+    var info=el("div","info");
+    var tn=el("div","tn");tn.appendChild(document.createTextNode(t.name));
+    var dot=el("span","riskdot r"+(t.risk||1));dot.title="risk "+(t.risk||0);tn.appendChild(dot);
+    info.appendChild(tn);
+    var td=el("div","td"+(descOpen[t.id]?" open":""),t.desc||"");
+    td.onclick=function(){descOpen[t.id]=!descOpen[t.id];td.classList.toggle("open");};
+    info.appendChild(td);
+    var modified=(t.set&&t.value!=null);
+    var cur=el("div","cur"+(modified?" mod":""));
+    cur.innerHTML="now: <b>"+(t.current!=null?t.current:"—")+"</b>"+(t.stock!=null?' · stock '+t.stock:"");
+    info.appendChild(cur);
+    if(modified){var rb=el("button","reset","↺ revert to stock");rb.onclick=function(){resetTweak(t);};info.appendChild(rb);}
+    head.appendChild(info);
+    head.appendChild(tweakCtl(t));
+    d.appendChild(head);
+    box.appendChild(d);
   });
 }
+$("advSw").onclick=function(){showAdv=!showAdv;this.classList.toggle("on",showAdv);renderTweaks();};
 
-function resetTweak(t){
-  if (!safeId(t.id)){ toast("Invalid id"); return; }
-  LAST_ACTION = function(){ resetTweak(t); };
-  startAction({
-    kind:"tweak", target:t.id,
-    args: "tweak reset " + t.id,
-    label: t.name + " → stock",
-    timeout: 20000,
-    poll: function(){
-      return loadTweaks(true).then(function(list){
-        renderTweaks();
-        var n = (list || []).filter(function(x){ return x.id === t.id; })[0];
-        return !!n && n.set === false;   /* no longer explicitly set */
-      });
-    }
-  });
+/* ==========================================================================
+   GAMES / PER-APP
+   ========================================================================== */
+var APPNAMES={"com.nianticlabs.pokemongo":"Pokémon GO","com.instagram.android":"Instagram"};
+var APPICONS={"com.nianticlabs.pokemongo":"🐾","com.instagram.android":"📸"};
+function selRow(label,opts,cur,onch){
+  var r=el("div","row");
+  r.appendChild(el("div","lab",label));
+  var sel=el("select");sel.style.marginLeft="auto";
+  opts.forEach(function(o){var op=el("option",null,o[1]);op.value=o[0];
+    if(String(cur)===String(o[0]))op.selected=true;sel.appendChild(op);});
+  sel.onchange=function(){onch(sel.value);};
+  r.appendChild(sel);return r;
 }
+function loadApps(){
+  return bridge(BIN+" app json",15000).then(function(o){
+    var d;try{d=JSON.parse(o.stdout);}catch(e){$("apps").innerHTML='<div class="muted">Could not load per-app.</div>';return;}
+    var box=clr($("apps"));var rules=d.rules||[];
+    if(!rules.length){box.appendChild(el("div","muted","No per-app rules."));return;}
+    rules.forEach(function(a){box.appendChild(appCard(a));});
+  }).catch(function(e){$("apps").innerHTML='<div class="muted">'+e.message+'</div>';});
+}
+function setApp(pkg,key,val){
+  if(!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/.test(pkg)){toast("Invalid package");return;}
+  toast(APPNAMES[pkg]||pkg);
+  fire("app set "+pkg+" "+shq(key+"="+val)).then(function(){setTimeout(loadApps,700);});
+}
+function appCard(a){
+  var pkg=a.pkg;
+  var c=el("div","card");
+  var h=el("h2");
+  h.appendChild(document.createTextNode((APPICONS[pkg]||"🎮")+"  "+(APPNAMES[pkg]||pkg)));
+  var sw=el("div","sw"+(a.enabled?" on":""));sw.style.marginLeft="auto";
+  sw.onclick=function(){setApp(pkg,"APP_ENABLED",a.enabled?"0":"1");};
+  h.appendChild(sw);
+  c.appendChild(h);
 
-function resetAllTweaks(){
-  confirmDialog("Restore all tweaks to stock?",
-    "All the individual tweaks return to their stock values. Profiles, the resolution and per-app rules are unchanged.",
-    "Yes, reset them", true).then(function(yes){
-      if (!yes) return;
-      LAST_ACTION = resetAllTweaks;
-      startAction({
-      kind:"tweak", target:null,
-        args: "tweak reset-all",
-        label: "Reset of all tweaks",
-        timeout: 30000,
-        poll: function(){
-          return loadTweaks(true).then(function(list){
-            renderTweaks();
-            return (list || []).every(function(x){ return x.set === false; });
-          });
-        }
-      });
-    });
+  var g=a.game||{},rf=a.refresh||{};
+  // profile
+  c.appendChild(selRow("Profile",
+    [["powersave","Powersave"],["balanced","Balanced"],["performance","Performance"],["game","Game"],["pogo","PoGO"],["night","Night"]],
+    a.profile,function(v){setApp(pkg,"APP_PROFILE",v);}));
+  // resolution downscale
+  c.appendChild(selRow("Downscale (resolution)",
+    [["disable","off (native)"],["0.9","0.9"],["0.8","0.8"],["0.7","0.7"],["0.6","0.6"],["0.5","0.5"],["0.4","0.4 (risky)"],["0.3","0.3 (risky)"]],
+    g.downscale||"disable",function(v){setApp(pkg,"GAME_DOWNSCALE",v);}));
+  // FPS
+  c.appendChild(selRow("FPS cap",
+    [["","auto"],["30","30"],["60","60"],["90","90"],["120","120"]],
+    g.fps==null?"":g.fps,function(v){setApp(pkg,"GAME_FPS",v||"disable");}));
+  // refresh rate (Hz) — sets both min and peak
+  c.appendChild(selRow("Refresh rate",
+    [["","auto (system default)"],["60","60 Hz"],["120","120 Hz"]],
+    rf.peak==null?"":rf.peak,function(v){
+      if(v===""){setApp(pkg,"APP_REFRESH_MIN","");setTimeout(function(){setApp(pkg,"APP_REFRESH_PEAK","");},300);}
+      else{setApp(pkg,"APP_REFRESH_MIN",v);setTimeout(function(){setApp(pkg,"APP_REFRESH_PEAK",v);},300);}
+    }));
+  // GPU cap (overlay)
+  var ov=a.overlay||{};
+  c.appendChild(selRow("GPU cap",
+    [["","per profile"],["890000","890 (max)"],["807000","807"],["723000","723"],["649000","649"],["580000","580"],["521000","521"]],
+    ov.GPU_MAX_FREQ||"",function(v){setApp(pkg,"APP_OVERLAY_GPU_MAX_FREQ",v);}));
+  // info row
+  var inf=el("div","cur");inf.style.marginTop="8px";
+  inf.innerHTML="priority "+(a.priority||"—")+" · thermal cap "+(a.thermal_cap?"yes":"no")+" · active: <b>"+(a.active?"YES":"no")+"</b>";
+  c.appendChild(inf);
+  return c;
 }
 
 /* ==========================================================================
-   11) PER-APP RULES
-   --------------------------------------------------------------------------
-   The data comes from `pxtune app json` — a separate command, only when the tab is opened.
+   NAVIGATION
    ========================================================================== */
-/* The real shape from bin/pxtune-perapp (cmd_json):
-   { version, gates:{res_enabled,refresh_verified},
-     active:{pkg,since,age_sec,saved:{…}}|null,
-     rules:[{pkg,desc,enabled,profile,
-             game:{mode,fps,downscale,apply},
-             refresh:{min,peak}, res:{preset,enabled},
-             min_fg_sec,sticky_sec,thermal_cap,priority,overlay:{},active}] }
-   The flat APP_ and GAME_ keys exist only on INPUT (`app set KEY=VALUE`). */
-function loadApps(force){
-  if (S.appsLoaded && !force) return Promise.resolve(S.apps);
-  return bridge(BIN + " app json", 25000).then(function(r){
-    var o = parseJson(r, "pxtune app json");
-    var arr = pick(o, "rules") || [];
-    if (!Array.isArray(arr)) arr = [];
-    var gates = pick(o, "gates") || {};
-    var act = pick(o, "active") || null;
-    function s(v){ return (v === undefined || v === null) ? "" : String(v); }
-    S.apps = {
-      resEnabled: bool(pick(gates, "res_enabled")) === true,
-      refreshVerified: bool(pick(gates, "refresh_verified")) === true,
-      activePkg: act ? s(pick(act, "pkg")) : "",
-      activeAge: act ? num(pick(act, "age_sec")) : null,
-      rules: arr.map(function(x){
-        var g = pick(x, "game") || {}, rf = pick(x, "refresh") || {}, rs = pick(x, "res") || {};
-        return {
-          pkg: s(pick(x, "pkg")),
-          desc: s(pick(x, "desc")),
-          enabled: bool(pick(x, "enabled")) !== false,
-          active: bool(pick(x, "active")) === true,
-          priority: num(pick(x, "priority")),
-          /* the flat keys for the editor = exactly what `app set` takes */
-          APP_PROFILE:      s(pick(x, "profile")),
-          GAME_MODE:        s(pick(g, "mode")),
-          GAME_FPS:         s(pick(g, "fps")),
-          GAME_DOWNSCALE:   s(pick(g, "downscale")),
-          APP_REFRESH_MIN:  s(pick(rf, "min")),
-          APP_REFRESH_PEAK: s(pick(rf, "peak")),
-          APP_RES:          s(pick(rs, "preset")),
-          APP_RES_ENABLE:   bool(pick(rs, "enabled")) === true ? "1" : "0"
-        };
-      }).filter(function(x){ return x.pkg; })
-    };
-    S.appsErr = null; S.appsLoaded = true;
-    return S.apps;
-  }).catch(function(e){
-    S.appsErr = e && e.message ? e.message : String(e);
-    S.apps = null; S.appsLoaded = true;
-    throw e;
-  });
+var tweaksLoaded=false,appsLoaded=false;
+function showView(v){
+  document.querySelectorAll(".view").forEach(function(s){s.classList.toggle("on",s.id==="v-"+v);});
+  document.querySelectorAll("nav button").forEach(function(b){b.classList.toggle("on",b.dataset.v===v);});
+  if(v==="tune"&&!tweaksLoaded){tweaksLoaded=true;loadTweaks();}
+  if(v==="apps"&&!appsLoaded){appsLoaded=true;loadApps();}
 }
+document.querySelectorAll("nav button").forEach(function(b){b.onclick=function(){showView(b.dataset.v);};});
+$("btnReload").onclick=function(){loadStatus();if(tweaksLoaded)loadTweaks();if(appsLoaded)loadApps();toast("Refreshed");};
 
-function renderApps(){
-  var host = clear($("appsHost"));
-  var st = $("appResState");
+/* ---------- start + auto-refresh of the overview ---------- */
+detectApi();
+if(API.mode==="none"){warnApi("The WebUI bridge is not available. Open the module from the KernelSU Next manager, not in a browser.");}
+loadStatus();
+setInterval(function(){if($("v-dash").classList.contains("on"))loadStatus();},4000);
 
-  if (S.appsErr){
-    var c = el("div", "card");
-    var d = el("div", "banner err");
-    d.appendChild(el("div", "ttl", "The per-app rules could not be loaded"));
-    d.appendChild(el("div", null, "The command `pxtune app json` failed or did not return valid JSON."));
-    d.appendChild(el("pre", null, S.appsErr));
-    var row = el("div", "btn-row"); row.style.marginTop = "10px";
-    var rb = el("button", "btn-sm btn-p", "Try again");
-    rb.onclick = function(){ S.appsLoaded = false; loadApps(true).then(renderApps, renderApps); };
-    row.appendChild(rb); d.appendChild(row);
-    c.appendChild(d); host.appendChild(c);
-    st.textContent = "";
-    return;
-  }
-  if (!S.apps){ host.appendChild(el("div","card")).appendChild(el("div","sub","Loading…")); return; }
-
-  clear(st);
-  st.appendChild(document.createTextNode("Resolution switching: "));
-  st.appendChild(badge(S.apps.resEnabled ? "warn" : "ok", S.apps.resEnabled ? "ALLOWED" : "off (default)"));
-  st.appendChild(document.createTextNode(S.apps.resEnabled
-    ? " — the APP_RES key is in use. It changes the resolution of the whole system."
-    : " — the APP_RES key is ignored until you allow it on a rule."));
-  if (S.apps.activePkg){
-    st.appendChild(el("div", null, "Currently in the foreground: " + S.apps.activePkg +
-      (S.apps.activeAge !== null ? " (" + Math.round(S.apps.activeAge) + " s)" : "")));
-  }
-
-  /* An honest warning: the refresh rate is NOT APPLIED on Android 16 yet. */
-  if (!S.apps.refreshVerified){
-    var rw = el("div", "banner warn");
-    rw.appendChild(el("div", "ttl", "⚠ The refresh rate does not work yet"));
-    rw.appendChild(el("div", null,
-      "The CLI reports refresh_verified = false: the names of the system keys for the " +
-      "refresh rate are not verified on Android 16, so APP_REFRESH_MIN and " +
-      "APP_REFRESH_PEAK are saved but nothing actually switches. Do not rely on them yet."));
-    host.appendChild(rw);
-  }
-
-  if (!S.apps.rules.length){
-    var e0 = el("div", "card");
-    e0.appendChild(el("div", "sub", "No rules yet. Add the first one with the '+ Add a rule' button."));
-    host.appendChild(e0);
-    return;
-  }
-
-  S.apps.rules.forEach(function(rule){
-    var c = el("div", "card");
-    var r = el("div", "rule");
-    var hd = el("div", "pkg", rule.desc ? rule.desc : rule.pkg);
-    r.appendChild(hd);
-    if (rule.desc) r.appendChild(el("div", "sub", rule.pkg));
-    var stat = el("div", "tags");
-    if (rule.active)   stat.appendChild(badge("fill", "currently in the foreground"));
-    if (!rule.enabled) stat.appendChild(badge("mut", "rule disabled"));
-    if (stat.children.length) r.appendChild(stat);
-
-    var tags = el("div", "tags");
-    APP_KEYS.forEach(function(k){
-      var v = rule[k.k];
-      if (v === "" || v === undefined) return;
-      if (k.k === "APP_RES_ENABLE" && v === "0") return;      /* the default, no clutter */
-      var shown = (k.type === "bool") ? (bool(v) ? "yes" : "no") : v;
-      var txt = k.nm + ": " + shown + (k.unit || "");
-      var dead = (k.k === "APP_REFRESH_MIN" || k.k === "APP_REFRESH_PEAK") && !S.apps.refreshVerified;
-      var b = badge(dead ? "mut" : (k.scope === "app" ? "ok" : "warn"),
-        txt + (dead ? " (not applied)" : ""),
-        k.scope === "app" ? "Per-app — applies to this app only"
-                          : "GLOBAL — switched on entry and restored on exit");
-      tags.appendChild(b);
-    });
-    if (!tags.children.length) tags.appendChild(el("span", "sub", "Nothing is set."));
-    r.appendChild(tags);
-    c.appendChild(r);
-
-    var row = el("div", "btn-row");
-    var eb = el("button", "btn-sm btn-p", "Edit"); eb.disabled = !!PEND;
-    eb.onclick = function(){ editRule(rule); };
-    var db = el("button", "btn-sm btn-d", "Delete"); db.disabled = !!PEND;
-    db.onclick = function(){
-      confirmDialog("Delete the rule?", rule.pkg + " — the whole rule will be deleted.", "Delete", true)
-        .then(function(y){ if (y) appAction("app rm " + rule.pkg, "Deleting " + rule.pkg, rule.pkg, true); });
-    };
-    row.appendChild(eb); row.appendChild(db);
-    c.appendChild(row);
-    host.appendChild(c);
-  });
+/* ---------- DEMO data (for previewing in a browser) ---------- */
+function demo(cmd){
+  if(cmd.indexOf("status")>=0)return JSON.stringify({profile:{active:"powersave"},cpu:{policy0:{cur:955000,max:955000,hw_max:1704000},policy4:{cur:712000,max:1328000,hw_max:2367000},policy8:{cur:500000,max:1298000,hw_max:2914000}},gpu:{cur:150000,max:580000,util:0,power_policy:"adaptive"},thermal:{big:52,mid:53,g3d:50,skin:41,soc:42,battery:39,charger:45,display:39},battery:{capacity:40,status:"Charging",temp:39.9,cycle_count:608,charge_stop_level:100}});
+  if(cmd.indexOf("tweak json")>=0)return JSON.stringify({tweaks:[{id:"io.read_ahead_kb",cat:"io",type:"int:0:8192",risk:1,name:"Disk read-ahead (KB)",desc:"How much data the kernel reads ahead.",set:true,value:"512",stock:"128",current:"512"},{id:"cpu.max_freq_prime",cat:"cpu",type:"int:500000:2914000",risk:2,name:"Prime max frequency",desc:"The X3 core cap.",current:"2914000",stock:"2914000"},{id:"gpu.scaling_max_freq",cat:"gpu",type:"enum:580000,649000,723000,890000",risk:1,name:"GPU max frequency",desc:"The Mali cap.",current:"580000",stock:"890000"},{id:"ui.window_animation_scale",cat:"ui",type:"enum:0,0.25,0.5,1",risk:0,name:"Window animations",desc:"Speed.",current:"0.25",stock:"1"}]});
+  if(cmd.indexOf("app json")>=0)return JSON.stringify({rules:[{pkg:"com.nianticlabs.pokemongo",enabled:true,profile:"pogo",game:{fps:60,downscale:"disable"},refresh:{min:60,peak:60},priority:90,thermal_cap:true,overlay:{GPU_MAX_FREQ:"723000"},active:false},{pkg:"com.instagram.android",enabled:true,profile:"powersave",game:{fps:null,downscale:""},refresh:{min:null,peak:null},priority:50,thermal_cap:false,overlay:{GPU_MAX_FREQ:"649000"},active:false}]});
+  return "";
 }
-
-/* The rule editor. It saves only the changed keys, and does so with a single
-   chained command — one bridge call instead of eight. */
-function editRule(rule){
-  var isNew = !rule;
-  var cur = rule || { pkg:"", label:"" };
-  var m = clear(el("div"));
-  var fields = {};
-
-  var wrap = el("div");
-  if (isNew){
-    var lp = el("label", "fld");
-    lp.appendChild(el("span", "lbl", "Package name"));
-    var ip = el("input"); ip.type = "text"; ip.placeholder = "com.vendor.game";
-    ip.autocapitalize = "off"; ip.spellcheck = false;
-    lp.appendChild(ip);
-    lp.appendChild(el("span", "hint", "The exact package name, e.g. com.mojang.minecraftpe."));
-    wrap.appendChild(lp);
-    fields.__pkg = ip;
-  } else {
-    wrap.appendChild(el("div", "sub", cur.pkg));
-  }
-
-  /* Quick presets — they prefill the visible fields (the same values as the CLI
-     `pxtune app preset`). The remaining keys (priority, sticky, thermal cap) are
-     filled in with defaults by the CLI on save. */
-  var APP_PRESETS = [
-    { id:"game",     lb:"🎮 Game",      set:{ GAME_MODE:"performance", GAME_FPS:"60", GAME_DOWNSCALE:"0.7",     APP_PROFILE:"game" } },
-    { id:"game-max", lb:"🎮 Game max",  set:{ GAME_MODE:"performance", GAME_FPS:"0",  GAME_DOWNSCALE:"disable", APP_PROFILE:"performance" } },
-    { id:"video",    lb:"🎬 Video",     set:{ GAME_MODE:"",           GAME_FPS:"",   GAME_DOWNSCALE:"",        APP_PROFILE:"balanced" } },
-    { id:"social",   lb:"📱 Social",    set:{ GAME_MODE:"",           GAME_FPS:"",   GAME_DOWNSCALE:"",        APP_PROFILE:"balanced" } },
-    { id:"saver",    lb:"🔋 Saver",     set:{ GAME_MODE:"",           GAME_FPS:"",   GAME_DOWNSCALE:"",        APP_PROFILE:"powersave" } }
-  ];
-  var prow = el("label", "fld");
-  prow.appendChild(el("span", "lbl", "Quick preset"));
-  var pbtns = el("div", "btn-row");
-  APP_PRESETS.forEach(function(p){
-    var b = el("button", "btn-sm", p.lb); b.type = "button";
-    b.onclick = function(){
-      Object.keys(p.set).forEach(function(kk){ if (fields[kk]) fields[kk].value = p.set[kk]; });
-      toast("The '" + p.lb + "' preset was prefilled — check it and save");
-    };
-    pbtns.appendChild(b);
-  });
-  prow.appendChild(pbtns);
-  prow.appendChild(el("span", "hint",
-    "Fills in the game mode/FPS/downscale and the profile. The module fills the rest in itself. Then save with the button below."));
-  wrap.appendChild(prow);
-
-  var profIds = (function(){
-    var p = pick(S.data || {}, "profile") || {};
-    var l = pick(p, "available");
-    return (Array.isArray(l) && l.length ? l : PROFILES.map(function(x){ return x.id; })).filter(safeTok);
-  })();
-  var resIds = (function(){
-    var s = pick(S.data || {}, "display") || {};
-    var l = pick(s, "presets");
-    return (Array.isArray(l) && l.length ? l : RES_FALLBACK).filter(safeTok);
-  })();
-
-  APP_KEYS.forEach(function(k){
-    var lb = el("label", "fld");
-    var t = el("span", "lbl");
-    t.appendChild(document.createTextNode(k.nm));
-    var sc = el("span", "scope " + (k.scope === "app" ? "app" : "glob"), k.scope === "app" ? "PER-APP" : "GLOBAL");
-    t.appendChild(sc);
-    lb.appendChild(t);
-
-    var val = cur[k.k] === undefined ? "" : String(cur[k.k]);
-    var inp;
-    if (k.type === "bool"){
-      inp = el("select");
-      [["","— leave alone —"],["0","no"],["1","yes"]].forEach(function(o){
-        var op = el("option", null, o[1]); op.value = o[0];
-        if (val === o[0] || (o[0] === "1" && bool(val) === true) || (o[0] === "0" && bool(val) === false && val !== "")) op.selected = true;
-        inp.appendChild(op);
-      });
-    } else if (k.type === "profile" || k.type === "res"){
-      inp = el("select");
-      var opts = [""].concat(k.type === "profile" ? profIds : resIds);
-      opts.forEach(function(o){
-        var op = el("option", null, o === "" ? "— leave alone —" : (k.type === "res" && RES_LABEL[o] ? RES_LABEL[o] : o));
-        op.value = o;
-        if (val === o) op.selected = true;
-        inp.appendChild(op);
-      });
-    } else {
-      inp = el("select");
-      k.opts.forEach(function(o){
-        var op = el("option", null, (k.optLb && k.optLb[o] !== undefined) ? k.optLb[o] : (o + (k.unit || "")));
-        op.value = o;
-        if (val === o) op.selected = true;
-        inp.appendChild(op);
-      });
-    }
-    lb.appendChild(inp);
-    lb.appendChild(el("span", "hint", k.hint));
-    if (k.risky) lb.style.background = "var(--warn-bg)", lb.style.padding = "9px", lb.style.borderRadius = "10px";
-    fields[k.k] = inp;
-    wrap.appendChild(lb);
-  });
-
-  var warn = el("div", "banner warn");
-  warn.appendChild(el("div", "ttl", "⚠ The resolution is global and risky"));
-  warn.appendChild(el("div", null,
-    "APP_RES changes the resolution of the WHOLE system, not just that app, which is why it " +
-    "is off by default behind the 'Allow resolution switching' toggle. Before you turn it on, " +
-    "try the target preset by hand in the Overview — there you have the 60 s safeguard. An " +
-    "automatic switch on app entry may not have one."));
-  wrap.appendChild(warn);
-  m.appendChild(wrap);
-
-  dialogForm(isNew ? "New rule" : "Edit the rule", m, isNew ? "Create" : "Save").then(function(ok){
-    if (!ok) return;
-    var pkg = isNew ? String(fields.__pkg.value || "").trim() : cur.pkg;
-    if (!safePkg(pkg)){ toast("Invalid package name"); return; }
-
-    /* The CLI takes `pxtune app set <pkg> KEY=VALUE [KEY=VALUE...]`, so all the
-       changes go in ONE command = one bridge call. */
-    var pairs = [];
-    APP_KEYS.forEach(function(k){
-      var v = String(fields[k.k].value);
-      var old = cur[k.k] === undefined ? "" : String(cur[k.k]);
-      if (v === old) return;
-      if (v !== "" && !safeVal(v)) return;
-      pairs.push(k.k + "=" + (v === "" ? shq("") : v));
-    });
-    if (!pairs.length){
-      if (!isNew){ toast("Nothing changed"); return; }
-      pairs.push("APP_PKG=" + pkg);   /* creates the rule with default values */
-    }
-
-    LAST_ACTION = function(){ editRule(rule); };
-    startAction({
-      args: "app set " + pkg + " " + pairs.join(" "),
-      kind: "app", target: pkg,
-      label: (isNew ? "Creating " : "Saving ") + pkg,
-      timeout: 20000,
-      poll: function(){
-        return loadApps(true).then(function(a){
-          renderApps();
-          var found = (a && a.rules || []).filter(function(x){ return x.pkg === pkg; })[0];
-          if (!found) return false;
-          /* Check ONLY the keys we really changed — the CLI fills the rest in with
-             defaults and equality would never hold. */
-          return APP_KEYS.every(function(k){
-            var want = String(fields[k.k].value);
-            var old = cur[k.k] === undefined ? "" : String(cur[k.k]);
-            if (want === old) return true;          /* unchanged */
-            if (want === "") return true;           /* cleared -> the CLI fills in the default */
-            return String(found[k.k] || "") === want;
-          });
-        });
-      }
-    });
-  });
-}
-
-function appAction(args, label, pkg, expectGone){
-  LAST_ACTION = function(){ appAction(args, label, pkg, expectGone); };
-  startAction({
-      kind:"app", target:pkg,
-    args: args,
-    label: label,
-    poll: function(){
-      return loadApps(true).then(function(a){
-        renderApps();
-        var found = (a && a.rules || []).filter(function(x){ return x.pkg === pkg; })[0];
-        return expectGone ? !found : !!found;
-      });
-    }
-  });
-}
-
-/* ==========================================================================
-   12) THE DAEMON PANEL
-   ========================================================================== */
-function renderDaemon(){
-  var d = S.data || {};
-  var au = pick(d, "auto") || {};
-  var enabled = bool(pick(au, "enabled", "on"));
-  if (enabled === null) enabled = bool(pick(d, "auto_enabled"));
-  var running = bool(pick(au, "running", "alive", "active"));
-  var pid = num(pick(au, "pid"));
-  if (running === null && pid !== null) running = pid > 0;
-  var lastDec = pick(au, "last_decision", "decision", "last") || pick(d, "last_decision");
-  var lastAt  = pick(au, "last_decision_at", "last_at", "decided_at");
-  var level   = pick(au, "thermal_level", "level", "therm_level");
-  var autoProf= pick(au, "profile", "active", "target") || activeProfile(d);
-
-  var host = clear($("daemonBox"));
-
-  var r1 = el("div", "kv");
-  r1.appendChild(el("span", "k", "State"));
-  var v1 = el("span", "v");
-  if (running === true)       v1.appendChild(badge("ok", "running" + (pid !== null ? " · pid " + Math.round(pid) : "")));
-  else if (running === false) v1.appendChild(badge("crit", "not running"));
-  else                        v1.appendChild(badge("mut", "unknown"));
-  r1.appendChild(v1); host.appendChild(r1);
-
-  var r2 = el("div", "kv");
-  r2.appendChild(el("span", "k", "Profile switching"));
-  var v2 = el("span", "v");
-  v2.appendChild(badge(enabled === true ? "ok" : enabled === false ? "crit" : "mut",
-    enabled === true ? "allowed" : enabled === false ? "forbidden" : "?"));
-  r2.appendChild(v2); host.appendChild(r2);
-
-  host.appendChild(kv("Active profile", autoProf ? String(autoProf) : "—"));
-
-  var lvl = num(level);
-  var r4 = el("div", "kv");
-  r4.appendChild(el("span", "k", "Thermal level"));
-  var v4 = el("span", "v");
-  if (level === undefined || level === null || level === "") v4.appendChild(document.createTextNode("—"));
-  else if (lvl !== null) v4.appendChild(badge(lvl <= 0 ? "ok" : lvl === 1 ? "warn" : lvl === 2 ? "hot" : "crit",
-    ["cool","warm","hot","critical"][Math.max(0, Math.min(3, Math.round(lvl)))] + " (" + Math.round(lvl) + ")"));
-  else v4.appendChild(document.createTextNode(String(level)));
-  r4.appendChild(v4); host.appendChild(r4);
-
-  host.appendChild(kv("Last decision", lastDec ? String(lastDec) : "—"));
-  if (lastAt) host.appendChild(kv("When", String(lastAt)));
-
-  var bt = $("btnDaemonToggle");
-  bt.textContent = enabled === true ? "⏹ Stop the daemon" : "▶ Start the daemon";
-  bt.className = enabled === true ? "btn-d" : "btn-p";
-  bt.style.flex = "1";
-  bt.disabled = !!PEND || enabled === null;
-  bt.dataset.next = enabled === true ? "off" : "on";
-}
-
-function loadDaemonRaw(){
-  return bridge(BIN + " auto status", 15000).then(function(r){
-    S.daemonRaw = ((r.stdout || "") + (r.stderr ? "\n" + r.stderr : "")).trim() || "(no output)";
-    S.daemonLoaded = true;
-    $("daemonRaw").textContent = S.daemonRaw;
-  }).catch(function(e){
-    $("daemonRaw").textContent = "Could not run `pxtune auto status`:\n" + (e && e.message ? e.message : e);
-  });
-}
-
-function toggleDaemon(){
-  var next = $("btnDaemonToggle").dataset.next === "on" ? "on" : "off";
-  LAST_ACTION = toggleDaemon;
-  startAction({
-      kind:"daemon", target:next,
-    args: "auto " + next,
-    label: "Daemon " + (next === "on" ? "start" : "stop"),
-    poll: function(){
-      return refresh().then(function(dd){
-        if (!dd) return false;
-        var au = pick(dd, "auto") || {};
-        var e = bool(pick(au, "enabled", "on"));
-        return e === (next === "on");
-      });
-    }
-  }).then(function(){ setTimeout(loadDaemonRaw, 2500); });
-}
-
-/* ==========================================================================
-   13) DIALOGS
-   ========================================================================== */
-function confirmDialog(title, text, okLabel, danger){
-  return new Promise(function(resolve){
-    var mask = el("div", "mask"), m = el("div", "modal");
-    m.appendChild(el("h3", null, title));
-    m.appendChild(el("p", null, text));
-    var row = el("div", "btn-row"); row.style.justifyContent = "flex-end";
-    var no = el("button", null, "Cancel"), yes = el("button", danger ? "btn-d" : "btn-p", okLabel);
-    row.appendChild(no); row.appendChild(yes);
-    m.appendChild(row); mask.appendChild(m);
-    $("modalHost").appendChild(mask);
-    function close(v){ mask.remove(); resolve(v); }
-    no.onclick = function(){ close(false); };
-    yes.onclick = function(){ close(true); };
-    mask.onclick = function(e){ if (e.target === mask) close(false); };
-  });
-}
-
-function dialogForm(title, bodyNode, okLabel){
-  return new Promise(function(resolve){
-    var mask = el("div", "mask"), m = el("div", "modal");
-    m.appendChild(el("h3", null, title));
-    m.appendChild(bodyNode);
-    var row = el("div", "btn-row"); row.style.justifyContent = "flex-end"; row.style.marginTop = "12px";
-    var no = el("button", null, "Cancel"), yes = el("button", "btn-p", okLabel);
-    row.appendChild(no); row.appendChild(yes);
-    m.appendChild(row); mask.appendChild(m);
-    $("modalHost").appendChild(mask);
-    function close(v){ mask.remove(); resolve(v); }
-    no.onclick = function(){ close(false); };
-    yes.onclick = function(){ close(true); };
-    mask.onclick = function(e){ if (e.target === mask) close(false); };
-  });
-}
-
-function dialog(title, text, mono){
-  var mask = el("div", "mask"), m = el("div", "modal");
-  m.appendChild(el("h3", null, title));
-  var pre = el("pre", null, text);
-  pre.style.cssText = "white-space:pre-wrap;word-break:break-word;font-size:12px;max-height:50vh;overflow:auto;color:var(--muted)";
-  m.appendChild(pre);
-  var row = el("div", "btn-row"); row.style.justifyContent = "flex-end";
-  var ok = el("button", "btn-p", "Close"); row.appendChild(ok);
-  m.appendChild(row); mask.appendChild(m);
-  $("modalHost").appendChild(mask);
-  ok.onclick = function(){ mask.remove(); };
-  mask.onclick = function(e){ if (e.target === mask) mask.remove(); };
-}
-
-/* ==========================================================================
-   14) TABY
-   ========================================================================== */
-function setTab(name){
-  S.tab = name;
-  ["over","tweaks","apps","daemon"].forEach(function(t){
-    $("tab-" + t).classList.toggle("hide", t !== name);
-  });
-  var bs = $("tabs").children;
-  for (var i = 0; i < bs.length; i++)
-    bs[i].setAttribute("aria-selected", String(bs[i].dataset.tab === name));
-
-  /* The data of the new sections is loaded ONLY when the tab is opened, never in the poll. */
-  if (name === "tweaks" && !S.tweaksLoaded) loadTweaks().then(renderTweaks, renderTweaks);
-  else if (name === "tweaks") renderTweaks();
-  if (name === "apps" && !S.appsLoaded) loadApps().then(renderApps, renderApps);
-  else if (name === "apps") renderApps();
-  if (name === "daemon" && !S.daemonLoaded) loadDaemonRaw();
-  try { window.scrollTo(0, 0); } catch(e){}
-}
-
-/* ==========================================================================
-   15) START
-   ========================================================================== */
-function applyIntervalLabel(){
-  var it = INTERVALS[intervalIdx];
-  $("btnAuto").textContent = it.ms ? "⏱ " + it.lb : "⏸ vyp";
-  $("btnAuto").setAttribute("aria-pressed", String(!!it.ms));
-}
-
-function init(){
-  detectApi();
-  $("apiInfo").textContent = "API: " + API.label;
-
-  if (DEMO){
-    var dn = $("demoNote");
-    dn.className = "banner warn";
-    dn.appendChild(el("div", "ttl", "DEMO mode"));
-    dn.appendChild(el("div", null, "The data shown is made up. You will see the real state after opening this in the KernelSU manager."));
-  }
-
-  $("btnRefresh").onclick = function(){ refresh(true).then(function(){ scheduleLoop(); }); };
-  $("btnAuto").onclick = function(){
-    intervalIdx = (intervalIdx + 1) % INTERVALS.length;
-    applyIntervalLabel();
-    scheduleLoop();
-    toast(INTERVALS[intervalIdx].ms ? "Refreshing every " + INTERVALS[intervalIdx].lb : "Automatic refresh is off");
-  };
-  $("pendCancel").onclick = function(){
-    if (!PEND) return;
-    var l = PEND.label; PEND = null; showPend(false);
-    toast("Stopped waiting for: " + l);
-    renderAll(); scheduleLoop();
-  };
-
-  var tb = $("tabs").children;
-  for (var i = 0; i < tb.length; i++)
-    (function(b){ b.onclick = function(){ setTab(b.dataset.tab); }; })(tb[i]);
-
-  $("btnProfAuto").onclick = function(){
-    LAST_ACTION = function(){ $("btnProfAuto").onclick(); };
-    startAction({
-      kind:"profile", target:null,
-      args: "profile auto",
-      label: "Hand control to the daemon",
-      poll: function(){
-        return refresh().then(function(dd){
-          if (!dd) return false;
-          var p = pick(dd, "profile") || {};
-          return bool(pick(p, "manual_override")) === false;
-        });
-      }
-    });
-  };
-
-  $("btnResConfirm").onclick = function(){ resAction("confirm", "Resolution confirmation"); };
-  $("btnResRevert").onclick  = function(){ resAction("reset", "Return to native"); };
-  $("btnResReset").onclick   = function(){ resAction("reset", "Return to native"); };
-
-  var sl = $("chgSlider");
-  sl.addEventListener("input", function(){
-    $("chgVal").textContent = sl.value;
-    S.chgDirty = true;
-    $("btnChgApply").disabled = false;
-  });
-  $("btnChgApply").onclick = function(){ setCharge(sl.value); };
-  $("btnChgOff").onclick   = function(){ setCharge("off"); };
-
-  $("btnRevert").onclick = function(){
-    confirmDialog("Restore everything to stock?",
-      "All pixel_tune settings (uclamp, GPU, vm, I/O, charging) return to the values from the backup in backup/stock.conf. The active profile is cleared.",
-      "Yes, restore everything", true).then(function(yes){
-        if (!yes) return;
-        LAST_ACTION = function(){ $("btnRevert").onclick(); };
-        S.tweaksLoaded = false; S.appsLoaded = false;
-        startAction({
-          args: "revert",
-          kind: "revert", target: null,
-          label: "Return to stock",
-          timeout: 25000,
-          poll: function(){
-            return refresh().then(function(dd){
-              if (!dd) return false;
-              var p = pick(dd, "profile") || {};
-              return bool(pick(p, "manual_override")) === false;
-            });
-          }
-        });
-      });
-  };
-
-  $("twAdv").onchange   = renderTweaks;
-  $("btnTwReload").onclick   = function(){ S.tweaksLoaded = false; loadTweaks(true).then(renderTweaks, renderTweaks); };
-  $("btnTwResetAll").onclick = resetAllTweaks;
-  $("btnAppReload").onclick  = function(){ S.appsLoaded = false; loadApps(true).then(renderApps, renderApps); };
-  $("btnAppAdd").onclick     = function(){ editRule(null); };
-  $("btnDaemonToggle").onclick = toggleDaemon;
-  $("btnDaemonReload").onclick = function(){ loadDaemonRaw(); refresh(true); };
-
-  document.addEventListener("visibilitychange", function(){
-    if (!document.hidden){ scheduleLoop(100); }
-  });
-
-  applyIntervalLabel();
-  refresh(true).then(function(){ scheduleLoop(); });
-}
-
-/* ==========================================================================
-   16) DEMO data (jen s ?demo=1 — kontrola vzhledu na desktopu)
-   ========================================================================== */
-var DEMO_ST = { profile:"game", stop:85, res:1080, tweaks:null, apps:null, auto:true };
-function demoExec(cmd){
-  var t = Date.now() / 1000, w = function(a, b){ return a + Math.sin(t / 7 + b) * 3; };
-
-  if (/status --json/.test(cmd)){
-    return delay({ errno:0, stdout:JSON.stringify({
-      profile:{ active:DEMO_ST.profile, manual_override:true, available:["balanced","game","night","performance","powersave"] },
-      auto:{ enabled:DEMO_ST.auto, running:true, pid:4821, thermal_level:1,
-             last_decision:"skin 41.2 °C -> the game profile (app in the foreground)", last_decision_at:"12:04:31", profile:DEMO_ST.profile },
-      thermal:{ big:w(64,0), mid:w(60,1), little:w(55,2), g3d:w(58,3), skin:w(41,4), soc:w(47,5), display:w(38,6), charger:w(33,8), battery:w(33,7) },
-      cpu:{ policy0:{ cur:1098000, max:1036000, hw_max:1704000, cdev_cur_state:4 },
-            policy4:{ cur:910000,  max:910000,  hw_max:2367000, cdev_cur_state:10 },
-            policy8:{ cur:1164000, max:1164000, hw_max:2914000, cdev_cur_state:12 } },
-      gpu:{ cur:649000, max:723000, min:150000, util:64, power_policy:"adaptive" },
-      mem:{ zram_disksize:3969961984, zram_algorithm:"lz77eh", zram_used:1180000000, zram_orig:3100000000, swappiness:60 },
-      battery:{ capacity:73, status:"Discharging", temp:33.4, cycle_count:602, charge_stop_level:DEMO_ST.stop, charge_start_level:0 },
-      display:{ width:DEMO_ST.res, height:DEMO_ST.res === 1080 ? 2400 : 2000, density:353,
-                presets:["native","900x2000","810x1800","720x1600"], res_pending:false, res_pending_seconds:0 }
-    }), stderr:"" }, 300);
-  }
-
-  if (/tweak json/.test(cmd)){
-    if (!DEMO_ST.tweaks) DEMO_ST.tweaks = [
-      { id:"io.read_ahead_kb", cat:"io", mech:"sysfs", target:"/sys/block/sd[a-d]/queue/read_ahead_kb",
-        type:"int:0:8192", risk:1, flags:["boot","reapply"], name:"Disk read-ahead (KB)",
-        desc:"How much data the kernel reads ahead when reading a file sequentially. A higher value speeds up large sequential reads, but with random access it wastes memory and power.",
-        set:false, value:"", stock:"128 1024 1024 1024", current:"128 1024 1024 1024" },
-      { id:"io.scheduler", cat:"io", mech:"sysfs", target:"/sys/block/sd[a-d]/queue/scheduler",
-        type:"enumf:@self", risk:2, flags:[], name:"I/O scheduler",
-        desc:"Which algorithm queues the requests to the disk. The options differ by kernel.",
-        set:false, value:"", stock:"mq-deadline", current:"mq-deadline" },
-      { id:"vm.swappiness", cat:"vm", mech:"proc", target:"/proc/sys/vm/swappiness",
-        type:"int:0:100", risk:1, flags:["boot"], name:"Willingness to swap into zram",
-        desc:"A higher value means more free RAM, but more compression work.",
-        set:true, value:"80", stock:"60", current:"80" },
-      { id:"sched.child_runs_first", cat:"sched", mech:"proc", target:"/proc/sys/kernel/sched_child_runs_first",
-        type:"bool", risk:1, flags:[], name:"Child runs first",
-        desc:"After a fork() the new process gets the CPU first. It may speed up app starts slightly.",
-        set:false, value:"", stock:"0", current:"0" },
-      { id:"zram.comp_algorithm", cat:"zram", mech:"ro", target:"/sys/block/zram0/comp_algorithm",
-        type:"ro", risk:0, flags:[], name:"zram compression algorithm",
-        desc:"Tensor has the Emerald Hill hardware accelerator (lz77eh) — compression costs almost zero CPU and zero heat. Switching to zstd or lz4 would run on the CPU and generate heat, which is why pixel_tune DELIBERATELY does not set it.",
-        set:false, value:"", stock:"lz77eh", current:"lz77eh" },
-      { id:"power.adaptive_battery_management_enabled", cat:"power", mech:"settings",
-        target:"global adaptive_battery_management_enabled",
-        type:"bool", risk:1, flags:["adv"], name:"Adaptive Battery",
-        desc:"The system learns which apps to restrict in the background. Turning it off improves notification delivery and worsens battery life.",
-        set:false, value:"", stock:"1", current:"1" },
-      { id:"disp.min_refresh_rate", cat:"disp", mech:"settings", target:"secure min_refresh_rate",
-        type:"enum:0,60,90,120", risk:2, flags:["adv","unverified"], name:"Minimum refresh rate",
-        desc:"The lower bound of the display's adaptive range. The key name is not verified on Android 16.",
-        set:false, value:"", stock:"0", current:null },
-      { id:"exp.thp_enabled", cat:"exp", mech:"sysfs", target:"/sys/kernel/mm/transparent_hugepage/enabled",
-        type:"enumf:@self", risk:3, flags:["unverified","adv"], name:"Transparent huge pages",
-        desc:"An unverified change to memory management. It may improve throughput, but also cause stalls during allocation.",
-        set:false, value:"", stock:"never", current:"never" }
-    ];
-    return delay({ errno:0, stdout:JSON.stringify({
-      version:"1.0", live:true, tweaks:DEMO_ST.tweaks,
-      categories:[{id:"io",name:"Disk and I/O",n:2},{id:"vm",name:"Memory and cache",n:1},
-                  {id:"sched",name:"CPU scheduler",n:1},{id:"zram",name:"zram",n:1},
-                  {id:"power",name:"Power management",n:1},{id:"disp",name:"Display",n:1},
-                  {id:"exp",name:"Experimental",n:1}],
-      count:{active:1,errors:0,ts:0}
-    }), stderr:"" }, 400);
-  }
-
-  if (/app json/.test(cmd)){
-    if (!DEMO_ST.apps) DEMO_ST.apps = [
-      { pkg:"com.mojang.minecraftpe", desc:"Minecraft", enabled:true, active:true, priority:10,
-        profile:"game", game:{mode:"custom",fps:60,downscale:"0.8",apply:"ok"},
-        refresh:{min:60,peak:120}, res:{preset:"",enabled:false},
-        min_fg_sec:5, sticky_sec:30, thermal_cap:true, overlay:{} },
-      { pkg:"com.google.android.youtube", desc:"YouTube", enabled:true, active:false, priority:0,
-        profile:"powersave", game:{mode:"",fps:null,downscale:"",apply:""},
-        refresh:{min:60,peak:60}, res:{preset:"",enabled:false},
-        min_fg_sec:5, sticky_sec:30, thermal_cap:false, overlay:{} }
-    ];
-    return delay({ errno:0, stdout:JSON.stringify({
-      version:"1.0",
-      gates:{ res_enabled:false, refresh_verified:false },
-      active:{ pkg:"com.mojang.minecraftpe", since:1, age_sec:42, saved:{} },
-      rules:DEMO_ST.apps
-    }), stderr:"" }, 350);
-  }
-
-  if (/auto status/.test(cmd))
-    return delay({ errno:0, stdout:"auto: " + (DEMO_ST.auto ? "on" : "off") + "\npid: 4821\nthermal_level: 1\nlast: skin 41,2 °C -> game\n", stderr:"" }, 200);
-
-  /* fire-and-forget in the demo: project it into DEMO_ST (with a delay, as on the
-     device). Every match is copied into its own variable — otherwise the next one
-     would overwrite it. */
-  var mp = cmd.match(/pxtune profile ([A-Za-z0-9_.-]+)/);
-  if (mp && mp[1] !== "auto"){ var vp = mp[1]; setTimeout(function(){ DEMO_ST.profile = vp; }, 1200); }
-
-  var mc = cmd.match(/pxtune charge (off|\d+)/);
-  if (mc){ var vc = mc[1]; setTimeout(function(){ DEMO_ST.stop = vc === "off" ? 100 : parseInt(vc, 10); }, 1200); }
-
-  var ma = cmd.match(/pxtune auto (on|off)/);
-  if (ma){ var va = ma[1]; setTimeout(function(){ DEMO_ST.auto = va === "on"; }, 1000); }
-
-  var mr = cmd.match(/pxtune res ([A-Za-z0-9_.-]+)/);
-  if (mr){
-    var vr = mr[1];
-    setTimeout(function(){ DEMO_ST.res = (vr === "reset" || vr === "native") ? 1080 : (parseInt(vr, 10) || 1080); }, 1200);
-  }
-
-  var mt = cmd.match(/pxtune tweak set ([A-Za-z0-9_.-]+) ([A-Za-z0-9_.-]*)/);
-  if (mt){
-    var ti = mt[1], tv = mt[2];
-    setTimeout(function(){
-      (DEMO_ST.tweaks || []).forEach(function(t){
-        if (t.id === ti){ t.value = tv; t.set = true; t.current = tv; }
-      });
-    }, 900);
-  }
-
-  if (/pxtune tweak reset-all/.test(cmd)){
-    setTimeout(function(){ (DEMO_ST.tweaks || []).forEach(function(t){ t.set = false; t.value = ""; t.current = t.stock; }); }, 900);
-  } else {
-    var mrt = cmd.match(/pxtune tweak reset ([A-Za-z0-9_.-]+)/);
-    if (mrt){
-      var ri = mrt[1];
-      setTimeout(function(){ (DEMO_ST.tweaks || []).forEach(function(t){ if (t.id === ri){ t.set = false; t.value = ""; t.current = t.stock; } }); }, 900);
-    }
-  }
-
-  var msa = cmd.match(/pxtune app set ([A-Za-z0-9_.]+) /);
-  if (msa){
-    var ap = msa[1];
-    setTimeout(function(){
-      var rule = null;
-      (DEMO_ST.apps || []).forEach(function(x){ if (x.pkg === ap) rule = x; });
-      if (!rule){ rule = { pkg:ap, desc:"", enabled:true, active:false, priority:0, profile:"",
-                           game:{mode:"",fps:null,downscale:"",apply:""}, refresh:{min:null,peak:null},
-                           res:{preset:"",enabled:false}, overlay:{} };
-                  (DEMO_ST.apps || (DEMO_ST.apps = [])).push(rule); }
-      var re = /([A-Z_]+)=(?:'([^']*)'|([A-Za-z0-9_.\-]*))/g, mm;
-      while ((mm = re.exec(cmd)) !== null){
-        var k = mm[1], v = mm[2] !== undefined ? mm[2] : (mm[3] || "");
-        if (k === "APP_PROFILE") rule.profile = v;
-        else if (k === "GAME_MODE") rule.game.mode = v;
-        else if (k === "GAME_FPS") rule.game.fps = v === "" ? null : parseInt(v, 10);
-        else if (k === "GAME_DOWNSCALE") rule.game.downscale = v;
-        else if (k === "APP_REFRESH_MIN") rule.refresh.min = v === "" ? null : parseInt(v, 10);
-        else if (k === "APP_REFRESH_PEAK") rule.refresh.peak = v === "" ? null : parseInt(v, 10);
-        else if (k === "APP_RES") rule.res.preset = v;
-        else if (k === "APP_RES_ENABLE") rule.res.enabled = v === "1";
-      }
-    }, 900);
-  }
-  var mar = cmd.match(/pxtune app rm ([A-Za-z0-9_.]+)/);
-  if (mar){
-    var rp = mar[1];
-    setTimeout(function(){
-      DEMO_ST.apps = (DEMO_ST.apps || []).filter(function(x){ return x.pkg !== rp; });
-    }, 900);
-  }
-  return delay({ errno:0, stdout:"", stderr:"" }, 40);
-}
-function delay(v, ms){ return new Promise(function(r){ setTimeout(function(){ r(v); }, ms); }); }
-
-/* The last safeguard: a JS error must not leave a blank page. */
-window.addEventListener("error", function(e){
-  try {
-    setStatus("err", "chyba UI");
-    banner("err", "User interface error",
-      "Something failed to render. The rest of the page should keep working.",
-      (e.message || String(e)) + "\n" + (e.filename || "") + ":" + (e.lineno || ""),
-      [{ lb:"Reload", cls:"btn-p", fn:function(){ location.reload(); } }]);
-  } catch(x){}
-});
-window.addEventListener("unhandledrejection", function(e){
-  try {
-    var r = e.reason;
-    setStatus("err", "chyba");
-    if (!PEND) banner("err", "Unhandled error", "The last operation ended with an error.",
-      (r && r.message) ? r.message : String(r),
-      [{ lb:"Zkusit znovu", cls:"btn-p", fn:function(){ refresh(true); } }]);
-  } catch(x){}
-});
-
-if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
-else init();
 </script>
 </body>
 </html>

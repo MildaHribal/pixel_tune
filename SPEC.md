@@ -1,184 +1,218 @@
-# pixel_tune — závazná specifikace
+# pixel_tune — the binding specification
 
-Toto je JEDINÝ zdroj pravdy. Všechna čísla níže jsou **naměřená na konkrétním zařízení**,
-ne odhadnutá. Nic si nedomýšlej, nic nehádej, nic si nevymýšlej. Když něco potřebuješ
-a není to tady, napiš to do svého výstupu jako OTEVŘENOU OTÁZKU — neimprovizuj.
+This is the SINGLE source of truth. Every number below is **measured on this
+specific device**, not estimated. Do not assume anything, do not guess, do not
+invent. When you need something and it is not here, write it into your output as
+an OPEN QUESTION — do not improvise.
 
-## Zařízení
+## The device
 
-Google Pixel 8a „akita", SoC Tensor G3 „zuma", kernel 6.1.145-android14-11, Android 16,
-8 GB RAM (7753832 kB), SELinux **Enforcing** (nesmí se měnit).
+Google Pixel 8a "akita", SoC Tensor G3 "zuma", kernel 6.1.145-android14-11,
+Android 16, 8 GB RAM (7753832 kB), SELinux **Enforcing** (must not be changed).
 KernelSU-Next, `ksud 3.3.0`, manager `com.rifsxd.ksunext`.
 
-Existující moduly (nesmí se s nimi kolidovat): NLSound, TA_utl, hma_oss_zygisk,
-meta-overlayfs, pgs, playintegrityfix, susfs4ksu, tricky_store, zygisk-assistant, zygisksu.
+Existing modules (must not be conflicted with): NLSound, TA_utl, hma_oss_zygisk,
+meta-overlayfs, pgs, playintegrityfix, susfs4ksu, tricky_store, zygisk-assistant,
+zygisksu.
 
-## TVRDÁ OMEZENÍ
+## HARD CONSTRAINTS
 
-1. **Nic se nezapisuje do `/system` ani `/vendor` za běhu.** Modul nepřidává žádný
-   thermal/powerhint/vendor overlay. **Jediná vědomá známá výjimka:** modul má
-   `system/bin/pxtune` overlay v modulovém `system/` (viz „Vědomá známá výjimka" níže).
-2. **SELinux zůstává Enforcing.** Žádné `setenforce 0`.
-3. **Žádný undervolting** — na Tensoru řídí napětí ACPM firmware, kernel k tomu nemá přístup.
-4. **Refresh rate se globálně nesnižuje.** Adaptivní 60–120 Hz zůstává.
-5. Vše musí být reversibilní a zálohované.
+1. **Nothing is written into `/system` or `/vendor` at runtime.** The module adds
+   no thermal/powerhint/vendor overlay. **The single known deliberate
+   exception:** the module has a `system/bin/pxtune` overlay in its own `system/`
+   directory (see "The known deliberate exception" below).
+2. **SELinux stays Enforcing.** No `setenforce 0`.
+3. **No undervolting** — on Tensor the voltage is controlled by the ACPM
+   firmware and the kernel has no access to it.
+4. **The refresh rate is not lowered globally.** The adaptive 60-120 Hz stays.
+5. Everything must be reversible and backed up.
 
-**Vědomá známá výjimka k bodu 1 — `system/bin/pxtune`:**
-Modul obsahuje jediný soubor v `system/` overlay: `system/bin/pxtune`. Slouží POUZE k tomu,
-aby byl příkaz `pxtune` v `PATH` z běžného shellu. **Není to `/vendor`, není to thermal ani
-powerhint overlay, neovlivňuje běh systému ani boot** — je to jen wrapper na dosažení CLI.
-Riziko je proto minimální a rozpor s bodem 1 je zde dokumentovaný a přijatý.
-Alternativa: symlink do adresáře, který už v `PATH` je. Prakticky to ale **teď ponecháme
-jako dokumentovanou výjimku — deployment neměníme.** Žádný _další_ overlay se nepřidává.
+**The known deliberate exception to point 1 — `system/bin/pxtune`:**
+The module contains a single file in the `system/` overlay: `system/bin/pxtune`.
+Its ONLY purpose is to put the `pxtune` command in `PATH` from an ordinary
+shell. **It is not `/vendor`, it is not a thermal or powerhint overlay, and it
+affects neither the running system nor the boot** — it is just a wrapper to reach
+the CLI. The risk is therefore minimal and the conflict with point 1 is
+documented and accepted here. The alternative would be a symlink into a directory
+that is already in `PATH`. In practice we **keep it as a documented exception —
+the deployment is not changing.** No _further_ overlay is added.
 
-## Cesty
+## Paths
 
 ```
-/data/adb/modules/pixel_tune/     # modul (metadata + kód)
+/data/adb/modules/pixel_tune/     # the module (metadata + code)
 ├── module.prop
 ├── post-fs-data.sh
 ├── service.sh
-├── bin/pxtune                    # CLI jádro (POSIX sh, /system/bin/sh)
-├── bin/pxtune-auto               # adaptivní démon
-└── webroot/index.html            # WebUI
+├── volkeys.sh                    # long-press volume keys (root, getevent)
+├── bin/pxtune                    # the CLI core (POSIX sh, /system/bin/sh)
+├── bin/pxtune-tweaks             # the tweak registry engine (sourced lazily)
+├── bin/pxtune-perapp             # per-app rules
+├── bin/pxtune-metrics            # the battery/power/temperature sampler
+├── tweaks/registry.def           # the tweak registry
+├── profiles/*.conf               # the profiles shipped with the module
+├── apps/*.conf                   # example per-app rules + a template
+└── webroot/index.html            # the WebUI
 
-/data/adb/pixel_tune/             # stav, přežívá reinstalaci modulu
-├── profiles/{powersave,balanced,performance,game,night}.conf
-├── backup/stock.conf             # snapshot stock hodnot (vytvoří se 1×)
-├── active                        # jméno aktivního profilu
-├── manual_override               # existuje = automat neplete profil
-├── boot_count                    # ochrana proti bootloopu
-├── DISABLE                       # existuje = service.sh se vypne
-├── res_pending                   # čeká na potvrzení změny rozlišení
+/data/adb/pixel_tune/             # state, survives a module reinstall
+├── profiles/{powersave,balanced,performance,game,night,pogo}.conf
+├── apps/<package>.conf           # per-app rules
+├── backup/stock.conf             # the snapshot of stock values (created once)
+├── backup/tweaks.stock           # the stock values of touched tweaks
+├── active                        # the name of the active profile
+├── tweaks.conf                   # the tweaks that have been set
+├── appmode.active                # per-app layer 3 currently deployed
+├── manual_override               # exists = the profile was chosen by hand
+├── boot_count                    # bootloop protection
+├── DISABLE                       # exists = post-fs-data.sh and service.sh bail out
+├── res_pending                   # waiting for a resolution change to be confirmed
+├── metrics/, metrics.conf, metrics.on
 └── pxtune.log
 ```
 
+**Note (v1.4.0):** the adaptive daemon `bin/pxtune-auto` was removed from the
+module. Profiles are switched manually only. Passages below that describe what
+"the daemon" does are kept for the record — the behaviour they describe is now
+either manual or does not happen at all.
+
 ---
 
-## OVĚŘENÁ HARDWAROVÁ FAKTA
+## VERIFIED HARDWARE FACTS
 
-### Které páky přežijí používání telefonu (změřeno 2026-08-08)
+### Which levers survive normal use of the phone (measured 2026-08-08)
 
-Nejdůležitější tabulka pro návrh profilů. Metoda: nasazen `powersave`, přečteny
-všechny uzly, spuštěny tři aplikace za sebou (Nastavení, Chrome, Hodiny), po
-5 s přečteny znovu. Kontrola, že LAUNCH hint proběhl: `dvfs_headroom` se změnil.
+The most important table for designing profiles. Method: `powersave` was
+applied, all nodes were read, three apps were started one after another
+(Settings, Chrome, Clock), and after 5 s everything was read again. The check
+that the LAUNCH hint really happened: `dvfs_headroom` changed.
 
-| Uzel | Nasazeno | Po startu aplikací | Závěr |
+| Node | Applied | After the app launches | Conclusion |
 |---|---|---|---|
-| `policy4/sched_pixel/limit_frequency` | 1418000 | 1418000 | **DRŽÍ** |
-| `policy8/sched_pixel/limit_frequency` | 1557000 | 1557000 | **DRŽÍ** |
-| `mali0/device/scaling_max_freq` | 649000 | 649000 | **DRŽÍ** |
-| `devfreq_mif/interactive/target_load` | 40 80 | 40 80 | **DRŽÍ** |
-| `lru_gen/min_ttl_ms` | 1000 | 1000 | **DRŽÍ** |
-| `vendor_sched/groups/bg/uclamp_max` | 130 | 130 | **DRŽÍ** |
-| `cpuctl/top-app/cpu.uclamp.max` | 60.00 | 60.00 | **DRŽÍ** |
-| `vendor_sched/dvfs_headroom` | 1024 | **1100** | **PŘEPSÁNO HALem** |
+| `policy4/sched_pixel/limit_frequency` | 1418000 | 1418000 | **HOLDS** |
+| `policy8/sched_pixel/limit_frequency` | 1557000 | 1557000 | **HOLDS** |
+| `mali0/device/scaling_max_freq` | 649000 | 649000 | **HOLDS** |
+| `devfreq_mif/interactive/target_load` | 40 80 | 40 80 | **HOLDS** |
+| `lru_gen/min_ttl_ms` | 1000 | 1000 | **HOLDS** |
+| `vendor_sched/groups/bg/uclamp_max` | 130 | 130 | **HOLDS** |
+| `cpuctl/top-app/cpu.uclamp.max` | 60.00 | 60.00 | **HOLDS** |
+| `vendor_sched/dvfs_headroom` | 1024 | **1100** | **OVERWRITTEN BY THE HAL** |
 
-**Důsledek pro profily:** jediná páka, kterou power HAL bere zpět, je
-`dvfs_headroom`. Do profilu patří jen jako bonus pro klidový stav (a v `night`,
-kde LAUNCH hinty nechodí vůbec) — nikdy jako nosná páka. Všechno ostatní včetně
-`limit_frequency` drží i za plného používání.
+**The consequence for the profiles:** the only lever the power HAL takes back is
+`dvfs_headroom`. It belongs in a profile only as a bonus for the idle state (and
+in `night`, where LAUNCH hints do not arrive at all) — never as a load-bearing
+lever. Everything else including `limit_frequency` holds even during full use.
 
-*(Netestováno: CPU `scaling_max_freq` — modul ho nezapisuje, takže o jeho
-chování za LAUNCH tahle měření nic neříkají.)*
+*(Not tested: the CPU `scaling_max_freq` — the module does not write it, so these
+measurements say nothing about its behaviour under LAUNCH.)*
 
-> **REVIZE 2026-08-12 — tabulka i závěr výše platí jen pro spouštění aplikací.**
-> Metoda z 08-08 startovala aplikace při **už rozsvícené** obrazovce, a proto
-> minula skutečný spouštěč. Snapshot všech 24 uzlů před a po
-> `input keyevent KEYCODE_SLEEP` + `KEYCODE_WAKEUP` (bez jediného dotyku
-> aplikace) ukázal, že **probuzení displeje** vrací na stock tři uzly:
+> **REVISION 2026-08-12 — the table and the conclusion above only hold for app
+> launches.** The 08-08 method started apps with the screen **already on** and
+> therefore missed the real trigger. A snapshot of all 24 nodes before and after
+> `input keyevent KEYCODE_SLEEP` + `KEYCODE_WAKEUP` (without touching a single
+> app) showed that **waking the display** returns three nodes to stock:
 >
-> | Uzel | Nasazeno | Po probuzení displeje | Závěr |
+> | Node | Applied | After the display wake | Conclusion |
 > |---|---|---|---|
-> | `vendor_sched/dvfs_headroom` | 1024 | **1100** | PŘEPSÁNO HALem |
-> | `policy4/sched_pixel/limit_frequency` | 1418000 | **1836000** | PŘEPSÁNO HALem |
-> | `policy8/sched_pixel/limit_frequency` | 1557000 | **2363000** | PŘEPSÁNO HALem |
+> | `vendor_sched/dvfs_headroom` | 1024 | **1100** | OVERWRITTEN BY THE HAL |
+> | `policy4/sched_pixel/limit_frequency` | 1418000 | **1836000** | OVERWRITTEN BY THE HAL |
+> | `policy8/sched_pixel/limit_frequency` | 1557000 | **2363000** | OVERWRITTEN BY THE HAL |
 >
-> Ostatní řádky původní tabulky (uclamp, mali `scaling_max_freq`, mif
-> `target_load`, `min_ttl_ms`, cpupm residency, `down_rate_limit_us`) platí dál —
-> ty drží i přes cyklus obrazovky.
+> The other rows of the original table (uclamp, mali `scaling_max_freq`, mif
+> `target_load`, `min_ttl_ms`, cpupm residency, `down_rate_limit_us`) still
+> hold — those survive a screen cycle.
 >
-> Časování zápisu HALu (vzorkováno po ~150 ms od `KEYCODE_WAKEUP`):
-> `1418000 → 1328000 → 1836000` a pak ustáleno, celé do **~600 ms**. Okamžitý
-> reapply ten závod někdy prohraje, proto démon volá `pxtune reapply` dvakrát:
-> hned a ještě jednou za `REAPPLY_DELAY_SEC` (3 s).
+> The timing of the HAL's writes (sampled ~150 ms after `KEYCODE_WAKEUP`):
+> `1418000 → 1328000 → 1836000` and then settled, all within **~600 ms**. An
+> immediate reapply sometimes loses that race, which is why a reapply should
+> happen twice: at once and again a few seconds later.
 >
-> **Dopad:** do 2026-08-12 byly oba taktové stropy profilu `powersave` — podle
-> vlastního komentáře profilu „nejúčinnější jednotlivá hodnota" — mrtvé už od
-> prvního odemknutí telefonu.
+> **Impact:** until 2026-08-12 both clock ceilings of the `powersave` profile —
+> described in the profile's own comment as "the single most effective value" —
+> had been dead from the first unlock of the phone.
 
-### CPU clustery
+### CPU clusters
 
-| Policy | Cluster | CPU | Frekvence (vzestupně, kHz) |
+| Policy | Cluster | CPU | Frequencies (ascending, kHz) |
 |---|---|---|---|
-| policy0 | Little 4×A510 | 0–3 | 324000 610000 820000 955000 1098000 1197000 1328000 1425000 1548000 1704000 |
-| policy4 | Big 4×A715 | 4–7 | 402000 578000 697000 712000 910000 1065000 1221000 1328000 1418000 1572000 1836000 1945000 2130000 2245000 2367000 |
+| policy0 | Little 4×A510 | 0-3 | 324000 610000 820000 955000 1098000 1197000 1328000 1425000 1548000 1704000 |
+| policy4 | Big 4×A715 | 4-7 | 402000 578000 697000 712000 910000 1065000 1221000 1328000 1418000 1572000 1836000 1945000 2130000 2245000 2367000 |
 | policy8 | Prime 1×X3 | 8 | 500000 880000 1164000 1298000 1557000 1745000 1885000 2049000 2147000 2294000 2363000 2556000 2687000 2850000 2914000 |
 
-- Governor `sched_pixel` na všech — **NEMĚNIT**.
-- `scaling_max_freq` — **na tomhle A16 buildu (akita:16/CP1A.260505.005, ověřeno 2026-08-07)
-  je zapisovatelný**: práva `-rw-rw-r-- system system` (664) a **zápis DRŽÍ** i po 40 s
-  v ustáleném stavu. Ověřeno reverzibilním holds-testem: policy4 zapsáno 1418000,
-  policy8 1557000 — oba drží; vráceno na stock 2367000 / 2914000.
-  **ALE uzel vlastní power HAL** a přepíše ho při hintu `LAUNCH` (a dalších) — do profilu
-  tedy patří jen **s flagem reapply** (jako cooling devices). Není to tichá páka „nastav a zapomeň".
-  *(Historická poznámka: dřív / na jiných buildech měl `scaling_max_freq` práva 0444 a zápis
-  neprošel ani pod rootem. To NA TOMHLE buildu už NEPLATÍ. Původní tvrzení SPEC bylo pravdivé
-  pro tehdejší build, ne pro tenhle.)*
-- Číst lze vždy: `scaling_cur_freq`, `scaling_max_freq`, `stats/time_in_state`, `stats/trans_table`.
+- The `sched_pixel` governor on all of them — **DO NOT CHANGE**.
+- `scaling_max_freq` — **on this A16 build (akita:16/CP1A.260505.005, verified
+  2026-08-07) it is writable**: permissions `-rw-rw-r-- system system` (664) and
+  **a write HOLDS** even after 40 s in the steady state. Verified with a
+  reversible holds-test: policy4 was written 1418000, policy8 1557000 — both
+  held; then restored to the stock 2367000 / 2914000.
+  **BUT the node is owned by the power HAL** and it overwrites it on a `LAUNCH`
+  hint (and others) — so it belongs in a profile only **with the reapply flag**
+  (like the cooling devices). It is not a quiet "set and forget" lever.
+  *(A historical note: previously / on other builds `scaling_max_freq` had
+  permissions 0444 and a write did not go through even as root. That is NO LONGER
+  TRUE ON THIS BUILD. The original claim in the SPEC was true for that build, not
+  for this one.)*
+- Reading always works: `scaling_cur_freq`, `scaling_max_freq`,
+  `stats/time_in_state`, `stats/trans_table`.
 
-**`sched_pixel/limit_frequency` — přímý zapisovatelný strop taktu (ověřeno 2026-08-07).**
-Vedle read-only obchvatu přes uclamp je tohle **první přímá páka na takt.**
+**`sched_pixel/limit_frequency` — a direct writable clock ceiling (verified
+2026-08-07).** Next to the read-only detour through uclamp, this is the **first
+direct lever on the clock.**
 
-| Path | Cluster | Stock (kHz) | Práva |
+| Path | Cluster | Stock (kHz) | Permissions |
 |---|---|---|---|
 | `…/policy0/sched_pixel/limit_frequency` | Little | 1328000 | 644 root:root |
 | `…/policy4/sched_pixel/limit_frequency` | Big/Mid | 1836000 | 644 root:root |
 | `…/policy8/sched_pixel/limit_frequency` | Prime | 2363000 | 644 root:root |
 
-Ověřeno přímým zápisem (policy8 testováno naživo). Cesta:
+Verified by a direct write (policy8 tested live). The path is
 `/sys/devices/system/cpu/cpufreq/policyN/sched_pixel/limit_frequency`.
 
-**OPRAVA 2026-08-08 — `limit_frequency` LAUNCH hint PŘEŽIJE.** Dřívější tvrzení
-„také vlastněno power HALem, zvedá při LAUNCH ⇒ jen s flagem reapply" bylo
-**nesprávné** a je tímto zrušeno. Změřeno naživo: nasazen profil `powersave`
-(policy4=1418000, policy8=1557000), pak spuštěny tři aplikace za sebou
-(Nastavení, Chrome, Hodiny) a hodnoty přečteny znovu — **oba stropy držely
-beze změny.** Že LAUNCH hint v tom okně skutečně proběhl, dokazuje `dvfs_headroom`
-ve stejném vzorku: 1024 → 1100. Kontrolovaný důkaz, ne absence události.
+**CORRECTION 2026-08-08 — `limit_frequency` SURVIVES the LAUNCH hint.** The
+earlier claim "also owned by the power HAL, raised on LAUNCH ⇒ only with the
+reapply flag" was **wrong** and is hereby withdrawn. Measured live: the
+`powersave` profile was applied (policy4=1418000, policy8=1557000), then three
+apps were started one after another (Settings, Chrome, Clock) and the values were
+read again — **both ceilings held unchanged.** That the LAUNCH hint really
+occurred in that window is proven by `dvfs_headroom` in the same sample:
+1024 → 1100. A controlled proof, not the absence of an event.
 
-`limit_frequency` je tedy **jediná tvrdá, spolehlivá páka na takt**, kterou modul
-má — drží i za plného používání telefonu, ne jen v klidu.
+**CORRECTION 2026-08-12 — the previous paragraph is only half true.** The write
+really does hold indefinitely as long as the display is not touched; the trigger
+is not an app launch but **a display wake**, and the 08-08 test never tried that
+(it started apps with the screen already on). Measured with a clean
+`KEYCODE_SLEEP` + `KEYCODE_WAKEUP` cycle without touching an app: policy4
+`1418000 → 1836000`, policy8 `1557000 → 2363000`. Details and timing in the
+revision note next to the "Which levers survive normal use" table.
+`limit_frequency` therefore **belongs among the reapply keys** (`V2_VOLATILE` in
+`bin/pxtune`) — it is a reliable lever, but not a "set and forget" one.
 
-**OPRAVA 2026-08-12 — předchozí odstavec platí jen napůl.** Zápis skutečně drží
-libovolně dlouho, dokud se nesáhne na displej; spouštěč ale není start aplikace,
-nýbrž **probuzení displeje**, a to test z 08-08 nezkoušel (aplikace startoval při
-rozsvícené obrazovce). Změřeno čistým cyklem `KEYCODE_SLEEP` + `KEYCODE_WAKEUP`
-bez dotyku aplikace: policy4 `1418000 → 1836000`, policy8 `1557000 → 2363000`.
-Podrobnosti a časování v revizní poznámce u tabulky „Které páky přežijí používání
-telefonu". `limit_frequency` proto **patří mezi klíče s reapply** (`V2_VOLATILE`
-v `bin/pxtune`) — je to spolehlivá páka, ale ne „nastav a zapomeň".
+### Cooling devices (writable 0644, BUT owned by the thermal HAL)
 
-### Cooling devices (zapisovatelné 0644, ALE vlastní je thermal HAL)
-
-| Node | Typ | max_state | Cluster |
+| Node | Type | max_state | Cluster |
 |---|---|---|---|
 | `/sys/class/thermal/cooling_device8` | thermal-cpufreq-0 | 9 | policy0 |
 | `/sys/class/thermal/cooling_device10` | thermal-cpufreq-1 | 14 | policy4 |
 | `/sys/class/thermal/cooling_device12` | thermal-cpufreq-2 | 14 | policy8 |
 | `/sys/class/thermal/cooling_device24` | thermal-gpufreq-0 | 12 | GPU |
 
-**Ověřený převod:** `cur_state = N` ⇒ strop je frekvence na indexu `(počet_frekvencí - 1 - N)`
-ve vzestupném seznamu výše.
-Příklad: policy8, `cur_state=2` ⇒ index 12 ⇒ 2687000 kHz. `cur_state=12` ⇒ index 2 ⇒ 1164000 kHz.
+**The verified conversion:** `cur_state = N` ⇒ the cap is the frequency at index
+`(frequency_count - 1 - N)` in the ascending list above.
+Example: policy8, `cur_state=2` ⇒ index 12 ⇒ 2687000 kHz. `cur_state=12` ⇒
+index 2 ⇒ 1164000 kHz.
 
-**DŮLEŽITÉ: thermal HAL tyto hodnoty přepisuje zhruba každých 7 s.**
-Proto je **NEPOUŽÍVEJ** jako hlavní páku pro profily — vyžadovalo by to watcher smyčku,
-která žere baterii. Používej je jen pro ČTENÍ (zobrazení aktuálního throttlingu).
+**IMPORTANT: the thermal HAL rewrites these values roughly every 7 s.**
+**DO NOT USE** them as the main lever for profiles — that would require a watcher
+loop, and such a loop eats the battery. Use them for READING only (to display the
+current throttling).
 
-### uclamp cgroups — TOHLE JE HLAVNÍ PÁKA
+The numeric `thermal_zoneN` / `cooling_deviceN` indices are **not stable across a
+reboot** — always resolve them at runtime by the `type` field, or use the stable
+symlinks under `/dev/thermal/`.
 
-Zapisovatelné 0644, **thermal HAL je nepřepisuje**. Škála 0–100 (float, `max` = 100).
+### uclamp cgroups — THIS IS THE MAIN LEVER
+
+Writable 0644, **the thermal HAL does not overwrite them**. The scale is 0-100
+(float, `max` = 100).
 
 ```
 /dev/cpuctl/top-app/cpu.uclamp.{min,max}
@@ -189,106 +223,125 @@ Zapisovatelné 0644, **thermal HAL je nepřepisuje**. Škála 0–100 (float, `m
 /dev/cpuctl/nnapi-hal/cpu.uclamp.{min,max}
 ```
 
-Stock hodnoty: všude `min=0.00`, `max=max`, kromě `nnapi-hal` které má `min=1.00`.
+Stock values: `min=0.00`, `max=max` everywhere, except `nnapi-hal`, which has
+`min=1.00`.
 
-- `uclamp.max < 100` = strop na utilizaci ⇒ governor sáhne po nižších frekvencích ⇒ **chlazení**
-- `uclamp.min > 0` = podlaha ⇒ rychlejší náběh frekvence ⇒ **svižnost** (za cenu spotřeby)
+- `uclamp.max < 100` = a cap on utilisation ⇒ the governor reaches for lower
+  frequencies ⇒ **cooling**
+- `uclamp.min > 0` = a floor ⇒ a faster frequency ramp-up ⇒ **snappiness** (at
+  the cost of power draw)
 
-**POZOR:** `/proc/sys/kernel/sched_util_clamp_min` je globální STROP na to, jakou
-`uclamp.min` smí kdokoli požádat. Stock je 1024 a **musí tak zůstat**. Nastavení na 0
-by zakázalo uclamp boost v celém systému včetně Googlího `power-service.pixel-libperfmgr`.
-NESAHAT.
+**CAREFUL:** `/proc/sys/kernel/sched_util_clamp_min` is the global CEILING on how
+high a `uclamp.min` anyone may request. Stock is 1024 and **it must stay that
+way**. Setting it to 0 would disable the uclamp boost across the whole system,
+including Google's `power-service.pixel-libperfmgr`. DO NOT TOUCH.
 
-### /proc/vendor_sched — DRUHÉ, nezávislé uclamp rozhraní (ověřeno 2026-08-07)
+### /proc/vendor_sched — a SECOND, independent uclamp interface (verified 2026-08-07)
 
-Vedle `/dev/cpuctl` existuje druhé uclamp rozhraní `/proc/vendor_sched/`, **škála 0–1024**
-(ne 0–100 jako cpuctl!). **Hodnoty z obou zdrojů se AGREGUJÍ a platí ta PŘÍSNĚJŠÍ.**
+Next to `/dev/cpuctl` there is a second uclamp interface, `/proc/vendor_sched/`,
+on a **0-1024 scale** (not 0-100 like cpuctl!). **Values from both sources are
+AGGREGATED and the STRICTER one applies.**
 
-Skutečná sada **13 skupin** (probe): `bg cam cam_power dex2oat fg fg_wi nnapi ota rt sf sys
-sys_bg ta`. Každá má `groups/<skupina>/uclamp_min`, `uclamp_max`, `prefer_idle`, `prefer_high_cap`.
+The actual set of **13 groups** (from the probe): `bg cam cam_power dex2oat fg
+fg_wi nnapi ota rt sf sys sys_bg ta`. Each has `groups/<group>/uclamp_min`,
+`uclamp_max`, `prefer_idle`, `prefer_high_cap`.
 
-Klíčové stock hodnoty (ověřeno):
+Key stock values (verified):
 
-| Uzel | Stock | Poznámka |
+| Node | Stock | Note |
 |---|---|---|
-| `groups/bg/uclamp_max` | **130** | = 12,7 % (0–1024). Už pod prahem Little 182/1024 = 17,8 % ⇒ **`UCLAMP_BG_MAX` v /dev/cpuctl je no-op** (vendor už drží pozadí přísněji). |
-| `groups/ta/uclamp_min` | 1 | top-app podlaha |
-| `groups/fg/uclamp_min` | 0 | foreground podlaha |
+| `groups/bg/uclamp_max` | **130** | = 12.7 % (0-1024). Already below the Little threshold of 182/1024 = 17.8 % ⇒ **`UCLAMP_BG_MAX` in /dev/cpuctl is a no-op** (the vendor value already holds the background more strictly). |
+| `groups/ta/uclamp_min` | 1 | the top-app floor |
+| `groups/fg/uclamp_min` | 0 | the foreground floor |
 | `groups/nnapi/uclamp_min` | 225 | |
 | `groups/ta/prefer_idle` | false (0) | |
-| `/proc/vendor_sched/dvfs_headroom` | **1100** | per-CPU vektor `×9`; zápis skaláru vrací vektor. 1100/1024 = 107,4 % přestřelení governoru. |
+| `/proc/vendor_sched/dvfs_headroom` | **1100** | a per-CPU vector `×9`; writing a scalar returns a vector. 1100/1024 = 107.4 % of governor overshoot. |
 | `/proc/vendor_sched/util_threshold` | `2048 2048 2048 2048 1280 1280 1280 1280 1280` | per-CPU |
-| `/proc/vendor_sched/reduce_prefer_idle` | **true** | (registr v2 mylně tvrdil 0) |
+| `/proc/vendor_sched/reduce_prefer_idle` | **true** | (the v2 registry wrongly claimed 0) |
 | `/proc/vendor_sched/tapered_dvfs_headroom_enable` | 0 | |
 | `/proc/vendor_sched/uclamp_max_filter_enable` | 1 | |
 
-Všechny výše jsou zapisovatelné. `groups/bg/uclamp_max` a `dvfs_headroom` **vlastní power HAL**
-(zvedá při LAUNCH: bg→512, headroom→1280) ⇒ reapply, resp. bezpečné jen pro `night`
-(zhasnutý displej, žádné LAUNCH hinty).
+All of the above are writable. `groups/bg/uclamp_max` and `dvfs_headroom` are
+**owned by the power HAL** (it raises them on LAUNCH: bg→512, headroom→1280) ⇒
+reapply, or safe only for `night` (screen off, no LAUNCH hints).
 
-### GPU Mali
+### The Mali GPU
 
 `/sys/class/misc/mali0/device/`
 
-- `scaling_max_freq` — **zapisovatelné a DRŽÍ** (ověřeno: zapsáno 649000, po 12 s stále 649000).
-  Tohle je bezpečná páka pro GPU, na rozdíl od cooling device.
-- `scaling_min_freq`, `hint_max_freq`, `power_policy` (`coarse_demand`/`adaptive`/`always_on`)
+- `scaling_max_freq` — **writable and it HOLDS** (verified: 649000 was written
+  and after 12 s it was still 649000). This is the safe GPU lever, unlike the
+  cooling device.
+- `scaling_min_freq`, `hint_max_freq`, `power_policy`
+  (`coarse_demand`/`adaptive`/`always_on`)
 - `cur_freq`, `utilization`, `time_in_state`
-- Frekvence (**sestupně**, kHz): 890000 850000 807000 723000 649000 580000 521000 467000 419000 376000 337000 302000 150000
-- Stock `scaling_max_freq` = 890000, `scaling_min_freq` = 150000, `power_policy` = adaptive
+- Frequencies (**descending**, kHz): 890000 850000 807000 723000 649000 580000
+  521000 467000 419000 376000 337000 302000 150000
+- Stock `scaling_max_freq` = 890000, `scaling_min_freq` = 150000,
+  `power_policy` = adaptive
 
 ### Thermal
 
-- 28 zón. Zóny `BIG/MID/LITTLE/G3D/ISP/TPU/AUR` mají `mode=disabled` ⇒ jejich sysfs
-  trip pointy jsou **mrtvé**, nesahat na ně, nemá to efekt.
-- Reálně throttluje userspace HAL `android.hardware.thermal-service.pixel`
-  podle `/vendor/etc/thermal_info_config.json` (ten NEMĚNÍME).
+- 28 zones. The zones `BIG/MID/LITTLE/G3D/ISP/TPU/AUR` have `mode=disabled` ⇒
+  their sysfs trip points are **dead**; do not touch them, it has no effect.
+- The actual throttling is done by the userspace HAL
+  `android.hardware.thermal-service.pixel` according to
+  `/vendor/etc/thermal_info_config.json` (which we DO NOT change).
 
-**Škrcení řídí VÝHRADNĚ teplota POVRCHU (skin), NE junction (ověřeno z /vendor 2026-08-07).**
-Junction zóny (`BIG/MID/LITTLE`) mají `mode=disabled` právě proto — pro throttling se nepoužívají.
-Rozhoduje sada VIRTUAL-SKIN senzorů, každý s `TriggerSensor: soc_therm`. Reálné prahy čtené
-z `/vendor` na TOMHLE zařízení (°C):
+**Throttling is driven EXCLUSIVELY by the SKIN (surface) temperature, NOT by the
+junction (verified from /vendor 2026-08-07).** The junction zones
+(`BIG/MID/LITTLE`) have `mode=disabled` precisely for that reason — they are not
+used for throttling. What decides is the set of VIRTUAL-SKIN sensors, each with
+`TriggerSensor: soc_therm`. The real thresholds read from `/vendor` on THIS
+device (°C):
 
-| Senzor | HotThreshold (°C) | Hystereze |
+| Sensor | HotThreshold (°C) | Hysteresis |
 |---|---|---|
-| `VIRTUAL-SKIN-CPU-MID` | 39,0 / 41,0 | 1,9 |
-| `VIRTUAL-SKIN-CPU-HIGH` | 41,0 / 43,0 / 52,0 | 1,9 |
-| `VIRTUAL-SKIN-CPU-LIGHT-ODPM` | 37,0 / 39,0 | 1,9 |
-| `VIRTUAL-SKIN-GPU` | 43 / 45 / 46,5 / 52 | 1,9 |
+| `VIRTUAL-SKIN-CPU-MID` | 39.0 / 41.0 | 1.9 |
+| `VIRTUAL-SKIN-CPU-HIGH` | 41.0 / 43.0 / 52.0 | 1.9 |
+| `VIRTUAL-SKIN-CPU-LIGHT-ODPM` | 37.0 / 39.0 | 1.9 |
+| `VIRTUAL-SKIN-GPU` | 43 / 45 / 46.5 / 52 | 1.9 |
 
-Trigger senzor `soc_therm`: `HotThreshold 36,0`, `PollingDelay 60000` (ms), `PassiveDelay 7000` (ms).
+The trigger sensor `soc_therm`: `HotThreshold 36.0`, `PollingDelay 60000` (ms),
+`PassiveDelay 7000` (ms).
 
-**Důsledek pro „5minutový slepý bod" (populární XDA mýtus):** VIRTUAL-SKIN senzory sice mají
-`PollingDelay 300000`, ale přepočítají se pokaždé, když se ozve `soc_therm`. A `soc_therm` je
-při jakékoli zátěži nad 36 °C během chvilky ⇒ přepíná z 60 s na 7 s pollingu. **Reálná expozice
-throttlingu je tedy prvních ~60 s od studeného startu, ne 5 minut.** 300s hodnota se v praxi
-skoro nikdy neuplatní. Snižovat `PollingDelay` má smysl jen u `soc_therm` — a to vyžaduje
-overlay do `/vendor` (tvrdé omezení č. 1) ⇒ NEDĚLÁME.
+**The consequence for the "5-minute blind spot" (a popular XDA myth):** the
+VIRTUAL-SKIN sensors do have `PollingDelay 300000`, but they are recomputed
+every time `soc_therm` speaks up. And under any load `soc_therm` is above 36 °C
+within moments ⇒ it switches from 60 s to 7 s polling. **The real exposure to
+throttling is therefore the first ~60 s from a cold start, not 5 minutes.** The
+300 s value almost never applies in practice. Lowering `PollingDelay` only makes
+sense for `soc_therm` — and that requires an overlay into `/vendor` (hard
+constraint 1) ⇒ WE DO NOT DO IT.
 
-Indexy zón pro čtení teplot (`/sys/class/thermal/thermal_zoneN/temp`, milicelsia):
+Zone indices for reading temperatures (`/sys/class/thermal/thermal_zoneN/temp`,
+millicelsius):
 
-| Zóna | Index | Význam |
+| Zone | Index | Meaning |
 |---|---|---|
-| BIG | 0 | junction Big clusteru |
-| MID | 1 | junction Mid |
-| LITTLE | 2 | junction Little |
-| G3D | 3 | junction GPU |
-| quiet_therm | 8 | skin |
-| soc_therm | 11 | SoC board |
-| charger_therm | 12 | nabíječka |
-| display_therm | 13 | displej |
-| battery | 16 | baterie |
+| BIG | 0 | the Big cluster junction |
+| MID | 1 | the Mid junction |
+| LITTLE | 2 | the Little junction |
+| G3D | 3 | the GPU junction |
+| quiet_therm | 8 | the skin |
+| soc_therm | 11 | the SoC board |
+| charger_therm | 12 | the charger |
+| display_therm | 13 | the display |
+| battery | 16 | the battery |
 
-Virtuální senzory (VIRTUAL-SKIN*) se čtou přes `dumpsys thermalservice` — musí se volat
-jako `shell`, **ne přes `su`** (pod su visí na binderu).
+The virtual sensors (VIRTUAL-SKIN*) are read through `dumpsys thermalservice` —
+which has to be called as `shell`, **not through `su`** (under su it hangs on
+binder).
 
-**Přepínání thermal profilů:** `setprop vendor.thermal.<SENZOR>.profile <game|camera|"">`
-Profily `game` a `camera` existují pro `VIRTUAL-SKIN-CPU-MID` a `VIRTUAL-SKIN-CPU-HIGH`.
-Prázdný řetězec = default profil.
+**Switching thermal profiles:**
+`setprop vendor.thermal.<SENSOR>.profile <game|camera|"">`
+The `game` and `camera` profiles exist for `VIRTUAL-SKIN-CPU-MID` and
+`VIRTUAL-SKIN-CPU-HIGH`. An empty string = the default profile.
 
-**Profil `game` je DOLOŽENÝ i na tomhle A16 buildu (ověřeno z /vendor 2026-08-07 — zavírá
-otevřenou otázku č. 4).** V thermal configu má u obou senzorů (`VIRTUAL-SKIN-CPU-MID`
-i `-CPU-HIGH`) blok `"Mode":"game"` s `"Disabled":true` na `thermal-cpufreq-0/1/2`:
+**The `game` profile is DOCUMENTED on this A16 build too (verified from /vendor
+2026-08-07 — this closes open question 4).** In the thermal config both sensors
+(`VIRTUAL-SKIN-CPU-MID` and `-CPU-HIGH`) have a `"Mode":"game"` block with
+`"Disabled":true` on `thermal-cpufreq-0/1/2`:
 
 ```
 "Profile": [ { "Mode": "game", "BindedCdevInfo": [
@@ -297,53 +350,66 @@ i `-CPU-HIGH`) blok `"Mode":"game"` s `"Disabled":true` na `thermal-cpufreq-0/1/
     { "CdevRequest": "thermal-cpufreq-2", "Disabled": true } ] } ]
 ```
 
-Nastavením obou propů na `game` tedy **vypneš CPU škrcení ze 2 ze 4 senzorů**, které ho
-způsobují. Zbývají aktivní: `VIRTUAL-SKIN-CPU-LIGHT-ODPM` (37/39 °C) a `VIRTUAL-SKIN-GPU`
-(43/45/46,5/52 °C). `game` tedy neznamená „žádné škrcení", ale „škrcení jen podle
-LIGHT-ODPM a GPU" — což je výrazně volnější než stock.
+Setting both props to `game` therefore **disables CPU throttling from 2 of the 4
+sensors** that cause it. Still active: `VIRTUAL-SKIN-CPU-LIGHT-ODPM`
+(37/39 °C) and `VIRTUAL-SKIN-GPU` (43/45/46.5/52 °C). So `game` does not mean "no
+throttling", it means "throttling only from LIGHT-ODPM and the GPU" — which is
+considerably looser than stock.
 
-POZOR: vypnutím dvou senzorů se telefon **skutečně ohřeje víc** — teplotní pojistka ze skinu
-se stává zodpovědností modulu (viz `THERMAL_PROFILE_MAX_SKIN` v kontraktu v2 níže).
-POZOR 2: systém si tento prop nastavuje sám (při probu byl už na `camera`). Automat s tím
-musí počítat a nesmí systému skákat do řízení, když běží kamera.
+CAREFUL: disabling two sensors really does make the phone **hotter** — the
+thermal safety net from the skin becomes the module's responsibility (see
+`THERMAL_PROFILE_MAX_SKIN` in the v2 contract below).
+CAREFUL 2: the system sets this prop by itself (during the probe it was already
+on `camera`). Anything automated must account for that and must not cut across
+the system while the camera is running.
 
-**Naměřené stock chování při trvalé zátěži** (150 s, 9 jader):
-- Little strop ~1036 MHz (61 % HW maxima), Big 910 MHz (38 %), Prime 1164 MHz (40 %)
-- při junction jen 58 °C a skin 40,5 °C
-- špička junction v prvních ~40 s: 81 °C
-- **zotavení: `MaxReleaseStep=1` ⇒ ~84 s; 60 s po konci zátěže se NIC neuvolnilo**
+**The measured stock behaviour under sustained load** (150 s, 9 cores):
+- the Little cap ~1036 MHz (61 % of the HW maximum), Big 910 MHz (38 %),
+  Prime 1164 MHz (40 %)
+- at a junction of only 58 °C and a skin of 40.5 °C
+- the junction peak in the first ~40 s: 81 °C
+- **recovery: `MaxReleaseStep=1` ⇒ ~84 s; 60 s after the load ended NOTHING had
+  been released**
 
-### Nabíjení
+### Charging
 
 `/sys/devices/platform/google,charger/`
-- `charge_stop_level` (0660 system:system, **root zapsat MŮŽE** — ověřeno zápisem 80, vráceno na 100)
+- `charge_stop_level` (0660 system:system, **root CAN write it** — verified by
+  writing 80 and returning to 100)
 - `charge_start_level` (stock 0)
 - Stock: stop=100, start=0
-- Další: `bd_trigger_temp` (350), `bd_trigger_time` (21600), `bd_recharge_soc` (79), `bd_temp_enable` (1)
-- Stav baterie: `/sys/class/power_supply/battery/{capacity,status,temp,cycle_count,current_now}`
-- Baterie má **602 cyklů**.
+- Others: `bd_trigger_temp` (350), `bd_trigger_time` (21600),
+  `bd_recharge_soc` (79), `bd_temp_enable` (1)
+- The battery state:
+  `/sys/class/power_supply/battery/{capacity,status,temp,cycle_count,current_now}`
+- The battery has **602 cycles**.
 
-### Paměť
+### Memory
 
-- zram0: **stock po bootu = 3969961984 B (3,70 GiB / 3,97 GB) s algoritmem `lz77eh`**
-  `lz77eh` používá **hardwarový kompresní akcelerátor Emerald Hill** v Tensoru
-  (`/sys/devices/platform/16d00000.eh`, driver `google,eh`) ⇒ komprese stojí ~0 CPU a ~0 tepla.
-  **NIKDY nepřepínat na zstd ani lz4** — ty běží na CPU a jsou horší.
+- zram0: **stock after a boot = 3969961984 B (3.70 GiB / 3.97 GB) with the
+  `lz77eh` algorithm**. `lz77eh` uses the **Emerald Hill hardware compression
+  accelerator** in Tensor (`/sys/devices/platform/16d00000.eh`, driver
+  `google,eh`) ⇒ compression costs ~0 CPU and ~0 heat.
+  **NEVER switch to zstd or lz4** — those run on the CPU and are worse.
 - `/sys/block/zram0/{disksize,comp_algorithm,reset,mm_stat}`
-- `swapoff` za běhu je **nebezpečný** (riziko OOM) ⇒ změny zramu jen v `post-fs-data.sh`,
-  kde je swap prázdný.
-- vm stock: `swappiness=60` (píše `/vendor/etc/init/init.pixel-mm-gs.rc`), `dirty_ratio=20`,
-  `dirty_background_ratio=10`, `vfs_cache_pressure=100`, `page-cluster=0` (už optimální pro zram).
+- A `swapoff` at runtime is **dangerous** (risk of OOM) ⇒ zram changes only in
+  `post-fs-data.sh`, where swap is empty.
+- vm stock: `swappiness=60` (written by
+  `/vendor/etc/init/init.pixel-mm-gs.rc`), `dirty_ratio=20`,
+  `dirty_background_ratio=10`, `vfs_cache_pressure=100`, `page-cluster=0`
+  (already optimal for zram).
 
-### Displej
+### Display
 
-- Fyzicky 1080×2400, `ro.sf.lcd_density=420`, aktuální override density **353**
-- Perzistence: `settings put global display_size_forced "<W>,<H>"`,
+- Physically 1080×2400, `ro.sf.lcd_density=420`, the current density override is
+  **353**
+- Persistence: `settings put global display_size_forced "<W>,<H>"`,
   `settings put secure display_density_forced <dpi>`
-- `global display_size_forced` je teď **prázdný**, `secure display_density_forced` = 353
-- Adaptivní 60–120 Hz, mode 2 = 120 Hz. **Globálně nesnižovat.**
+- `global display_size_forced` is currently **empty**,
+  `secure display_density_forced` = 353
+- Adaptive 60-120 Hz, mode 2 = 120 Hz. **Do not lower it globally.**
 
-### Game Mode (systémový, per-app, zdarma)
+### Game Mode (a system feature, per-app, free)
 
 ```
 cmd game mode [1|2|3|4|standard|performance|battery|custom] <PACKAGE>
@@ -354,51 +420,57 @@ cmd game list-configs <PACKAGE>
 
 ---
 
-## VÝKON — naměřené ceny operací (POVINNÉ ČÍST PŘED ÚPRAVOU KÓDU)
+## PERFORMANCE — the measured cost of operations (REQUIRED READING BEFORE EDITING THE CODE)
 
-WebUI volá modul přes **synchronní** most, takže každá zbytečná milisekunda je vidět
-jako zamrznutí. Naměřeno přímo na tomhle zařízení (Little přiškrcený na 610 MHz):
+The WebUI calls the module over a **synchronous** bridge, so every wasted
+millisecond shows up as a freeze. Measured directly on this device (with Little
+throttled to 610 MHz):
 
-| operace | cena | poznámka |
+| operation | cost | note |
 |---|---|---|
-| `printf` | **17,0 ms** | ⚠️ **NENÍ builtin** — je to `/system/bin/printf`, tedy fork! |
-| `$(...)` subshell | 7,7 ms | každá substituce |
-| `head`/`sed`/`grep`/`wc`/`date` | ~7–8 ms | fork |
-| `echo` | ~0 ms | builtin |
-| `print -r --` | ~0,25 ms | builtin, raw (neinterpretuje `\`) |
-| akumulace do proměnné | ~0 ms | |
-| builtin `read` ze sysfs | 0,44 ms | |
-| **zápis** do sysfs | 27–31 ms | inherentní, kernel |
+| `printf` | **17.0 ms** | ⚠️ **NOT a builtin** — it is `/system/bin/printf`, i.e. a fork! |
+| `$(...)` subshell | 7.7 ms | per substitution |
+| `head`/`sed`/`grep`/`wc`/`date` | ~7-8 ms | a fork |
+| `echo` | ~0 ms | a builtin |
+| `print -r --` | ~0.25 ms | a builtin, raw (does not interpret `\`) |
+| accumulating into a variable | ~0 ms | |
+| a builtin `read` from sysfs | 0.44 ms | |
+| **a write** to sysfs | 27-31 ms | inherent, the kernel |
 
-**Z toho plynou závazná pravidla:**
+**The binding rules that follow:**
 
-1. **Nikdy `printf` v horké cestě.** Používej `print -r --` (s novým řádkem) nebo
-   `print -rn --` (bez). `echo` je taky builtin, ale interpretuje zpětná lomítka.
-2. **JSON a delší výstupy akumuluj do proměnné** a vypiš jedním `print`.
-3. **Nečti přes `$(...)`.** Používej helpery, které nastavují globální proměnnou:
-   `rdv <cesta> <default>` → `V`, `nv` (normalizace na JSON číslo), `tempv`, `capv`,
-   `bracketv`, `strv`, `stock_getv` → `SV`, `uclamp_keyv` → `UK`, `kvload <soubor> <prefix>`.
-4. **Konfiguráky načítej jednou** přes `kvload` do proměnných, ne opakovaným `sed`/`grep`.
+1. **Never `printf` in a hot path.** Use `print -r --` (with a newline) or
+   `print -rn --` (without). `echo` is a builtin too, but it interprets
+   backslashes.
+2. **Accumulate JSON and longer output into a variable** and print it with a
+   single `print`.
+3. **Do not read through `$(...)`.** Use the helpers that set a global variable:
+   `rdv <path> <default>` → `V`, `nv` (normalisation to a JSON number), `tempv`,
+   `capv`, `bracketv`, `strv`, `stock_getv` → `SV`, `uclamp_keyv` → `UK`,
+   `kvload <file> <prefix>`.
+4. **Load config files once** via `kvload` into variables, not with repeated
+   `sed`/`grep`.
 
-**Dosažený výsledek** (před → po):
+**The result achieved** (before → after):
 
-| | před | po |
+| | before | after |
 |---|---|---|
 | `status --json` | 9 700 ms | **200 ms** |
 | `profile <name>` | 13 250 ms | **610 ms** |
 | `revert` | 8 350 ms | **810 ms** |
 
-## KONTRAKT: formát profilu
+## CONTRACT: the profile format
 
-Profil je soubor `KEY=VALUE`, sourcovatelný v POSIX sh. Neznámé klíče se **ignorují**
-(dopředná kompatibilita). Prázdná hodnota nebo chybějící klíč = **nesahat na to**.
+A profile is a `KEY=VALUE` file, sourceable in POSIX sh. Unknown keys are
+**ignored** (forward compatibility). An empty value or a missing key = **leave it
+alone**.
 
 ```sh
-# povinné
+# mandatory
 PROFILE_NAME="balanced"
-PROFILE_DESC="Vyvážený — stock chování"
+PROFILE_DESC="Balanced — stock behaviour"
 
-# uclamp (0-100, nebo "max"; prázdné = nesahat)
+# uclamp (0-100, or "max"; empty = leave alone)
 UCLAMP_TOPAPP_MIN=""
 UCLAMP_TOPAPP_MAX=""
 UCLAMP_FG_MIN=""
@@ -408,12 +480,12 @@ UCLAMP_BG_MAX=""
 UCLAMP_SYSBG_MIN=""
 UCLAMP_SYSBG_MAX=""
 
-# GPU (kHz, musí být z povoleného seznamu; prázdné = nesahat)
+# GPU (kHz, must come from the allowed list; empty = leave alone)
 GPU_MAX_FREQ=""
 GPU_MIN_FREQ=""
 GPU_POWER_POLICY=""      # coarse_demand | adaptive | always_on
 
-# thermal HAL profil ("game" | "camera" | "" = default)
+# the thermal HAL profile ("game" | "camera" | "" = default)
 THERMAL_PROFILE_CPU_MID=""
 THERMAL_PROFILE_CPU_HIGH=""
 
@@ -424,138 +496,153 @@ VM_DIRTY_BG_RATIO=""
 VM_VFS_CACHE_PRESSURE=""
 
 # I/O
-IO_READAHEAD_KB=""       # aplikuje se na sda..sdd
+IO_READAHEAD_KB=""       # applied to sda..sdd
 
-# nabíjení
+# charging
 CHARGE_STOP_LEVEL=""     # 1-100
 ```
 
-### KONTRAKT v2 — nové klíče (ověřený stock z probe 2026-08-07, build akita:16/CP1A.260505.005)
+### CONTRACT v2 — the new keys (stock verified by the probe 2026-08-07, build akita:16/CP1A.260505.005)
 
-Stejná sémantika jako v1: **prázdná hodnota / chybějící klíč = nesahat.** Neznámé klíče se
-ignorují (dopředná kompatibilita). Uzly označené „reapply" vlastní power HAL (přepíše je při
-LAUNCH ap.), takže je profil musí periodicky obnovovat, ne nastavit jednou.
+The same semantics as v1: **an empty value / a missing key = leave it alone.**
+Unknown keys are ignored (forward compatibility). Nodes marked "reapply" are
+owned by the power HAL (it overwrites them on LAUNCH etc.), so a profile has to
+restore them periodically rather than set them once.
 
 ```sh
-# --- /proc/vendor_sched (škála 0–1024, prázdné = nesahat) ---
+# --- /proc/vendor_sched (scale 0-1024, empty = leave alone) ---
 VS_TA_UCLAMP_MIN=""     # /proc/vendor_sched/groups/ta/uclamp_min          stock 1
 VS_FG_UCLAMP_MIN=""     # /proc/vendor_sched/groups/fg/uclamp_min          stock 0
-VS_BG_UCLAMP_MAX=""     # /proc/vendor_sched/groups/bg/uclamp_max          stock 130   (reapply; jediná reálná páka na pozadí — cpuctl BG je no-op)
+VS_BG_UCLAMP_MAX=""     # /proc/vendor_sched/groups/bg/uclamp_max          stock 130   (reapply; the only real lever on the background — cpuctl BG is a no-op)
 VS_TA_PREFER_IDLE=""    # /proc/vendor_sched/groups/ta/prefer_idle         stock false/0
-VS_DVFS_HEADROOM=""     # /proc/vendor_sched/dvfs_headroom                 stock 1100  (per-CPU vektor; reapply)
+VS_DVFS_HEADROOM=""     # /proc/vendor_sched/dvfs_headroom                 stock 1100  (a per-CPU vector; reapply)
 
-# --- sched_pixel governor (reapply — vlastní power HAL) ---
-SCHED_LIMIT_FREQ_LITTLE="" # policy0/sched_pixel/limit_frequency          stock 1328000
-SCHED_LIMIT_FREQ_MID=""    # policy4/sched_pixel/limit_frequency          stock 1836000
-SCHED_LIMIT_FREQ_BIG=""    # policy8/sched_pixel/limit_frequency          stock 2363000
-SCHED_DOWN_RATE_MID=""     # policy4/sched_pixel/down_rate_limit_us        stock 500   (POZOR: NE 20000, jak tvrdil registr/research)
-SCHED_DOWN_RATE_BIG=""     # policy8/sched_pixel/down_rate_limit_us        stock 500   (POZOR: NE 20000)
+# --- the sched_pixel governor (reapply — owned by the power HAL) ---
+SCHED_LIMIT_FREQ_LITTLE="" # policy0/sched_pixel/limit_frequency           stock 1328000
+SCHED_LIMIT_FREQ_MID=""    # policy4/sched_pixel/limit_frequency           stock 1836000
+SCHED_LIMIT_FREQ_BIG=""    # policy8/sched_pixel/limit_frequency           stock 2363000
+SCHED_DOWN_RATE_MID=""     # policy4/sched_pixel/down_rate_limit_us        stock 500   (CAREFUL: NOT 20000, as the registry/research claimed)
+SCHED_DOWN_RATE_BIG=""     # policy8/sched_pixel/down_rate_limit_us        stock 500   (CAREFUL: NOT 20000)
 
 # --- devfreq ---
-DEVFREQ_MIF_TARGET_LOAD="" # /sys/class/devfreq/…devfreq_mif/interactive/target_load  stock "20 40"  (POZOR: NE "20 80")
-DEVFREQ_DSU_MIN=""         # …devfreq_dsu/…/min_freq                       stock 324000 (POZOR: NE 0)
-DEVFREQ_MIF_MIN=""         # …devfreq_mif/…/min_freq                       stock 421000 (POZOR: NE 0)
+DEVFREQ_MIF_TARGET_LOAD="" # /sys/class/devfreq/…devfreq_mif/interactive/target_load  stock "20 40"  (CAREFUL: NOT "20 80")
+DEVFREQ_DSU_MIN=""         # …devfreq_dsu/…/min_freq                       stock 324000 (CAREFUL: NOT 0)
+DEVFREQ_MIF_MIN=""         # …devfreq_mif/…/min_freq                       stock 421000 (CAREFUL: NOT 0)
 
-# --- idle (klidová spotřeba) ---
-CPUPM_CL1_RESIDENCY=""     # …/cpupm/cpupm/cpd_cl1_target_residency        stock 10000  (POZOR: NE 750000 — klidová residency je z výroby agresivní 10 ms)
-CPUPM_CL2_RESIDENCY=""     # …/cpupm/cpupm/cpd_cl2_target_residency        stock 10000  (POZOR: NE 750000; night=100000 by uspával POZDĚJI, opak záměru)
+# --- idle (idle power draw) ---
+CPUPM_CL1_RESIDENCY=""     # …/cpupm/cpupm/cpd_cl1_target_residency        stock 10000  (CAREFUL: NOT 750000 — the idle residency is an aggressive 10 ms out of the box)
+CPUPM_CL2_RESIDENCY=""     # …/cpupm/cpupm/cpd_cl2_target_residency        stock 10000  (CAREFUL: NOT 750000; night=100000 would sleep LATER, the opposite of the intent)
 
 # --- GPU ---
-GPU_DVFS_PERIOD=""         # /sys/devices/platform/…mali/dvfs_period       stock 20     (10 = svižnější, 20 = úspornější)
+GPU_DVFS_PERIOD=""         # /sys/devices/platform/…mali/dvfs_period       stock 20     (10 = snappier, 20 = more economical)
 
-# --- paměť ---
-MEM_LRU_MIN_TTL=""         # /sys/kernel/mm/lru_gen/min_ttl_ms             stock 0      (ms; ochrana pracovní množiny před odsunem do zramu, rw ověřeno probem)
-                           #   POZOR na duplicitu s tweakem `mem.lru_gen_min_ttl` v registry.def — nastavovat
-                           #   jen jedno z toho, jinak si profil a tweak hodnotu přepisují. Vlastníkem je profil.
+# --- memory ---
+MEM_LRU_MIN_TTL=""         # /sys/kernel/mm/lru_gen/min_ttl_ms             stock 0      (ms; protects the working set from being pushed into zram, rw verified by the probe)
+                           #   CAREFUL about the duplicate with the `mem.lru_gen_min_ttl` tweak in registry.def — set
+                           #   only one of them, otherwise the profile and the tweak overwrite each other. The owner is the profile.
 
-# --- thermal, TVRDĚ HLÍDANÉ ---
-THERMAL_CDEV_BYPASS=""     # user_vote_bypass na 3 CPU cdev                stock 0      (riziko 3 — runtime vypínač skin-throttlingu; nikdy default, jen s pojistkou)
+# --- thermal, TIGHTLY GUARDED ---
+THERMAL_CDEV_BYPASS=""     # user_vote_bypass on the 3 CPU cdevs           stock 0      (risk 3 — a runtime switch that disables skin throttling; never a default, only with a safety net)
                            #   /dev/thermal/cdev-by-name/thermal-cpufreq-{0,1,2}/user_vote_bypass
-THERMAL_PROFILE_MAX_SKIN="" # °C — NOVÁ POJISTKA: nad touhle teplotou skinu se THERMAL_PROFILE_*
-                           #   NEnasadí a pokud už běží, za běhu se sundá. Chrání před přehřátím,
-                           #   když profil `game` vypne 2 ze 4 skin senzorů.
+THERMAL_PROFILE_MAX_SKIN="" # °C — A SAFETY NET: above this skin temperature THERMAL_PROFILE_*
+                           #   is NOT applied, and if it is already active it is taken down at runtime.
+                           #   It protects against overheating when the `game` profile disables 2 of the 4 skin sensors.
 ```
 
-**Pozn. ke stock hodnotám:** probe opravil několik dřívějších tvrzení registru/researche —
-`down_rate_limit_us` je 500 (ne 20000), `mif target_load` je „20 40" (ne „20 80"),
-`dsu/mif min_freq` nejsou 0 (324000 / 421000) a `cpd_clN_target_residency` je **už z výroby
-10000 (10 ms)**, ne 750000. To mění záměr night profilu: snižovat residency nemá smysl,
-protože je nízká už teď; night by ji naopak měl nechat, nebo řešit jinou pákou.
+**A note on the stock values:** the probe corrected several earlier claims of the
+registry/research — `down_rate_limit_us` is 500 (not 20000), the mif
+`target_load` is "20 40" (not "20 80"), the `dsu/mif min_freq` are not 0
+(324000 / 421000) and `cpd_clN_target_residency` is **already 10000 (10 ms) out
+of the box**, not 750000. That changes the intent of the night profile: lowering
+the residency makes no sense because it is already low; night should leave it
+alone or use a different lever.
 
-## KONTRAKT: CLI `pxtune`
+## CONTRACT: the `pxtune` CLI
 
-POSIX sh, shebang `#!/system/bin/sh`. Musí běžet pod `busybox`/`toybox` na Androidu.
-Žádné bashismy (`[[ ]]`, pole, `local` je OK v toyboxu ale radši ne).
+POSIX sh, shebang `#!/system/bin/sh`. It must run under `busybox`/`toybox` on
+Android. No bashisms (`[[ ]]`, arrays; `local` is fine in toybox but better
+avoided).
 
 ```
-pxtune status [--json]        # stav: profil, teploty, frekvence, uclamp, zram, nabíjení
-pxtune profile list           # seznam profilů
-pxtune profile current        # jméno aktivního
-pxtune profile <name>         # přepnout (nastaví manual_override)
-pxtune profile auto           # zrušit manual_override, vrátit řízení automatu
-pxtune revert                 # vrátit VŠE na stock z backup/stock.conf
+pxtune status [--json]        # state: profile, temperatures, frequencies, uclamp, zram, charging
+pxtune profile list           # list the profiles
+pxtune profile current        # the name of the active one
+pxtune profile <name>         # switch (sets manual_override)
+pxtune reapply                # restore the nodes the power HAL overwrote
+pxtune revert                 # restore EVERYTHING to stock from backup/stock.conf
 pxtune res <preset|confirm|reset>
 pxtune charge <1-100|off>
-pxtune game <package> <mode>  # obálka nad cmd game
-pxtune auto <on|off|status>
+pxtune game <package> <mode>  # a wrapper around cmd game
+pxtune app <list|show|set|rm|sync|json>
+pxtune tweak <list|info|get|set|reset|reset-all|json|apply-boot|selftest>
+pxtune metrics <start|stop|status|dump|summary|purge>
 pxtune log [-n N]
-pxtune selftest               # ověří že všechny cesty existují a jsou zapisovatelné
+pxtune selftest               # verifies that all the paths exist and are writable
 ```
 
-- **Každý zápis** jde přes jednu funkci `wr <path> <value>`, která: ověří existenci,
-  ověří zapisovatelnost, zaloguje `stará → nová`, a při chybě pokračuje (nikdy neshodí skript).
-- `--json` výstup musí být validní JSON (WebUI ho parsuje).
-- Exit kód 0 = OK, 1 = chyba argumentů, 2 = chyba běhu.
+- **Every write** goes through a single `wr <path> <value>` function, which:
+  verifies existence, verifies writability, logs `old → new`, and carries on
+  after an error (it never brings the script down).
+- The `--json` output must be valid JSON (the WebUI parses it).
+- Exit code 0 = OK, 1 = an argument error, 2 = a runtime error.
 
-## KONTRAKT: vzorkovač metrik (`pxtune metrics`)
+## CONTRACT: the metrics sampler (`pxtune metrics`)
 
-Diagnostický sběr dat, ze kterých jde **zpětně spočítat efekt profilů**. Profily
-byly navržené z naměřených HW faktů, ale jejich dopad na spotřebu a teplotu
-změřený není — tohle je nástroj, který to má doložit.
+Diagnostic data collection from which **the effect of the profiles can be
+computed after the fact**. The profiles were designed from measured hardware
+facts, but their impact on power draw and temperature is not measured — this is
+the tool meant to document it.
 
-- **Vypnutý, dokud ho někdo nezapne.** `pxtune metrics start` založí
-  `$STATE/metrics.on`; jen podle existence toho souboru ho pouští `service.sh`
-  po bootu. Bez něj se nespustí vůbec.
-- **Data:** `$STATE/metrics/m-RRRRMMDD.csv`, jeden řádek na vzorek, hlavička
-  v prvním řádku. Drží se `KEEP_DAYS` dní (výchozí 7), soubor za den je ~210 kB
-  při výchozím intervalu.
-- **Nastavení:** `$STATE/metrics.conf`, klíče `INTERVAL_SEC` (5–3600, výchozí 60)
-  a `KEEP_DAYS`. Čte se přes whitelist, **nesourcuje se**. Změna intervalu
-  platí od dalšího vzorku, restart není potřeba.
-- **Cena vzorku:** ~20 čtení ze sysfs přes builtin `read` + jeden `date`
-  a jeden `sleep`. Žádné `dumpsys`, žádný binder.
-- **Selhání sběru nesmí ohrozit boot** — v `service.sh` je to nefatální větev.
+- **Off until somebody turns it on.** `pxtune metrics start` creates
+  `$STATE/metrics.on`; `service.sh` starts it after a boot solely based on that
+  file existing. Without it, it does not start at all.
+- **Data:** `$STATE/metrics/m-YYYYMMDD.csv`, one line per sample, a header on the
+  first line. Kept for `KEEP_DAYS` days (default 7); one day's file is ~210 kB at
+  the default interval.
+- **Settings:** `$STATE/metrics.conf`, the keys `INTERVAL_SEC` (5-3600, default
+  60) and `KEEP_DAYS`. It is read through a whitelist, **not sourced**. An
+  interval change applies from the next sample; no restart is needed.
+- **The cost of a sample:** ~20 reads from sysfs through the builtin `read` plus
+  one `date` and one `sleep`. No `dumpsys`, no binder.
+- **A collection failure must not endanger the boot** — in `service.sh` it is a
+  non-fatal branch.
 
-Sloupce: `ts_epoch, cas, profil, podsviceni, stav, baterie_pct, proud_ua,
-napeti_uv, prikon_mw, charge_counter_uah, baterie_dc, skin_mc, big_mc, mid_mc,
+Columns: `ts_epoch, time, profile, backlight, status, battery_pct, current_ua,
+voltage_uv, power_mw, charge_counter_uah, battery_dc, skin_mc, big_mc, mid_mc,
 little_mc, g3d_mc, cd_cpu0, cd_cpu1, cd_cpu2, cd_gpu, f_little, f_big, f_prime,
 f_gpu, perapp`.
 
-**ZNAMÉNKO PROUDU — neuzavřeno.** Ověřeno je jen, že při nabíjení je
-`current_now` **kladný** (+1,3 A). Že je při vybíjení záporný, je běžná konvence
-Androidu, ale na tomhle kusu to zatím nikdo neviděl: nabíjení nejde přes adb
-vypnout (uzel `charge_disable` zařízení nemá a `charge_stop_level` pod aktuální
-stav baterie vybíjení nevynutí — ověřeno, při stropu 70 % a stavu 77 % telefon
-dál nabíjel). Proto `pxtune metrics summary` počítá úbytek z `charge_counter`,
-který klesá monotónně bez ohledu na znaménko, a režim rozlišuje podle pole
-`stav`, ne podle znaménka proudu.
+**THE SIGN OF THE CURRENT — not settled.** All that is verified is that while
+charging `current_now` is **positive** (+1.3 A). That it is negative while
+discharging is the usual Android convention, but nobody has seen it on this unit
+yet: charging cannot be turned off over adb (the device has no `charge_disable`
+node, and a `charge_stop_level` below the current battery level does not force a
+discharge — verified: with a cap of 70 % and a level of 77 % the phone kept
+charging). `pxtune metrics summary` therefore computes the drop from
+`charge_counter`, which falls monotonically regardless of the sign, and
+distinguishes the mode by the `status` field, not by the sign of the current.
 
-**`perapp` se bere z `appmode.active`, ne z `appmode.gamestamp`** — gamestamp je
-rate-limit pro `GAME_APPLY=enter` a zůstává v něm poslední hra i dlouho po
-odchodu z ní (bez toho se do CSV lepil `pogo`, i když žádné pravidlo neběželo).
+**`perapp` is taken from `appmode.active`, not from `appmode.gamestamp`** —
+gamestamp is a rate limit for `GAME_APPLY=enter` and keeps the last game in it
+long after you have left it (without this, `pogo` kept sticking to the CSV even
+when no rule was running).
 
-## KONTRAKT: log
+## CONTRACT: the log
 
-`/data/adb/pixel_tune/pxtune.log`, formát `[YYYY-MM-DD HH:MM:SS] [úroveň] zpráva`.
-Rotace při > 512 kB (přejmenovat na `.old`, začít nový).
+`/data/adb/pixel_tune/pxtune.log`, format `[YYYY-MM-DD HH:MM:SS] [level] message`.
+Rotation above 512 kB (rename to `.old`, start a new one).
 
-## Bezpečnost — POVINNÉ
+## Safety — MANDATORY
 
-- `post-fs-data.sh` obsahuje **jen zram**. Nic jiného. (Rizikové věci nepatří do rané fáze bootu.)
-- `service.sh` dělá zbytek. Pozdní fáze = případná chyba nemůže způsobit bootloop.
-- **boot_count**: `post-fs-data.sh` inkrementuje `/data/adb/pixel_tune/boot_count`.
-  `service.sh` ho po úspěšném doběhnutí vynuluje. Když `post-fs-data.sh` uvidí hodnotu **≥ 3**,
-  vytvoří `DISABLE` a nic neudělá.
-- Když existuje `/data/adb/pixel_tune/DISABLE`, `post-fs-data.sh` i `service.sh` **okamžitě skončí**.
-- Rozlišení: po změně se vytvoří `res_pending` a naplánuje se návrat na nativní za 60 s,
-  pokud nepřijde `pxtune res confirm`.
+- `post-fs-data.sh` contains **only zram** (plus the bootloop logic). Nothing
+  else. (Risky things do not belong in the early boot phase.)
+- `service.sh` does the rest. The late phase = a possible error cannot cause a
+  bootloop.
+- **boot_count**: `post-fs-data.sh` increments
+  `/data/adb/pixel_tune/boot_count`. `service.sh` zeroes it once the boot has
+  completed. When `post-fs-data.sh` sees a value **≥ 3**, it creates `DISABLE`
+  and does nothing.
+- When `/data/adb/pixel_tune/DISABLE` exists, both `post-fs-data.sh` and
+  `service.sh` **exit immediately**.
+- Resolution: after a change, `res_pending` is created and a return to native is
+  scheduled in 60 s unless `pxtune res confirm` arrives.

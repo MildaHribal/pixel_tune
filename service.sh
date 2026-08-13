@@ -12,7 +12,6 @@
 #   - create backup/stock.conf once (delegated to `pxtune`)
 #   - apply the active profile
 #   - deal with the resolution (unconfirmed change / persistent setting)
-#   - start the adaptive daemon if it is enabled
 #   - AT THE END zero boot_count = "the boot completed fine"
 #
 # The script NEVER exits with a non-zero code, does not use `set -e` and is
@@ -27,7 +26,6 @@ esac
 
 BIN="$MODDIR/bin"
 PXTUNE="$BIN/pxtune"
-AUTOD="$BIN/pxtune-auto"
 
 STATE=/data/adb/pixel_tune
 LOG="$STATE/pxtune.log"
@@ -366,39 +364,8 @@ else
 	log INFO "service: the persistent resolution is kept by Android itself — display_size_forced=$RES_NOW, display_density_forced=$DPI_NOW"
 fi
 
-# ---------------------------------------------------------------------------
-# 6) The adaptive daemon
-#
-# The state is read from `$STATE/auto` so that there is a single source of
-# truth. We MIRROR the semantics of `auto_state()` in bin/pxtune:
-# 'off'/'OFF'/'0'/'false' mean off, anything else INCLUDING A MISSING FILE
-# means on.
-#
-# Starting is delegated to `pxtune-auto start` — the daemon detaches itself via
-# setsid, keeps its own `$STATE/pxtune-auto.pid` and its `do_start()` already
-# contains an "already running (pid N)" check. Idempotence is therefore its
-# job; service.sh does not duplicate it and keeps no pidfile of its own.
-# ---------------------------------------------------------------------------
-AUTO_STATE=$(cat "$STATE/auto" 2>/dev/null | tr -d ' \t\r\n')
-case "$AUTO_STATE" in
-off | OFF | 0 | false)
-	log INFO "service: adaptive daemon disabled ($STATE/auto='$AUTO_STATE')"
-	;;
-*)
-	if [ ! -x "$AUTOD" ]; then
-		log WARN "service: auto is enabled, but $AUTOD does not exist or is not executable — daemon not started"
-	else
-		"$AUTOD" start >/dev/null 2>&1
-		RC=$?
-		AUTO_PID=$(cat "$STATE/pxtune-auto.pid" 2>/dev/null | tr -dc '0-9')
-		if [ -n "$AUTO_PID" ] && [ -d "/proc/$AUTO_PID" ]; then
-			log INFO "service: pxtune-auto is running (pid $AUTO_PID)"
-		else
-			log ERROR "service: 'pxtune-auto start' exited with code $RC and the daemon is not running"
-		fi
-	fi
-	;;
-esac
+# (The adaptive daemon was removed from the module on 2026-08-13 — profiles are
+# switched manually only. There is deliberately no daemon-start section here.)
 
 # ---------------------------------------------------------------------------
 # 6b) The metrics sampler (battery / power draw / temperatures).
@@ -424,6 +391,18 @@ if [ -f "$STATE/metrics.on" ]; then
 			log WARN "service: the metrics sampler could not be started"
 		fi
 	fi
+fi
+
+# ---------------------------------------------------------------------------
+# 6c) volkeys — long-press on the volume keys (Volume UP → the pixel_tune WebUI,
+#     Volume DOWN → the torch; works with the screen off too).
+#     Runs as root (getevent) and calls the torch through termux-torch.
+# ---------------------------------------------------------------------------
+VOLKEYS="$MODDIR/volkeys.sh"
+if [ -x "$VOLKEYS" ]; then
+	pkill -f "volkeys.sh" 2>/dev/null
+	setsid sh "$VOLKEYS" >/dev/null 2>&1 </dev/null &
+	log INFO "service: volkeys daemon started"
 fi
 
 # ---------------------------------------------------------------------------

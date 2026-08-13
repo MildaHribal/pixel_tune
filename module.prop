@@ -1,7 +1,7 @@
 id=pixel_tune
 name=Pixel Tune
-version=v1.2.0
-versionCode=3
+version=v1.4.0
+versionCode=4
 author=local
-description=Reversible performance, thermal and power tuning for the Pixel 8a (Tensor G3). Profiles via uclamp cgroups and the Mali scaling_max_freq, optional zram size (the lz77eh algorithm is never changed), charge limit, per-app Game Mode. Writes to neither /system nor /vendor, SELinux stays Enforcing. Control it from the WebUI (webroot/index.html) or the pxtune CLI. Bootloop protection via boot_count.
+description=Reversible performance, thermal and power tuning for the Pixel 8a (Tensor G3). Manually switched profiles (powersave=max battery, balanced=smoothness, performance, game, night) via uclamp, sched_pixel limit_frequency, Mali scaling_max_freq, MIF and MGLRU. Read-only tweaks removed - the registry only holds what can actually be set. No automatic switching. Writes to neither /system nor /vendor, SELinux stays Enforcing, bootloop protection.
 webuiIcon=icon.png

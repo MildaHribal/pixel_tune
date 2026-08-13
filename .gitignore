@@ -6,3 +6,12 @@
 .laptop-preV2-backup/
 *.tgz
 *.tar.zst
+# personal working notes, probe dumps and reports (kept locally, not published)
+MERENI-*.md
+NOCNI-REPORT.md
+ONBOARDING*.md
+RESEARCH-*.md
+REVIEW.md
+probe-*.md
+probe-*.txt
+v2-stock-snapshot-*.txt

@@ -38,6 +38,12 @@ LOG_MAX=524288
 # pxtune-auto is not. Without the fallback, `pxtune auto on|off` neither started
 # nor stopped the daemon and merely reported success silently (measured
 # 2026-08-11). The same pattern as for PERAPP below.
+#
+# Since v1.4.0 the daemon is no longer shipped with the module (profiles are
+# switched manually only), so this path normally does not exist and
+# `pxtune auto on` merely reports that the daemon was not found.
+AUTOD="$(dirname "$0")/pxtune-auto"
+[ -x "$AUTOD" ] || AUTOD="/data/adb/modules/pixel_tune/bin/pxtune-auto"
 AUTOD_PID="$STATE_DIR/pxtune-auto.pid"
 
 # Per-app profiles (bin/pxtune-perapp). The path is derived the same way as for
