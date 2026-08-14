@@ -22,6 +22,12 @@ case "$MODDIR" in
 /*) ;;
 *) MODDIR=/data/adb/modules/pixel_tune ;;
 esac
+
+# The module installer flattens permissions to 0644 on everything outside
+# system/bin, so after an install from a ZIP the CLI arrives without its
+# executable bit. Restore it before anything tries to run it.
+chmod 0755 "$MODDIR"/bin/* "$MODDIR"/volkeys.sh 2>/dev/null
+
 [ -x "$MODDIR/bin/pxtune" ] || MODDIR=/data/adb/modules/pixel_tune
 
 BIN="$MODDIR/bin"
