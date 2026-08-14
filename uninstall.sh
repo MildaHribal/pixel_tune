@@ -85,6 +85,15 @@ fi
 rm -f "$PIDFILE" "$STATE/pxtune-auto.fifo" 2>/dev/null
 rm -rf "$STATE/pxtune-auto.lock" 2>/dev/null
 
+# The doze helper. It MUST be stopped through its own `off`, because that is
+# what re-acquires the foreign wake lock it may have released — otherwise the
+# uninstall would leave the phone (and the user's bot) without it.
+DOZED="$MODDIR/bin/pxtune-doze"
+if [ -x "$DOZED" ]; then
+	"$DOZED" off >/dev/null 2>&1
+	log INFO "uninstall: called 'pxtune-doze off' (wake lock restored)"
+fi
+
 # The metrics sampler — only runs if the user enabled it, but if it is running
 # it must not outlive the module. The collected data STAYS (it is the user's
 # measurements, not our state) — it is removed together with the rest of $STATE

@@ -34,6 +34,7 @@ matter:
 | **`balanced` is no longer an empty profile.** | It now carries a small uclamp floor, a longer clock hold and working-set protection — see section 3. |
 | **`powersave` was retuned for maximum battery life** (2026-08-13). | Lower CPU/GPU/memory-bus ceilings, while keeping 120 Hz and Pokémon GO smooth. |
 | **`volkeys.sh` was added.** | A long press on Volume UP opens the WebUI, on Volume DOWN toggles the torch — both work with the screen off. |
+| **`pxtune doze` was added.** | Optional. Releases a foreign wake lock (Termux) once the screen has been off long enough, so the phone can suspend at all — see section 8. |
 
 Leftovers of the daemon that are deliberately still present: `pxtune auto
 <on|off|status>` is still in the CLI, and `uninstall.sh` still tries to stop a
@@ -71,6 +72,8 @@ levers** that Android does not otherwise expose on this phone:
   (section 6).
 - **Metrics** — optional sampling of battery, power draw and temperatures
   (section 7).
+- **A sleep helper** — releases a foreign wake lock so the SoC can actually
+  suspend (section 8).
 - **State readout** — temperatures from the thermal zones, frequencies, the
   current throttling from the cooling devices, zram, the battery.
 
@@ -118,6 +121,7 @@ section 3.
 ├── bin/pxtune-tweaks             # the tweak registry engine (sourced lazily)
 ├── bin/pxtune-perapp             # per-app rules
 ├── bin/pxtune-metrics            # the battery/power/temperature sampler
+├── bin/pxtune-doze               # the sleep helper (section 8)
 ├── tweaks/registry.def           # the tweak registry itself (one line = one tweak)
 ├── profiles/*.conf               # the profiles shipped with the module
 ├── apps/*.conf                   # example per-app rules + a template
@@ -137,6 +141,7 @@ section 3.
 ├── boot_count                    # bootloop protection
 ├── display_state                 # a resolution cache for `status --json` (no binder)
 ├── metrics/, metrics.conf, metrics.on, pxtune-metrics.pid
+├── doze.on, doze.conf, pxtune-doze.pid
 ├── zram.conf                     # optional, only ZRAM_DISKSIZE (see section 9)
 ├── DISABLE                       # exists = the module turns itself off at boot
 ├── res_pending                   # waiting for a resolution change to be confirmed
@@ -620,6 +625,7 @@ CLI-only (`pxtune log`, `pxtune res`, `pxtune metrics`, `pxtune revert`).
 | `pxtune app …` | Per-app rules — section 6. |
 | `pxtune tweak …` | The tweak registry — below. |
 | `pxtune metrics …` | The sampler — section 7. |
+| `pxtune doze <on\|off\|status>` | The sleep helper — section 8. |
 | `pxtune zram writeback [sec]` | Push idle zram pages out to disk (default 3600 s). |
 | `pxtune dexopt <package>` | `pm compile -m speed -f <pkg>` (full AOT compilation). |
 | `pxtune thermal explain` | The skin temperature against the VIRTUAL-SKIN thresholds, and what happens when they are crossed. |
@@ -783,7 +789,66 @@ anything on my usage" instead of guessing.
 
 ---
 
-## 8. volkeys and the home-screen shortcut
+## 8. Sleeping, volkeys and the home-screen shortcut
+
+### `pxtune doze` — letting the phone actually suspend
+
+This does **not** implement Android Doze. Android already has that and it works.
+What this removes is the thing that *blocks* it: a permanent
+`PARTIAL_WAKE_LOCK` held by an app you run on purpose.
+
+Measured on this device while Termux held `termux:service-wakelock`
+continuously (a remote-control bot plus an SSH tunnel):
+
+| | measured |
+|---|---|
+| `/sys/power/suspend_stats/success` | **0** — the SoC never suspended, not once, in a whole boot |
+| idle drain, screen off | **133 mA median** (207 mA mean) |
+| skin temperature at rest | 33-34 °C instead of ambient |
+| for comparison, real suspend | roughly 15-30 mA |
+
+No third-party "doze module" fixes that, because nothing overrides a partial
+wake lock held by a running app — the only thing that helps is releasing it.
+
+```sh
+su -c 'pxtune doze status'    # suspends so far, who holds a wake lock, config
+su -c 'pxtune doze on'        # enable
+su -c 'pxtune doze off'       # disable AND re-acquire the wake lock
+```
+
+How it behaves:
+
+| Situation | What it does |
+|---|---|
+| Screen on | Holds the wake lock, polls every `POLL_ON` s |
+| Screen off, less than `DELAY_SEC` | Still holds it — short screen-offs do not cut a running session |
+| Screen off, charging, `KEEP_WHEN_CHARGING=1` | Stays awake: there is no battery to save and the phone stays reachable |
+| Screen off past `DELAY_SEC` | **Releases** the wake lock → the phone can suspend |
+| Screen back on | Re-acquires it and logs how many suspend cycles happened |
+
+The poll loop is a plain `sleep` on purpose: a plain sleep arms no RTC alarm, so
+it cannot wake the device. While the phone is suspended the loop is frozen along
+with everything else and costs nothing.
+
+Configuration in `/data/adb/pixel_tune/doze.conf` (read through a whitelist, not
+sourced):
+
+```sh
+DELAY_SEC=300          # screen off for this long before the lock is released
+KEEP_WHEN_CHARGING=1   # 1 = stay awake while charging
+POLL_ON=30             # poll period with the screen on
+POLL_OFF=60            # poll period with the screen off
+WAKELOCK=termux        # which foreign lock to manage: termux | none
+TERMUX_UID=10384       # changes when Termux is reinstalled
+```
+
+**The trade-off is real and you should know it:** while the wake lock is
+released, anything that depends on the phone being awake — a polling bot, an SSH
+tunnel — only responds once something else wakes the device. That is why the
+release is delayed, why charging can keep it awake, and why `off`, a SIGTERM and
+`uninstall.sh` all re-acquire the lock.
+
+### volkeys
 
 `volkeys.sh` is a small root daemon started by `service.sh`:
 
@@ -1234,6 +1299,8 @@ competes with them nor replaces them.
 | **A benchmark shows worse numbers than last time** | Recovery from throttling takes **~84 s** and nothing is released during the first 60 s. Leave at least 2 minutes of quiet between runs. |
 | **It only charges to 80 %** | `su -c 'pxtune charge off'`. Check the profile too — **`night` sets 80 % by itself** and does so again on every switch. |
 | **zram has a different size than I expect** | Check `/data/adb/pixel_tune/zram.conf`. Without it zram is not touched. The reason for a skip (the OOM guard, `boot_count ≥ 2`, a value out of range) is in the log. |
+| **The phone is warm all the time and never cools down** | `su -c 'pxtune doze status'`. If `suspends OK` is 0, something holds a permanent wake lock and the SoC never sleeps — the list of holders is printed right underneath. Section 8. |
+| **Termux (or another terminal app) gets killed at random** | Android kills apps that spawn too many "phantom" child processes. The `power.phantom_procs` tweak turns that monitoring off. |
 | **The volume long-press does nothing** | `volkeys.log`. The torch needs Termux and the right `TERMUX_UID` in `volkeys.sh` — that uid changes when Termux is reinstalled. |
 | **`pxtune` exited with code 1 / 2** | 1 = an argument error (unknown command, profile or preset, a value out of range). 2 = a runtime error (a write failed, `settings`/`cmd` is missing, the selftest found missing paths). |
 | **Something is broken and I do not know what** | `su -c 'pxtune revert'` and `su -c 'pxtune tweak reset-all'`. Both restore stock and delete nothing. |

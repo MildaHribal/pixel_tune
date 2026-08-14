@@ -3112,6 +3112,12 @@ pxtune $PXTUNE_VERSION - a kernel manager for the Pixel 8a (Tensor G3)
   pxtune app <list|show|set|rm|sync|json>
                                 per-app profiles (bin/pxtune-perapp)
                                 'app enter <pkg>' / 'app leave' are INTERNAL (the daemon)
+  pxtune tweak <list|info|set|reset|reset-all|json|selftest>
+                                individual kernel/system tweaks (bin/pxtune-tweaks)
+  pxtune metrics <start|stop|status|dump|summary|purge>
+                                battery / power draw / temperature sampling
+  pxtune doze <on|off|status>   let the phone suspend: releases a foreign wake lock
+                                (Termux) once the screen has been off long enough
   pxtune auto <on|off|status>   the adaptive daemon (independent of manual_override)
   pxtune log [-n N]             print the log (default 50 lines)
   pxtune selftest               verify all the paths from the SPEC
@@ -3221,6 +3227,15 @@ main() {
 				exec "$_pa" "$@"
 			fi
 			warn "pxtune: bin/pxtune-perapp not found"
+			exit 2
+			;;
+		doze)
+			_pd="$(dirname "$0")/pxtune-doze"
+			[ -x "$_pd" ] || _pd=/data/adb/modules/pixel_tune/bin/pxtune-doze
+			if [ -x "$_pd" ]; then
+				exec "$_pd" "$@"
+			fi
+			warn "pxtune: bin/pxtune-doze not found"
 			exit 2
 			;;
 		tweak)

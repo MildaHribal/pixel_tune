@@ -248,10 +248,12 @@ ui.vib_context_settlingtime|ui|prop|persist.vendor.vibrator.hal.context.settling
 # ===========================================================================
 power.app_standby_enabled|batt|settings|global/app_standby_enabled|bool|1||App Standby|Android puts apps you have not used for a long time to sleep by itself and limits their background work and network access. Turning it off (0) lets all apps run freely - it can fix missed notifications from problematic apps, but it noticeably raises standby power draw. It is one of the main reasons a Pixel barely draws anything while idle.
 power.adaptive_battery_management_enabled|batt|settings|global/adaptive_battery_management_enabled|bool|1||Adaptive Battery|Machine learning that predicts which apps you are about to use and cuts background work for the rest. Turning it off (0) improves notification delivery and removes unpredictable behaviour in apps you use only occasionally, but takes away from battery life.
+power.phantom_procs|batt|settings|global/settings_enable_monitor_phantom_procs|enum:true,false|1||Kill background child processes|Since Android 12 the system counts the child processes an app spawns ("phantom processes") and kills the app once it goes over the limit, even when the app is holding a wake lock. On a phone that runs terminal tooling (Termux with an SSH tunnel, a bot, root scripts) this shows up as the whole app tree dying at random, taking the remote access with it. false disables the monitoring; the cost is that a runaway background process is no longer stopped for you. Verified on this device: the Termux tree was killed while several root shells were open, sshd kept the port open but stopped answering.
 
 # ===========================================================================
 # Display
 # ===========================================================================
+disp.screen_off_timeout|disp|settings|system/screen_off_timeout|enum:15000,30000,60000,120000,300000,600000,1800000|0||Screen timeout (ms)|How long the display stays on after the last touch. It is the single largest source of heat and drain on this phone: measured over 63 hours, the screen was on 41 % of the time and 94 % of the minutes with the battery above 40 C had the screen on. 1800000 is 30 minutes, which means the phone lies on the desk lit up for half an hour; 60000-120000 is the reasonable range. The same setting is in Settings > Display.
 
 # ===========================================================================
 # Experimental - the effect on THIS build is not documented

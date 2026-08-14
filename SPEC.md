@@ -49,6 +49,7 @@ the deployment is not changing.** No _further_ overlay is added.
 ├── bin/pxtune-tweaks             # the tweak registry engine (sourced lazily)
 ├── bin/pxtune-perapp             # per-app rules
 ├── bin/pxtune-metrics            # the battery/power/temperature sampler
+├── bin/pxtune-doze               # the sleep helper (releases a foreign wake lock)
 ├── tweaks/registry.def           # the tweak registry
 ├── profiles/*.conf               # the profiles shipped with the module
 ├── apps/*.conf                   # example per-app rules + a template
@@ -66,6 +67,7 @@ the deployment is not changing.** No _further_ overlay is added.
 ├── boot_count                    # bootloop protection
 ├── DISABLE                       # exists = post-fs-data.sh and service.sh bail out
 ├── res_pending                   # waiting for a resolution change to be confirmed
+├── doze.on, doze.conf
 ├── metrics/, metrics.conf, metrics.on
 └── pxtune.log
 ```
@@ -576,6 +578,7 @@ pxtune game <package> <mode>  # a wrapper around cmd game
 pxtune app <list|show|set|rm|sync|json>
 pxtune tweak <list|info|get|set|reset|reset-all|json|apply-boot|selftest>
 pxtune metrics <start|stop|status|dump|summary|purge>
+pxtune doze <on|off|status>
 pxtune log [-n N]
 pxtune selftest               # verifies that all the paths exist and are writable
 ```
@@ -626,6 +629,27 @@ distinguishes the mode by the `status` field, not by the sign of the current.
 gamestamp is a rate limit for `GAME_APPLY=enter` and keeps the last game in it
 long after you have left it (without this, `pogo` kept sticking to the CSV even
 when no rule was running).
+
+## CONTRACT: the sleep helper (`pxtune doze`)
+
+Measured on this device 2026-08-14: with Termux holding
+`termux:service-wakelock` permanently, `/sys/power/suspend_stats/success` was
+**0** for a whole boot - the SoC never suspended once. The idle drain with the
+screen off was **133 mA median / 207 mA mean** (401 intervals from
+`pxtune metrics`), against roughly 15-30 mA for a Pixel 8a in real suspend, and
+the skin sat at 33-34 C instead of ambient.
+
+- **Off until somebody turns it on.** `pxtune doze on` creates `$STATE/doze.on`;
+  `service.sh` starts it after a boot solely based on that file existing.
+- It manages a **foreign** wake lock (an app's, not its own). Every exit path -
+  `off`, SIGTERM, the flag disappearing, `uninstall.sh` - **re-acquires** it.
+  Leaving the phone without a lock somebody else took is not acceptable.
+- The wake lock is released only after the screen has been off for `DELAY_SEC`
+  and, with `KEEP_WHEN_CHARGING=1`, only off the charger.
+- **The poll loop must use a plain `sleep`, never an RTC alarm.** A plain sleep
+  does not wake the device; during suspend the loop is frozen and costs nothing.
+  Anything that arms `/sys/class/rtc/rtc0/wakealarm` would defeat the purpose.
+- Configuration `$STATE/doze.conf` is read through a whitelist, **not sourced**.
 
 ## CONTRACT: the log
 

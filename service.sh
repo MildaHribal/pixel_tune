@@ -394,6 +394,31 @@ if [ -f "$STATE/metrics.on" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 6bb) The doze helper (lets the phone actually suspend).
+#
+# Started ONLY when the user enabled it (`pxtune doze on` creates
+# $STATE/doze.on). It releases the foreign Termux wake lock once the screen has
+# been off long enough, so the SoC can enter suspend at all; without it, the
+# permanent wake lock keeps the phone awake 100 % of the time.
+#
+# Failure is NON-FATAL: the phone must boot even when the helper does not start.
+# ---------------------------------------------------------------------------
+DOZED="$BIN/pxtune-doze"
+if [ -f "$STATE/doze.on" ]; then
+	if [ ! -x "$DOZED" ]; then
+		log WARN "service: doze.on exists, but $DOZED is not executable — not started"
+	else
+		"$DOZED" on >/dev/null 2>&1
+		DOZE_PID=$(cat "$STATE/pxtune-doze.pid" 2>/dev/null | tr -dc '0-9')
+		if [ -n "$DOZE_PID" ] && [ -d "/proc/$DOZE_PID" ]; then
+			log INFO "service: pxtune-doze is running (pid $DOZE_PID)"
+		else
+			log WARN "service: pxtune-doze could not be started"
+		fi
+	fi
+fi
+
+# ---------------------------------------------------------------------------
 # 6c) volkeys — long-press on the volume keys (Volume UP → the pixel_tune WebUI,
 #     Volume DOWN → the torch; works with the screen off too).
 #     Runs as root (getevent) and calls the torch through termux-torch.
